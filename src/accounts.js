@@ -60,7 +60,6 @@ let importing = false; // 本机导入 / 文件导入导出进行中（防重入
 const groupRefreshing = new Set(); // 组内整体刷新进行中的组（"cursor" / "codex"）
 const refreshingIds = new Set();
 const rowErrors = new Map();
-const deleteTimers = new Map(); // 两步删除确认：id -> 超时句柄
 
 let modalKind = "cursor";
 let editingId = null;
@@ -598,6 +597,7 @@ function accountRow(account) {
   // 账户列：列宽固定，各行超长省略号截断，悬停看全文。
   // Cursor 为三行（主显示 / 邮箱 / 打码 token），Codex 为两行（备注 / 打码 token）。
   const accountCell = document.createElement("td");
+  accountCell.className = "account-cell";
   const ident = document.createElement("div");
   ident.className = "account-ident";
   const note = document.createElement("span");
@@ -658,12 +658,10 @@ function accountRow(account) {
   const editBtn = iconAction("edit", "编辑");
   editBtn.disabled = busy || switching;
   editBtn.addEventListener("click", () => openModal(account));
-  // 删除两步确认：首次点击进入红色警示态，3 秒内再点才真正删除
-  const armed = deleteTimers.has(account.id);
-  const deleteBtn = iconAction("delete", armed ? "再次点击确认删除" : "删除");
-  deleteBtn.classList.toggle("danger", armed);
+  // 删除使用显式确认弹窗，避免首次点击只变色而看起来没有响应。
+  const deleteBtn = iconAction("delete", "删除");
   deleteBtn.disabled = busy || switching;
-  deleteBtn.addEventListener("click", () => onDeleteClick(account.id));
+  deleteBtn.addEventListener("click", () => { void onDeleteClick(account.id); });
   if (account.kind === "cursor") {
     // 仅允许切换已验证有效的账户，避免把失效 token 写进本地 Cursor
     const aliveOk = !!(account.status && account.status.alive === true);
@@ -766,12 +764,6 @@ function applyView(view) {
   el("#accounts-interval").value = String(intervalMinutes);
   // 清理已被移除账户的瞬态状态
   const ids = new Set(accounts.map((a) => a.id));
-  for (const [id, handle] of deleteTimers) {
-    if (!ids.has(id)) {
-      clearTimeout(handle);
-      deleteTimers.delete(id);
-    }
-  }
   for (const id of [...rowErrors.keys()]) {
     if (!ids.has(id)) rowErrors.delete(id);
   }
@@ -893,22 +885,21 @@ export async function setRefreshInterval(minutes) {
   return intervalMinutes;
 }
 
-/* ---------- 删除（两步确认） ---------- */
+/* ---------- 删除（显式确认） ---------- */
 
-function onDeleteClick(id) {
-  const armed = deleteTimers.get(id);
-  if (armed != null) {
-    clearTimeout(armed);
-    deleteTimers.delete(id);
-    void doDelete(id);
-    return;
-  }
-  const handle = setTimeout(() => {
-    deleteTimers.delete(id);
-    render();
-  }, 3000);
-  deleteTimers.set(id, handle);
-  render();
+async function onDeleteClick(id) {
+  if (switching || refreshingIds.has(id)) return;
+  const account = accounts.find((item) => item.id === id);
+  if (!account) return;
+  const name = String(account.note || (account.status && account.status.name) || "未命名账户").trim();
+  const ok = await switchModal.toConfirm({
+    title: "删除账户",
+    body: `确定删除“${name}”吗？此操作无法撤销。`,
+    confirmText: "删除",
+    danger: true,
+  });
+  switchModal.close();
+  if (ok) await doDelete(id);
 }
 
 async function doDelete(id) {
@@ -925,7 +916,7 @@ async function doDelete(id) {
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
 
 /**
- * 切换流程专用弹窗（#switch-modal）：确认 → 分步进度 → 结果在同一弹窗内完成。
+ * 账户操作弹窗（#switch-modal）：删除确认，以及切换账户的确认 → 分步进度 → 结果。
  * busy 阶段（openBusy / toSteps 之后、finish 之前）忽略 Esc 与关闭按钮，防止流程中途被关；
  * 事件由 initAccounts 一次性绑定，按当前阶段分发。
  */

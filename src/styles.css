@@ -439,13 +439,6 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
 }
 .icon-action:disabled { opacity: 0.4; cursor: not-allowed; }
 .icon-action + .icon-action { margin-left: 4px; }
-/* 删除的两步确认警示态 */
-.icon-action.danger,
-.icon-action.danger:hover:not(:disabled) {
-  color: var(--bad);
-  border-color: var(--bad);
-  background: var(--bad-soft);
-}
 /* 刷新中图标旋转 */
 .icon-action.busy svg { animation: icon-spin 0.9s linear infinite; }
 @keyframes icon-spin { to { transform: rotate(360deg); } }
@@ -744,12 +737,30 @@ tbody tr:hover { background: var(--surface-2); }
 .ondemand-used { font-weight: 550; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 .ondemand-limit { margin-top: 2px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* 账户列纵向多行（主显示 / 可选邮箱 / 打码 token），逐行省略号截断 */
-.accounts-table .account-ident { flex-direction: column; align-items: stretch; gap: 2px; }
-.accounts-table .account-note {
+.accounts-table .account-cell { overflow: hidden; }
+.accounts-table .account-ident {
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  flex-flow: column nowrap;
+  align-items: stretch;
+  gap: 2px;
+}
+.accounts-table .account-note {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.accounts-table .account-email {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .masked-token {
   display: inline-block;
@@ -1169,11 +1180,11 @@ input.price-input {
 .modal-divider { border: 0; border-top: 1px solid var(--border); margin: 18px 0 2px; }
 .row > .grow { flex: 1; width: auto; min-width: 220px; }
 
-/* 确认弹窗的危险确认键（如「关闭并切换」） */
+/* 确认弹窗的危险确认键（如「删除」「关闭并切换」） */
 button.primary.danger { background: var(--bad); box-shadow: none; }
 #proxy-url:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* 切换账户弹窗：步骤列表，图标四态 = 待办空心圆 / 进行中旋转圈 / 完成绿勾 / 失败红叉 */
+/* 账户操作弹窗中的切换步骤列表：待办空心圆 / 进行中旋转圈 / 完成绿勾 / 失败红叉 */
 .switch-steps { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 4px; }
 .switch-step {
   display: flex;
