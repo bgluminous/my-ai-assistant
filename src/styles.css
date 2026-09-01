@@ -419,10 +419,15 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
 
 /* 账户表操作列：紧凑图标按钮，含义放悬停提示（title / aria-label） */
 .icon-action {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
+  padding: 0;
+  line-height: 0;
+  appearance: none;
+  -webkit-appearance: none;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -431,7 +436,7 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
   vertical-align: middle;
   transition: color 0.15s, border-color 0.15s, background-color 0.15s;
 }
-.icon-action svg { width: 14px; height: 14px; }
+.icon-action svg { display: block; flex: none; width: 14px; height: 14px; }
 .icon-action:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);

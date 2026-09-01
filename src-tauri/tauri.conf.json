@@ -7,6 +7,7 @@
     "frontendDist": "../src"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
@@ -26,6 +27,8 @@
         "height": 520,
         "resizable": false,
         "decorations": false,
+        "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false

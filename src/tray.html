@@ -18,9 +18,11 @@
     <link rel="stylesheet" href="styles.css" />
     <style>
       /* 托盘面板：小尺寸无边框窗口，整体是一张卡片 */
-      html, body { height: 100%; }
+      html, body {
+        height: 100%;
+        background: transparent;
+      }
       body {
-        background: var(--surface);
         overflow: hidden;
       }
       .tray-panel {
@@ -125,19 +127,13 @@
       .tray-bar.q-ok .tray-bar-val { color: var(--ok); }
       .tray-bar.q-warn .tray-bar-val { color: var(--warn); }
       .tray-bar.q-low .tray-bar-val { color: var(--bad); }
-      /* 刷新 + 切换：图标按钮上下排列，略小于主窗口以免撑高账户行 */
+      /* 刷新 + 切换：上下排列，按钮与标题栏复用同一尺寸，保证相同图标的像素对齐一致 */
       .tray-actions {
         display: flex;
         flex-direction: column;
         gap: 4px;
         flex-shrink: 0;
       }
-      .tray-actions .icon-action {
-        width: 24px;
-        height: 24px;
-        border-radius: 7px;
-      }
-      .tray-actions .icon-action svg { width: 13px; height: 13px; }
       .tray-actions .icon-action + .icon-action { margin-left: 0; }
       .tray-empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 12.5px; }
       /* 总览页：今日用量合计 + 分来源明细 */
@@ -156,8 +152,17 @@
         border-bottom: 1px solid var(--border);
         font-size: 12px;
       }
-      .tray-ov-main { min-width: 0; flex: 1; }
-      .tray-ov-name { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-ov-main { min-width: 0; flex: 1; overflow: hidden; }
+      .tray-ov-name {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        color: var(--text-strong);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .tray-ov-err {
         margin-top: 2px;
         font-size: 11px;

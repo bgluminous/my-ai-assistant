@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, setupDesktopGuards } from "./shared.js";
-import { membershipLabel, codexPlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief } from "./accounts.js";
+import { membershipLabel, codexPlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./accounts.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -46,6 +46,18 @@ function iconAction(icon, label) {
   btn.title = label;
   btn.setAttribute("aria-label", label);
   return btn;
+}
+
+/** 托盘紧凑账户名：优先可读身份；自动生成的 Cursor user_id 采用两端保留的省略格式。 */
+function trayAccountLabel(account) {
+  const note = String((account && account.note) || "").trim();
+  if (!account || account.kind !== "cursor") return note || "未命名账户";
+  const status = account.status || null;
+  const statusName = String((status && status.name) || "").trim();
+  const statusEmail = String((status && status.email) || "").trim();
+  const label = (account.noteAuto === false ? note : "") || statusName || statusEmail || note;
+  const looksLikeCredential = label.startsWith("user_") || label.includes("::") || label.split(".").length === 3;
+  return looksLikeCredential ? maskToken(label) : label || "未命名账户";
 }
 
 function syncHeaderRefresh() {
@@ -192,8 +204,9 @@ function accountRow(account) {
   noteLine.className = "tray-note";
   const note = document.createElement("span");
   note.className = "tray-note-text";
-  note.textContent = account.note || "未命名账户";
-  note.title = account.note || "";
+  const label = trayAccountLabel(account);
+  note.textContent = label;
+  note.title = label;
   noteLine.append(note);
   main.append(noteLine);
 
@@ -911,7 +924,7 @@ function buildOverviewData(ymd) {
   let totalUsd = 0;
 
   for (const a of cursorAccounts) {
-    const label = a.note || "未命名账户";
+    const label = trayAccountLabel(a);
     const dayHit = peekAggForDay(a.id, ymd);
     const seriesHit = peekAggSeries(a.id, ymd);
     if (!dayHit && !seriesHit) continue;
@@ -968,7 +981,7 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
     if (row) {
       row.error = err;
     } else {
-      data.rows.push({ id: a.id, name: a.note || "未命名账户", tokens: 0, usd: 0, error: err, empty: true });
+      data.rows.push({ id: a.id, name: trayAccountLabel(a), tokens: 0, usd: 0, error: err, empty: true });
     }
   }
   if (fetchErrors.has("local")) {

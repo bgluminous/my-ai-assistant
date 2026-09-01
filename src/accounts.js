@@ -100,7 +100,7 @@ export async function setUsageInterval(minutes) {
 
 /* ---------- 格式化 ---------- */
 
-function maskToken(token) {
+export function maskToken(token) {
   const t = String(token || "").trim();
   if (!t) return "—";
   if (t.length > 20) return `${t.slice(0, 12)}…${t.slice(-4)}`;
