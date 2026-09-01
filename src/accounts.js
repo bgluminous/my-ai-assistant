@@ -108,13 +108,6 @@ function maskToken(token) {
   return `${t.slice(0, 4)}…`;
 }
 
-/** Cursor token 的 user_xxx 前缀（账号标识，非凭据，可完整展示）；无 :: 前缀时返回空串。 */
-function cursorUserId(token) {
-  const t = String(token || "").trim();
-  const idx = t.indexOf("::");
-  return idx > 0 ? t.slice(0, idx).trim() : "";
-}
-
 function fmtNum(value) {
   const n = Number(value);
   if (value == null || !Number.isFinite(n)) return "—";
@@ -603,7 +596,7 @@ function accountRow(account) {
   const busy = refreshingIds.has(account.id);
 
   // 账户列：列宽固定，各行超长省略号截断，悬停看全文。
-  // Cursor 为三行（主显示 / 邮箱 / user_xxx 用户 ID），Codex 为两行（备注 / 打码 token）。
+  // Cursor 为三行（主显示 / 邮箱 / 打码 token），Codex 为两行（备注 / 打码 token）。
   const accountCell = document.createElement("td");
   const ident = document.createElement("div");
   ident.className = "account-ident";
@@ -627,9 +620,8 @@ function accountRow(account) {
       emailSpan.title = email;
       ident.append(emailSpan);
     }
-    // 用户 ID 非凭据，完整展示；token 无 user_xxx 前缀时回退打码 token
-    const uid = cursorUserId(account.token);
-    token.textContent = uid || maskToken(account.token);
+    // 与 Codex 一致，仅展示保留两端、中间省略的打码 token
+    token.textContent = maskToken(account.token);
     token.title = token.textContent;
   } else {
     note.textContent = account.note || "未命名账户";

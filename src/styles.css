@@ -743,7 +743,7 @@ tbody tr:hover { background: var(--surface-2); }
 /* 超额（Cursor）/ Credits（Codex）列：主行为金额或余额，次行小字为上限或点数 */
 .ondemand-used { font-weight: 550; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 .ondemand-limit { margin-top: 2px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-/* 账户列纵向多行（主显示 / 邮箱 / 用户 ID），逐行省略号截断 */
+/* 账户列纵向多行（主显示 / 可选邮箱 / 打码 token），逐行省略号截断 */
 .accounts-table .account-ident { flex-direction: column; align-items: stretch; gap: 2px; }
 .accounts-table .account-note {
   min-width: 0;
