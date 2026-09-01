@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 助手 · 用量与费用</title>
+    <script>
+      // 在样式解析前恢复主题偏好，避免闪烁。
+      (function () {
+        try {
+          var t = localStorage.getItem("theme");
+          document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          <div>
+            <h1>AI 助手 · 用量与费用</h1>
+            <p class="subtitle">Cursor / ChatGPT 用量统计、图表与按官方 API 价格折算的等价费用。</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="pricing-chip" class="chip" type="button" title="点击复制价格表路径">价格表：—</button>
+          <button id="proxy-btn" class="icon-btn" type="button" title="代理设置" aria-label="代理设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
+          </button>
+          <button id="settings-btn" class="icon-btn" type="button" title="设置" aria-label="设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+          <button id="theme-toggle" class="icon-btn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <nav class="tabs" role="tablist" aria-label="功能">
+        <button class="tab" role="tab" data-panel="accounts-panel" aria-selected="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>账户管理</span>
+        </button>
+        <button class="tab" role="tab" data-panel="usage-panel" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>用量统计</span>
+        </button>
+        <button class="tab" role="tab" data-panel="audit-panel" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          <span>审计日志</span>
+        </button>
+        <button class="tab" role="tab" data-panel="about-panel" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          <span>关于</span>
+        </button>
+      </nav>
+
+      <!-- ============ 账户管理 ============ -->
+      <section id="accounts-panel" class="panel" role="tabpanel">
+        <div class="surface">
+          <div class="section-heading">
+            <h3><span class="tag kind-cursor">Cursor</span> 账户</h3>
+            <div class="heading-side">
+              <span id="accounts-count-cursor" class="muted small"></span>
+              <div class="heading-actions">
+                <button id="accounts-refresh-cursor" class="icon-action" type="button" title="刷新全部 Cursor 账户" aria-label="刷新全部 Cursor 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </button>
+                <button id="accounts-import-cursor" class="icon-action" type="button" title="从文件导入 Cursor 账户" aria-label="从文件导入 Cursor 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </button>
+                <button id="accounts-export-cursor" class="icon-action" type="button" title="导出 Cursor 账户" aria-label="导出 Cursor 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </button>
+                <button id="accounts-add-cursor" class="icon-action" type="button" title="添加 Cursor 账户" aria-label="添加 Cursor 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <colgroup>
+                <col class="col-account" /><col class="col-state" /><col class="col-plan" /><col /><col class="col-ondemand" /><col class="col-time" /><col class="col-actions" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>套餐</th><th>用量摘要</th><th>超额</th><th>上次刷新</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="accounts-body-cursor"></tbody>
+            </table>
+            <p id="accounts-empty-cursor" class="muted empty" hidden>暂无 Cursor 账户。</p>
+          </div>
+        </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <h3><span class="tag kind-codex">ChatGPT</span> 账户</h3>
+            <div class="heading-side">
+              <span id="accounts-count-codex" class="muted small"></span>
+              <div class="heading-actions">
+                <button id="accounts-refresh-codex" class="icon-action" type="button" title="刷新全部 ChatGPT 账户" aria-label="刷新全部 ChatGPT 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </button>
+                <button id="accounts-import-codex" class="icon-action" type="button" title="从文件导入 ChatGPT 账户" aria-label="从文件导入 ChatGPT 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </button>
+                <button id="accounts-export-codex" class="icon-action" type="button" title="导出 ChatGPT 账户" aria-label="导出 ChatGPT 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </button>
+                <button id="accounts-add-codex" class="icon-action" type="button" title="添加 ChatGPT 账户" aria-label="添加 ChatGPT 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <!-- 列结构与 Cursor 表完全一致（Credits 对应超额列位），上下两卡片列对齐 -->
+              <colgroup>
+                <col class="col-account" /><col class="col-state" /><col class="col-plan" /><col /><col class="col-ondemand" /><col class="col-time" /><col class="col-actions" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>套餐</th><th>用量摘要</th><th>Credits</th><th>上次刷新</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="accounts-body-codex"></tbody>
+            </table>
+            <p id="accounts-empty-codex" class="muted empty" hidden>暂无 ChatGPT 账户。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 用量统计 ============ -->
+      <section id="usage-panel" class="panel" role="tabpanel" hidden>
+        <div class="surface">
+          <div id="usage-sources" class="chip-row" role="group" aria-label="统计对象"></div>
+          <div class="row">
+            <label class="inline" id="usage-range-wrap">时间范围
+              <select id="usage-range">
+                <option value="7">近 7 天</option>
+                <option value="30" selected>近 30 天</option>
+                <option value="90">近 90 天</option>
+                <option value="0">全部</option>
+              </select>
+            </label>
+            <label class="inline" title="独立于账户状态的定时刷新，按间隔自动重新统计当前视图">自动更新
+              <select id="usage-interval">
+                <option value="0" selected>关闭</option>
+                <option value="5">5 分钟</option>
+                <option value="15">15 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">60 分钟</option>
+              </select>
+            </label>
+            <button id="usage-refresh" class="secondary" type="button">刷新</button>
+            <span id="usage-updated" class="muted small"></span>
+          </div>
+        </div>
+
+        <!-- 总览：各来源（Cursor 账户 + 本地 Codex 分析）账单小计 -->
+        <section id="usage-overview" class="surface" hidden>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT 为本机日志分析，无实扣金额</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>套餐</th><th class="num">总 Token</th><th class="num">实际支出</th><th class="num">等价费用</th><th class="num">倍数</th>
+                </tr>
+              </thead>
+              <tbody id="usage-overview-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 本地 Codex 用量分析：扫描本机会话日志折算等价费用 -->
+        <div id="usage-local-form" class="surface" hidden>
+          <div class="row wrap">
+            <label class="inline">统计范围（天）
+              <input id="usage-codex-days" type="number" min="0" value="30" />
+            </label>
+            <label class="inline">CODEX_HOME
+              <input id="usage-codex-home" type="text" spellcheck="false" placeholder="留空使用默认 ~/.codex" />
+            </label>
+            <button id="usage-codex-scan" class="secondary" type="button">重新扫描</button>
+          </div>
+          <p class="muted small">统计本机会话日志的 token 用量并按官方 API 价折算，为本机所有 ChatGPT 登录的合并结果（日志不含账户标识）；账户额度与套餐见「账户管理」。</p>
+        </div>
+
+        <!-- 统计结果（Cursor 聚合 / Codex 本地扫描共用） -->
+        <section id="usage-results" class="surface" hidden>
+          <div class="cards">
+            <div class="card highlight">
+              <span class="card-label">总等价费用（官方 API 价）</span>
+              <span id="sum-equivalent" class="card-value">—</span>
+            </div>
+            <div class="card" id="card-actual">
+              <span class="card-label">实际支出（Cursor）</span>
+              <span id="sum-actual" class="card-value">—</span>
+            </div>
+            <div class="card" id="card-plan" hidden>
+              <span class="card-label">套餐月费 · 等价倍数</span>
+              <span id="sum-plan" class="card-value">—</span>
+            </div>
+            <div class="card">
+              <span class="card-label">总 Token</span>
+              <span id="sum-tokens" class="card-value">—</span>
+            </div>
+            <div class="card">
+              <span class="card-label">未定价模型</span>
+              <span id="sum-unpriced" class="card-value">—</span>
+            </div>
+          </div>
+          <div id="usage-meta" class="muted small"></div>
+          <div id="usage-breakdown" class="cost-breakdown" hidden></div>
+          <div class="charts">
+            <div class="chart-box chart-box-wide"><h4>按日 Token</h4><canvas id="chart-daily"></canvas></div>
+            <div class="chart-box"><h4>各模型等价费用（USD）</h4><canvas id="chart-bar"></canvas></div>
+            <div class="chart-box"><h4>Token 构成</h4><canvas id="chart-doughnut"></canvas></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>模型</th><th class="num">输入</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="num">输出</th><th class="num">合计 Token</th><th class="num">实扣</th><th class="num">等价 API 价</th>
+                </tr>
+              </thead>
+              <tbody id="usage-body"></tbody>
+            </table>
+          </div>
+          <p class="muted small usage-legend">明细表中每个 token 数下方为该项按官方价折算的等价费用，缓存读 / 缓存写费用单独列示。</p>
+        </section>
+      </section>
+
+      <!-- ============ 审计日志 ============ -->
+      <section id="audit-panel" class="panel" role="tabpanel" hidden>
+        <div class="surface">
+          <div class="row wrap">
+            <label class="inline">类型
+              <select id="audit-filter">
+                <option value="all" selected>全部</option>
+                <option value="account">账户变更</option>
+                <option value="state">状态与刷新</option>
+                <option value="renew">ChatGPT 续期</option>
+                <option value="settings">设置变更</option>
+              </select>
+            </label>
+            <button id="audit-refresh" class="secondary" type="button">刷新</button>
+            <button id="audit-clear" class="secondary" type="button">清空日志</button>
+            <span id="audit-count" class="muted small"></span>
+          </div>
+        </div>
+
+        <div class="surface">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>时间</th><th>类型</th><th>内容</th></tr>
+              </thead>
+              <tbody id="audit-body"></tbody>
+            </table>
+            <p id="audit-empty" class="muted empty" hidden>暂无日志记录。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 关于 ============ -->
+      <section id="about-panel" class="panel" role="tabpanel" hidden>
+        <div class="surface">
+          <div class="about-hero">
+            <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+            <div>
+              <h3>AI 助手 · 用量与费用</h3>
+              <p class="muted">个人用的桌面应用，用于管理 Cursor / ChatGPT 账户、统计用量与费用。</p>
+            </div>
+          </div>
+          <dl class="about-meta">
+            <div>
+              <dt>版本</dt>
+              <dd id="about-version">—</dd>
+            </div>
+            <div>
+              <dt>作者</dt>
+              <dd id="about-authors">—</dd>
+            </div>
+            <div>
+              <dt>技术栈</dt>
+              <dd>Tauri v2 / Rust / 原生 HTML·CSS·JS / Chart.js</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <h3>功能概览</h3>
+          </div>
+          <div class="cards about-feature-cards">
+            <div class="card">
+              <span class="card-label">账户管理</span>
+              <p class="about-card-text">保存 Cursor / ChatGPT 账户，查看套餐、额度与存活状态，支持定时刷新与一键切换。</p>
+            </div>
+            <div class="card">
+              <span class="card-label">用量统计</span>
+              <p class="about-card-text">按账户与模型汇总 Token，折算等价官方 API 费用，并绘制按日堆叠柱状图与模型图表。</p>
+            </div>
+            <div class="card">
+              <span class="card-label">审计日志</span>
+              <p class="about-card-text">记录账户变更、刷新失败与续期结果，可筛选与清空。</p>
+            </div>
+            <div class="card">
+              <span class="card-label">系统托盘</span>
+              <p class="about-card-text">关闭窗口后继续后台运行，托盘面板可查看额度并切换账户。</p>
+            </div>
+            <div class="card">
+              <span class="card-label">显示与代理</span>
+              <p class="about-card-text">可切换 Token 单位、配置客户端路径与网络代理。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <h3>使用说明</h3>
+          </div>
+          <ul class="about-notes">
+            <li>本应用调用 Cursor / OpenAI 的非公开内部接口，随时可能变动或失效。</li>
+            <li>Token 只发往官方域名，不会发到第三方。</li>
+            <li>仅供个人本地使用，请遵守相应服务条款并自担风险。</li>
+          </ul>
+        </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <h3>开源依赖与许可证</h3>
+          </div>
+          <div class="table-wrap">
+            <table class="about-deps">
+              <thead>
+                <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>tauri</td><td>2.11.5</td><td>桌面壳 / WebView</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-single-instance</td><td>2.4.3</td><td>单实例</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>serde</td><td>1.0.229</td><td>序列化</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>serde_json</td><td>1.0.151</td><td>JSON</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>reqwest</td><td>0.12.28</td><td>HTTP 客户端</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>base64</td><td>0.22.1</td><td>Base64</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>chrono</td><td>0.4.45</td><td>日期时间</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>walkdir</td><td>2.5.0</td><td>扫描本机会话目录</td><td>Unlicense OR MIT</td></tr>
+                <tr><td>rusqlite</td><td>0.40.2</td><td>SQLite 绑定</td><td>MIT</td></tr>
+                <tr><td>libsqlite3-sys</td><td>0.38.2</td><td>SQLite FFI（rusqlite 直接带入）</td><td>MIT</td></tr>
+                <tr><td>SQLite</td><td>bundled</td><td>rusqlite bundled 静态嵌入</td><td>公共领域</td></tr>
+                <tr><td>sha2</td><td>0.10.9</td><td>SHA-2</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>getrandom</td><td>0.2.17</td><td>系统随机数</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>tokio</td><td>1.53.1</td><td>异步运行时</td><td>MIT</td></tr>
+                <tr><td>chart.js</td><td>4.5.1</td><td>用量图表</td><td>MIT</td></tr>
+                <tr><td>@kurkle/color</td><td>0.3.4</td><td>Chart.js 颜色（随 UMD 打进 vendor）</td><td>MIT</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="muted small">仅列直接依赖与随包嵌入组件，不含传递依赖。版本取自当前 lockfile，升级依赖后需同步更新本表。</p>
+
+          <h4 class="about-dev-heading">构建 / 开发依赖</h4>
+          <p class="muted small about-dev-note">下列工具仅用于构建，不随安装包分发。</p>
+          <div class="table-wrap">
+            <table class="about-deps">
+              <thead>
+                <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>tauri-build</td><td>2.6.3</td><td>Cargo build.rs</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>@tauri-apps/cli</td><td>2.11.4</td><td>npm run tauri</td><td>Apache-2.0 OR MIT</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============ 价格表编辑弹窗 ============ -->
+    <div id="pricing-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pricing-modal-title">
+        <div class="modal-head">
+          <div>
+            <h3 id="pricing-modal-title">价格表 · 官方 API 单价</h3>
+            <p class="muted small">单价单位：美元 / 每百万 (1M) token。每个模型都可编辑 输入 / 输出 / 缓存读 / 缓存写。</p>
+          </div>
+          <button id="pricing-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-toolbar">
+          <input id="pricing-search" type="search" placeholder="搜索模型名" />
+          <span id="pricing-count" class="muted small"></span>
+          <button id="pricing-copy-path" class="secondary compact" type="button" title="复制 settings.json 路径">复制路径</button>
+        </div>
+
+        <div class="table-wrap pricing-table-wrap">
+          <table class="pricing-table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th class="num">输入</th>
+                <th class="num">输出</th>
+                <th class="num">缓存读</th>
+                <th class="num">缓存写</th>
+                <th>来源</th>
+                <th class="col-actions"></th>
+              </tr>
+            </thead>
+            <tbody id="pricing-body"></tbody>
+          </table>
+          <p id="pricing-empty" class="muted empty" hidden>没有匹配的模型。</p>
+        </div>
+
+        <div class="pricing-add">
+          <span class="pricing-add-title">新增模型</span>
+          <div class="pricing-add-grid">
+            <input id="add-key" type="text" spellcheck="false" placeholder="模型名，如 claude-sonnet-5" />
+            <input id="add-input" type="number" min="0" step="any" placeholder="输入" />
+            <input id="add-output" type="number" min="0" step="any" placeholder="输出" />
+            <input id="add-cacheRead" type="number" min="0" step="any" placeholder="缓存读" />
+            <input id="add-cacheWrite" type="number" min="0" step="any" placeholder="缓存写" />
+            <button id="pricing-add-btn" class="secondary compact" type="button">添加</button>
+          </div>
+        </div>
+
+        <p id="pricing-status" class="status" hidden></p>
+
+        <div class="modal-foot">
+          <button id="pricing-reset" class="secondary" type="button">重置为默认</button>
+          <div class="modal-actions">
+            <button id="pricing-cancel" class="secondary" type="button" data-close>关闭</button>
+            <button id="pricing-save" class="primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 设置弹窗 ============ -->
+    <div id="settings-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+        <div class="modal-head">
+          <div>
+            <h3 id="settings-modal-title">设置</h3>
+            <p class="muted small">应用设置，保存在本机。</p>
+          </div>
+          <button id="settings-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <label>Token 数量单位</label>
+          <div id="unit-mode" class="segmented segmented-full" role="group" aria-label="Token 数量单位">
+            <button class="seg" type="button" data-unit="full">完整数字</button>
+            <button class="seg" type="button" data-unit="en">K / M / B</button>
+            <button class="seg" type="button" data-unit="zh">万 / 亿</button>
+          </div>
+          <p class="muted small">示例：<span id="unit-sample"></span>；缩写时悬停数字可查看完整值。</p>
+
+          <hr class="modal-divider" />
+
+          <label for="accounts-interval">账户定时刷新</label>
+          <select id="accounts-interval" class="compact-select">
+            <option value="0" selected>关闭</option>
+            <option value="5">5 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">60 分钟</option>
+          </select>
+          <p class="muted small">按设定间隔自动刷新全部账户状态。</p>
+          <p id="interval-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
+          <label for="cursor-exe-path">Cursor 客户端路径</label>
+          <div class="row">
+            <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 Cursor.exe / Cursor.app 完整路径" />
+            <button id="cursor-detect" class="secondary compact" type="button">自动搜索</button>
+            <button id="cursor-scan-cancel" class="secondary compact" type="button" hidden>取消</button>
+          </div>
+          <p class="muted small">用于切换账户后启动 Cursor；留空则自动搜索常见安装位置。自动搜索会真实遍历磁盘目录，命中即填入，可随时取消；点「完成」保存。</p>
+          <p id="cursor-scan-progress" class="muted small scan-progress" hidden></p>
+          <p id="cursor-path-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
+          <label for="codex-exe-path">ChatGPT 客户端路径</label>
+          <div class="row">
+            <input id="codex-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 ChatGPT.exe / ChatGPT.app / Codex.app 完整路径" />
+            <button id="codex-detect" class="secondary compact" type="button">自动搜索</button>
+          </div>
+          <p class="muted small">用于切换账户后启动 ChatGPT；留空则自动检测 Microsoft Store / 常见安装位置。点「完成」保存。</p>
+          <p id="codex-path-status" class="status" hidden></p>
+        </div>
+
+        <div class="modal-foot">
+          <div class="modal-actions">
+            <button id="settings-done" class="primary" type="button">完成</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 代理设置弹窗 ============ -->
+    <div id="proxy-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="proxy-modal-title">
+        <div class="modal-head">
+          <div>
+            <h3 id="proxy-modal-title">代理设置</h3>
+            <p class="muted small">配置所有对 Cursor / OpenAI 请求所走的网络代理，保存后立即生效。</p>
+          </div>
+          <button id="proxy-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <label>代理模式</label>
+          <div id="proxy-mode" class="segmented segmented-full" role="group" aria-label="代理模式">
+            <button class="seg" type="button" data-mode="system">跟随系统</button>
+            <button class="seg" type="button" data-mode="direct">直连</button>
+            <button class="seg" type="button" data-mode="custom">自定义</button>
+          </div>
+
+          <label for="proxy-url">代理地址</label>
+          <input id="proxy-url" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
+          <p class="muted small">支持 http / https / socks5；需账号密码时用 <code>scheme://user:pass@host:port</code>。</p>
+
+          <div class="proxy-test-row">
+            <button id="proxy-test" class="secondary compact" type="button">测试连接</button>
+            <span id="proxy-test-result" class="muted small"></span>
+          </div>
+
+          <p id="proxy-status" class="status" hidden></p>
+        </div>
+
+        <div class="modal-foot">
+          <button id="proxy-copy-path" class="secondary compact" type="button" title="复制 settings.json 路径">复制配置路径</button>
+          <div class="modal-actions">
+            <button id="proxy-cancel" class="secondary" type="button" data-close>关闭</button>
+            <button id="proxy-save" class="primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 账户添加 / 编辑弹窗 ============ -->
+    <div id="account-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+        <div class="modal-head">
+          <div>
+            <h3 id="account-modal-title">添加账户</h3>
+            <p class="muted small">Token 仅保存在本地配置文件，用于查询账户状态与用量。</p>
+          </div>
+          <button id="account-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <label>账户类型</label>
+          <div id="account-kind" class="segmented segmented-full" role="group" aria-label="账户类型">
+            <button class="seg active" type="button" data-kind="cursor">Cursor</button>
+            <button class="seg" type="button" data-kind="codex">ChatGPT</button>
+          </div>
+
+          <label for="account-note">备注</label>
+          <input id="account-note" type="text" spellcheck="false" placeholder="给账户起个名字，便于区分（选填）" />
+
+          <label for="account-token">Token</label>
+          <textarea id="account-token" rows="3" spellcheck="false" placeholder="user_xxx::eyJ... 或 WorkosCursorSessionToken"></textarea>
+
+          <div id="account-refresh-field" hidden>
+            <label for="account-refresh-token">Refresh Token（选填）</label>
+            <textarea id="account-refresh-token" rows="3" spellcheck="false" placeholder="~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期"></textarea>
+          </div>
+
+          <p id="account-modal-status" class="status" hidden></p>
+        </div>
+
+        <div class="modal-foot">
+          <button id="account-import-local" class="secondary" type="button">从本机导入 Cursor</button>
+          <div class="modal-actions">
+            <button id="account-cancel" class="secondary" type="button" data-close>取消</button>
+            <button id="account-save" class="primary" type="button">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 切换账户流程弹窗 ============ -->
+    <!-- 遮罩与关闭按钮不带 data-close：流程进行中不可关闭，统一由 JS 控制 -->
+    <div id="switch-modal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="switch-modal-title">
+        <div class="modal-head">
+          <div><h3 id="switch-modal-title">切换账户</h3></div>
+          <button id="switch-close" class="icon-btn" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p id="switch-modal-body" class="muted"></p>
+          <div id="switch-steps" class="switch-steps" hidden></div>
+          <p id="switch-modal-status" class="status" hidden></p>
+        </div>
+        <div class="modal-foot">
+          <div class="modal-actions">
+            <button id="switch-cancel" class="secondary" type="button">取消</button>
+            <button id="switch-ok" class="primary" type="button">确认</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="vendor/chart.umd.min.js"></script>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

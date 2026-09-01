@@ -1,16 +1,18 @@
 # Build a Windows release of my-ai-assistant and pack it into a 7z archive.
 #
 # Usage:
-#   npm run release                # full build + pack
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 [-SkipBuild]
+#   npm run release:windows        # full build + pack
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild]
 #
 # Options:
 #   -SkipBuild   Reuse existing build output under src-tauri/target/release,
 #                only re-collect artifacts and recreate the 7z archive.
 #
-# Output:
-#   release/my-ai-assistant-v<version>-windows-x64/      staged files
-#   release/my-ai-assistant-v<version>-windows-x64.7z    final archive
+# Output (kept after the script finishes):
+#   release/my-ai-assistant-v<version>-windows-x64/      portable exe, NSIS, MSI
+#   release/my-ai-assistant-v<version>-windows-x64.7z    archive of the staged folder
+#
+# After a successful pack, src-tauri/target is deleted (build intermediates).
 #
 # Requirements: Node.js + npm deps installed, Rust MSVC toolchain.
 # 7-Zip: uses the repo-bundled tools/7zip/7za.exe by default; falls back to
@@ -89,4 +91,17 @@ if (Test-Path $archive) { Remove-Item $archive -Force }
 if ($LASTEXITCODE -ne 0) { throw "7z compression failed (exit=$LASTEXITCODE)" }
 
 $archiveItem = Get-Item $archive
-Write-Host ("==> Done: {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
+Write-Host ("==> Archive: {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
+
+# --- 5. Remove Cargo/Tauri build intermediates --------------------------------
+$cargoTarget = "$root/src-tauri/target"
+if (Test-Path $cargoTarget) {
+    Write-Host "==> Removing $cargoTarget"
+    Remove-Item -LiteralPath $cargoTarget -Recurse -Force
+    if (Test-Path $cargoTarget) { throw "Failed to remove $cargoTarget" }
+}
+
+Write-Host "==> Kept:"
+Get-ChildItem $stageDir | ForEach-Object { Write-Host ("    {0}  ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB)) }
+Write-Host ("    {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
+Write-Host "==> Done"

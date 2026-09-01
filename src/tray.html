@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>账户面板</title>
+    <script>
+      // 与主窗口共享 localStorage 的主题偏好，样式解析前恢复避免闪烁。
+      (function () {
+        try {
+          var t = localStorage.getItem("theme");
+          document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      /* 托盘面板：小尺寸无边框窗口，整体是一张卡片 */
+      html, body { height: 100%; }
+      body {
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .tray-panel {
+        position: relative; /* 悬浮提示条的定位基准 */
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .tray-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .tray-title { font-size: 13.5px; font-weight: 650; color: var(--text-strong); }
+      .tray-tools { display: flex; gap: 6px; }
+      /* 下划线式 tab：总览 / Cursor / Codex */
+      .tray-tabs {
+        display: flex;
+        gap: 2px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+      }
+      .tray-tab {
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px; /* 让 active 下划线盖住 tab 栏底边 */
+        color: var(--muted);
+        padding: 7px 10px 6px;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 550;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+      }
+      .tray-tab:hover { color: var(--text-strong); }
+      .tray-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+      .tray-list { flex: 1; overflow-y: auto; padding: 5px 0; }
+      .tray-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 8px 14px;
+        transition: background-color 0.12s;
+      }
+      .tray-row:hover { background: var(--surface-2); }
+      .tray-main { flex: 1; min-width: 0; }
+      .tray-note {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+        font-weight: 550;
+        color: var(--text-strong);
+      }
+      .tray-note-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-sub {
+        margin-top: 2px;
+        display: flex;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      .tray-sub .q-low { color: var(--bad); }
+      /* 迷你额度进度条：单行并排，无动画 */
+      .tray-bars { display: flex; gap: 10px; margin-top: 5px; }
+      .tray-bar {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        flex: 1;
+        min-width: 0;
+      }
+      .tray-bar-label { font-size: 10.5px; color: var(--muted); flex-shrink: 0; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-bar-track {
+        flex: 1;
+        min-width: 24px;
+        height: 5px;
+        background: var(--surface-3);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .tray-bar-track > span { display: block; height: 100%; border-radius: 999px; }
+      .tray-bar-val { font-size: 10.5px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+      .tray-bar.q-ok .tray-bar-track > span { background: var(--ok); }
+      .tray-bar.q-warn .tray-bar-track > span { background: var(--warn); }
+      .tray-bar.q-low .tray-bar-track > span { background: var(--bad); }
+      .tray-bar.q-ok .tray-bar-val { color: var(--ok); }
+      .tray-bar.q-warn .tray-bar-val { color: var(--warn); }
+      .tray-bar.q-low .tray-bar-val { color: var(--bad); }
+      /* 刷新 + 切换：图标按钮上下排列，略小于主窗口以免撑高账户行 */
+      .tray-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+      .tray-actions .icon-action {
+        width: 24px;
+        height: 24px;
+        border-radius: 7px;
+      }
+      .tray-actions .icon-action svg { width: 13px; height: 13px; }
+      .tray-actions .icon-action + .icon-action { margin-left: 0; }
+      .tray-empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 12.5px; }
+      /* 总览页：今日用量合计 + 分来源明细 */
+      .tray-overview { flex: 1; overflow-y: auto; padding: 12px 14px; }
+      .tray-ov-label { font-size: 11px; color: var(--muted); }
+      .tray-ov-total { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
+      .tray-ov-tokens { font-size: 22px; font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+      .tray-ov-usd { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .tray-ov-rows { margin-top: 12px; border-top: 1px solid var(--border); }
+      .tray-ov-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+      }
+      .tray-ov-main { min-width: 0; flex: 1; }
+      .tray-ov-name { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-ov-err {
+        margin-top: 2px;
+        font-size: 11px;
+        color: var(--bad);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tray-ov-val { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
+      /* 图表区：标题小字 + 定高画布容器（Chart.js responsive 需要相对定位的父级） */
+      .tray-chart { margin-top: 14px; }
+      .tray-chart .tray-ov-label { margin-bottom: 7px; }
+      .tray-chart-box { position: relative; }
+      .tray-chart-pie { padding: 6px; }
+      /* 底部统计时间戳 */
+      .tray-ov-foot { margin-top: 12px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+      /* 提示条：悬浮在面板底部（弹窗之下、列表之上），不再挤动列表 */
+      .tray-status {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        z-index: 50;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 8px 12px;
+        background: var(--surface-2);
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        box-shadow: var(--shadow-md);
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .tray-status.bad { color: var(--bad); }
+      .tray-status.ok { color: var(--ok); }
+      .tray-status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-status-close {
+        flex-shrink: 0;
+        background: transparent;
+        border: none;
+        color: inherit;
+        font-size: 15px;
+        line-height: 1;
+        padding: 0;
+        cursor: pointer;
+        opacity: 0.65;
+        transition: opacity 0.15s;
+      }
+      .tray-status-close:hover { opacity: 1; }
+      /* 切换弹窗：遮罩 + 小卡片，确认、分步进度与结果都在弹窗内完成 */
+      #tray-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .tray-modal-mask { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45); border-radius: 12px; }
+      .tray-modal-card {
+        position: relative;
+        z-index: 1;
+        width: calc(100% - 48px);
+        max-width: 300px;
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        box-shadow: var(--shadow-md);
+        padding: 14px 16px;
+        animation: modal-in 0.18s ease-out;
+      }
+      #tray-modal-title { margin: 0 0 9px; font-size: 13px; font-weight: 650; color: var(--text-strong); }
+      #tray-modal-body { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+      #tray-modal-steps { display: grid; gap: 8px; }
+      .tray-step { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--muted); }
+      .tray-step-icon {
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        border: 1.5px solid var(--faint);
+        display: inline-grid;
+        place-items: center;
+        font-size: 11px;
+        line-height: 1;
+        font-weight: 700;
+      }
+      .tray-step-icon.running { border-color: var(--accent); border-top-color: transparent; animation: tray-spin 0.7s linear infinite; }
+      .tray-step-icon.done, .tray-step-icon.fail { border: none; }
+      .tray-step-icon.done { color: var(--ok); }
+      .tray-step-icon.done::before { content: "✓"; }
+      .tray-step-icon.fail { color: var(--bad); }
+      .tray-step-icon.fail::before { content: "✕"; }
+      @keyframes tray-spin { to { transform: rotate(360deg); } }
+      #tray-modal-result { margin: 10px 0 0; font-size: 12px; line-height: 1.6; }
+      #tray-modal-result.ok { color: var(--ok); }
+      #tray-modal-result.bad { color: var(--bad); }
+      .tray-modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+      .tray-modal-foot button { padding: 6px 14px; font-size: 12px; border-radius: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="tray-panel">
+      <div class="tray-head">
+        <span class="tray-title">账户</span>
+        <div class="tray-tools">
+          <button id="tray-refresh" class="icon-action" type="button" title="全部刷新" aria-label="全部刷新">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+          <button id="tray-open" class="icon-action" type="button" title="打开主窗口" aria-label="打开主窗口">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="tray-tabs">
+        <button type="button" class="tray-tab active" data-tab="overview">总览</button>
+        <button type="button" class="tray-tab" data-tab="cursor">Cursor</button>
+        <button type="button" class="tray-tab" data-tab="codex">ChatGPT</button>
+      </div>
+      <div id="tray-list" class="tray-list"></div>
+      <div id="tray-overview" class="tray-overview" hidden>
+        <div class="tray-empty">正在统计今日用量…</div>
+      </div>
+      <p id="tray-status" class="tray-status" hidden></p>
+    </div>
+    <!-- 切换账户弹窗：确认 / 分步进度 / 结果三个阶段复用同一张卡片 -->
+    <div id="tray-modal" hidden>
+      <div class="tray-modal-mask"></div>
+      <div class="tray-modal-card">
+        <h4 id="tray-modal-title"></h4>
+        <p id="tray-modal-body"></p>
+        <div id="tray-modal-steps" hidden></div>
+        <p id="tray-modal-result" hidden></p>
+        <div class="tray-modal-foot">
+          <button id="tray-modal-cancel" class="secondary" type="button">取消</button>
+          <button id="tray-modal-ok" class="primary" type="button">切换</button>
+        </div>
+      </div>
+    </div>
+    <script src="vendor/chart.umd.min.js"></script>
+    <script type="module" src="tray_panel.js"></script>
+  </body>
+</html>

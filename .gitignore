@@ -1,0 +1,16 @@
+# Node
+/node_modules
+
+# Rust / Tauri build output
+/src-tauri/target
+/src-tauri/gen
+
+# Release artifacts (scripts/build-release-windows.ps1)
+/release
+
+# OS
+.DS_Store
+Thumbs.db
+
+# JetBrains
+.idea

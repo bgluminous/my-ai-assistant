@@ -1,0 +1,19 @@
+{
+  "name": "my-ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal AI assistant desktop app (Tauri): Cursor / ChatGPT usage & cost tracker",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1",
+    "icons": "tauri icon app-icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.4"
+  }
+}
