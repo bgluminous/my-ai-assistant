@@ -1377,6 +1377,7 @@ async function onSave() {
   const refreshToken = modalKind === "codex" ? el("#account-refresh-token").value.trim() || null : null;
   const isEdit = editingId != null;
   const id = editingId;
+  const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
   const btn = el("#account-save");
   btn.disabled = true;
   setModalStatus("", "保存中…");
@@ -1385,9 +1386,12 @@ async function onSave() {
       ? await invoke("accounts_update", { id, note, token, refreshToken })
       : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
     applyView(view);
+    const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
     render();
     closeModal();
     setStatus("ok", isEdit ? "账户已更新。" : "账户已添加。");
+    // 手动新增与本机/文件导入保持一致：保存后后台拉取一次完整状态，失败留在对应账户行提示。
+    if (added) void refreshOne(added.id);
   } catch (error) {
     const msg = resetError(error);
     if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
