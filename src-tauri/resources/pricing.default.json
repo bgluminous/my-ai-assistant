@@ -1,6 +1,8 @@
 {
-  "note": "单价单位：美元 / 每百万 (1M) token。字段：input=输入, output=输出, cacheRead=缓存读, cacheWrite=缓存写。数据于 2026-08 通过网页搜索各厂商官方价目整理，仅供折算参考——Anthropic 5 分钟缓存写≈输入×1.25、缓存读≈输入×0.1；OpenAI 缓存读≈输入×0.1，GPT-5.6 起缓存写≈输入×1.25（旧模型自动缓存不单独计缓存写，记 0）；Gemini/DeepSeek 缓存写按存储/时另计，这里记 0，缓存读取“缓存命中/缓存输入”价；DeepSeek 采用非高峰价；xAI (Grok) 缓存读取 cached input 价、无单独缓存写记 0，grok-4/grok-3 系已下架按历史价保留，超 200K 提示词的加倍计费未体现。未在表中的模型会标记为“未定价”，可在应用内自行增改。",
+  "note": "单价单位：美元 / 每百万 (1M) token。字段：input=输入, output=输出, cacheRead=缓存读, cacheWrite=缓存写。数据于 2026-08 通过网页搜索各厂商官方价目整理，仅供折算参考——Anthropic 5 分钟缓存写≈输入×1.25、缓存读≈输入×0.1（Fable 5.1 起降为 ×0.025）；OpenAI 缓存读≈输入×0.1，GPT-5.6 起缓存写≈输入×1.25（旧模型自动缓存不单独计缓存写，记 0）；Gemini/DeepSeek 缓存写按存储/时另计，这里记 0，缓存读取“缓存命中/缓存输入”价；DeepSeek 采用非高峰价；xAI (Grok) 缓存读取 cached input 价、无单独缓存写记 0，grok-4/grok-3 系已下架按历史价保留，超 200K 提示词的加倍计费未体现。未在表中的模型会标记为“未定价”，可在应用内自行增改。",
   "models": {
+    "claude-fable-5.1": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 },
+    "claude-fable-5-1": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 },
     "claude-fable-5": { "input": 10, "output": 50, "cacheRead": 1.0, "cacheWrite": 12.5 },
     "claude-opus-5": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 },
     "claude-5-opus": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 },

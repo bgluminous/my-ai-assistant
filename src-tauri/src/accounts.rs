@@ -49,8 +49,8 @@ pub struct Account {
     pub status: Option<Value>,
 }
 
-/// 账户相关字段（写入统一 settings.json）。两个间隔均以分钟计，0 表示关闭：
-/// interval_minutes 控制账户状态定时刷新，usage_interval_minutes 控制用量统计页自动更新。
+/// 账户相关字段（写入统一 settings.json）。
+/// interval_minutes 为定时刷新间隔（分钟，0 = 关闭），账户状态与用量统计共用。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountsFile {
@@ -58,8 +58,6 @@ pub struct AccountsFile {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub interval_minutes: u32,
-    #[serde(default)]
-    pub usage_interval_minutes: u32,
 }
 
 /// 加写锁修改账户字段，随后立即写盘（同步 IO，锁内完成，保证内存与磁盘顺序一致）。
@@ -93,7 +91,6 @@ fn current() -> AccountsFile {
 pub struct AccountsView {
     pub accounts: Vec<Account>,
     pub interval_minutes: u32,
-    pub usage_interval_minutes: u32,
     pub path: String,
 }
 
@@ -101,7 +98,6 @@ fn view(data: &AccountsFile) -> AccountsView {
     AccountsView {
         accounts: data.accounts.clone(),
         interval_minutes: data.interval_minutes,
-        usage_interval_minutes: data.usage_interval_minutes,
         path: settings::path_display(),
     }
 }
@@ -435,6 +431,7 @@ pub fn accounts_delete(app: AppHandle, id: String) -> Result<AccountsView, Strin
     Ok(view(&data))
 }
 
+/// 设置定时刷新间隔（分钟，0 = 关闭），账户状态刷新与用量统计自动更新共用。
 #[tauri::command]
 pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<AccountsView, String> {
     let data = mutate(&app, |d| {
@@ -442,27 +439,11 @@ pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<Ac
         Ok(())
     })?;
     let message = if interval_minutes > 0 {
-        format!("账户定时刷新设为每 {interval_minutes} 分钟")
+        format!("定时刷新设为每 {interval_minutes} 分钟（账户状态 + 用量统计）")
     } else {
-        "关闭账户定时刷新".to_string()
+        "关闭定时刷新".to_string()
     };
     audit::log(&app, "interval_set", message, None);
-    Ok(view(&data))
-}
-
-/// 设置用量统计页的自动更新间隔（与账户状态刷新间隔相互独立）。
-#[tauri::command]
-pub fn accounts_set_usage_interval(app: AppHandle, interval_minutes: u32) -> Result<AccountsView, String> {
-    let data = mutate(&app, |d| {
-        d.usage_interval_minutes = interval_minutes;
-        Ok(())
-    })?;
-    let message = if interval_minutes > 0 {
-        format!("统计自动更新设为每 {interval_minutes} 分钟")
-    } else {
-        "关闭统计自动更新".to_string()
-    };
-    audit::log(&app, "usage_interval_set", message, None);
     Ok(view(&data))
 }
 

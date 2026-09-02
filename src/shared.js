@@ -88,6 +88,25 @@ export function fmtUsd(n) {
   return `$${n.toFixed(2)}`;
 }
 
+/** 图内标注 / 轴刻度用的紧凑 token 数（独立于单位偏好，绘图空间有限）。 */
+export function compactTokens(n) {
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(abs >= 1e10 ? 0 : 1)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(abs >= 1e7 ? 0 : 1)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(abs >= 1e4 ? 0 : 1)}K`;
+  return String(Math.round(n));
+}
+
+/** 占比文本：45% / 4.5% / <0.1%；总量或值无效时返回空串。 */
+export function fmtShare(value, total) {
+  if (!(total > 0) || !(value > 0)) return "";
+  const pct = (value / total) * 100;
+  if (pct >= 99.95) return "100%";
+  if (pct >= 9.95) return `${Math.round(pct)}%`;
+  if (pct >= 0.1) return `${pct.toFixed(1)}%`;
+  return "<0.1%";
+}
+
 export function fmtDateMs(ms) {
   if (ms == null || !Number.isFinite(ms) || ms <= 0) return "—";
   const value = ms < 1_000_000_000_000 ? ms * 1000 : ms;
@@ -326,3 +345,119 @@ export function bindChartHoverLeave(chart) {
   chart.$hoverBound = true;
   chart.canvas.addEventListener("mouseleave", () => setChartHoverHit(chart, null));
 }
+
+// ---------- Chart.js 数据标注插件（主窗口 / 托盘共用） ----------
+
+function chartFontFamily() {
+  if (typeof Chart !== "undefined" && Chart.defaults && Chart.defaults.font && Chart.defaults.font.family) {
+    return Chart.defaults.font.family;
+  }
+  return "sans-serif";
+}
+
+/**
+ * 横向（堆叠）柱末端常驻标注。按图配置 chart.$barEndLabels：
+ * { formatter(rowTotal, rowIndex) => string|null, font?: px, color?: string }。
+ * 配置必须挂在 chart 实例上而不是 options.plugins：Chart.js v4 的 chart.options
+ * 是解析代理，读取其中的函数会按 scriptable 选项解析——以内部 context 对象为参数
+ * 调用 formatter，轻则标注失效，重则在图表构造期抛 TypeError 打断渲染。
+ * 颜色缺省取 --chart-tick-strong，主题切换后的重绘自动生效。
+ * 使用方应通过 layout.padding.right 预留文字空间，空间不足时文字向左夹进画布。
+ */
+export const barEndLabelsPlugin = {
+  id: "barEndLabels",
+  afterDatasetsDraw(chart) {
+    const opts = chart.$barEndLabels;
+    if (!opts || typeof opts.formatter !== "function") return;
+    const labels = chart.data.labels || [];
+    if (!labels.length) return;
+    const { ctx, chartArea } = chart;
+    if (!chartArea) return;
+    const size = Number(opts.font) || 10.5;
+    const color =
+      opts.color ||
+      getComputedStyle(document.documentElement).getPropertyValue("--chart-tick-strong").trim() ||
+      "#8a93a6";
+    ctx.save();
+    ctx.font = `600 ${size}px ${chartFontFamily()}`;
+    ctx.fillStyle = color;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    for (let row = 0; row < labels.length; row += 1) {
+      let total = 0;
+      let endX = -Infinity;
+      let y = null;
+      for (let di = 0; di < chart.data.datasets.length; di += 1) {
+        const v = Number(chart.data.datasets[di].data[row]);
+        if (!Number.isFinite(v) || v <= 0) continue;
+        const meta = chart.getDatasetMeta(di);
+        if (!meta || meta.hidden) continue;
+        const bar = meta.data && meta.data[row];
+        if (!bar) continue;
+        total += v;
+        if (bar.x > endX) endX = bar.x;
+        if (y == null) y = bar.y;
+      }
+      if (!(total > 0) || y == null || !Number.isFinite(endX)) continue;
+      const text = opts.formatter(total, row);
+      if (!text) continue;
+      const width = ctx.measureText(text).width;
+      let x = endX + 6;
+      if (x + width > chart.width - 4) x = Math.max(chartArea.left + 2, chart.width - 4 - width);
+      ctx.fillText(text, x, y);
+    }
+    ctx.restore();
+  },
+};
+
+/**
+ * 饼图 / 环形图扇区常驻标注。按图配置 chart.$pieSliceLabels：
+ * { formatter(value, shareText, index) => string[]|string|null, minAngle?: rad, font?: px, color?: string }。
+ * 配置挂在 chart 实例上而不是 options.plugins，原因同 barEndLabelsPlugin（scriptable 解析陷阱）。
+ * 占比按当前可见扇区合计计算；弧度小于 minAngle（默认 0.3 ≈ 17°）的扇区跳过，避免文字重叠。
+ */
+export const pieSliceLabelsPlugin = {
+  id: "pieSliceLabels",
+  afterDatasetsDraw(chart) {
+    const opts = chart.$pieSliceLabels;
+    if (!opts || typeof opts.formatter !== "function") return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || meta.hidden || !Array.isArray(meta.data)) return;
+    const data = (chart.data.datasets[0] && chart.data.datasets[0].data) || [];
+    let total = 0;
+    for (let i = 0; i < data.length; i += 1) {
+      const v = Number(data[i]);
+      if (Number.isFinite(v) && v > 0 && chart.getDataVisibility(i)) total += v;
+    }
+    if (!(total > 0)) return;
+    const minAngle = Number(opts.minAngle) || 0.3;
+    const size = Number(opts.font) || 10;
+    const lineHeight = size + 2;
+    const { ctx } = chart;
+    ctx.save();
+    ctx.font = `600 ${size}px ${chartFontFamily()}`;
+    // 调色板均为中浅色，深色文字在明暗两套主题下都可读
+    ctx.fillStyle = opts.color || "rgba(15, 19, 28, 0.85)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < meta.data.length; i += 1) {
+      const arc = meta.data[i];
+      const v = Number(data[i]);
+      if (!arc || !Number.isFinite(v) || v <= 0 || !chart.getDataVisibility(i)) continue;
+      const p = arc.getProps(["x", "y", "startAngle", "endAngle", "innerRadius", "outerRadius", "circumference"]);
+      if (!(p.circumference >= minAngle)) continue;
+      const made = opts.formatter(v, fmtShare(v, total), i);
+      const lines = (Array.isArray(made) ? made : [made])
+        .filter((line) => line != null && String(line) !== "")
+        .map(String);
+      if (!lines.length) continue;
+      const angle = (p.startAngle + p.endAngle) / 2;
+      const radius = (p.innerRadius + p.outerRadius) / 2;
+      const cx = p.x + Math.cos(angle) * radius;
+      const cy = p.y + Math.sin(angle) * radius;
+      const y0 = cy - ((lines.length - 1) * lineHeight) / 2;
+      for (let li = 0; li < lines.length; li += 1) ctx.fillText(lines[li], cx, y0 + li * lineHeight);
+    }
+    ctx.restore();
+  },
+};

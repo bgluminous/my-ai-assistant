@@ -629,24 +629,22 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
 
 /* ---------- 图表 ---------- */
 
+/* 柱图占满整行，下方三个饼图三等分 */
 .charts {
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
-  gap: 16px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px 24px;
   margin-bottom: 18px;
 }
-.chart-box {
-  background: var(--well);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  min-height: 280px;
-}
-.chart-box-wide {
-  grid-column: 1 / -1;
-  min-height: 300px;
-}
-canvas { max-height: 300px; }
+/* 图表不再套卡片底色，直接坐在 surface 上。
+   Chart.js 会把 canvas 写成固定像素宽；网格项默认 min-width:auto 会以该宽度为最小值，
+   导致容器变窄后轨道缩不回去、图表溢出卡片。置 0 让轨道可收缩，Chart.js 才能收到 resize。 */
+.chart-box { min-width: 0; }
+.chart-box-wide { grid-column: 1 / -1; }
+/* Chart.js responsive 需要「定高 + 相对定位 + 只放画布」的专属容器，
+   配合 maintainAspectRatio:false 让图表填满整块区域。 */
+.chart-canvas { position: relative; height: 280px; }
+.chart-box-wide .chart-canvas { height: 320px; }
 
 /* ---------- 表格 ---------- */
 
@@ -909,7 +907,56 @@ td.account-actions { white-space: nowrap; }
 .seg:disabled { opacity: 0.55; cursor: not-allowed; }
 .modal-foot .modal-actions:only-child { margin-left: auto; }
 
-/* ---------- 用量统计：数据源选择与总览 ---------- */
+/* ---------- 用量统计：筛选工具栏、数据源选择与总览 ---------- */
+
+/* 筛选工具栏：「统计对象」「时间跨度」两组上下排布，组间细分隔线；
+   时间跨度行右侧放数据更新时间与刷新图标按钮 */
+.usage-toolbar { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; }
+.usage-toolbar .toolbar-group { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.usage-toolbar .toolbar-group + .toolbar-group { border-top: 1px solid var(--border); padding-top: 12px; }
+.toolbar-label { flex: none; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); }
+.toolbar-side { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+.updating-hint { animation: hint-pulse 1.2s ease-in-out infinite; }
+@keyframes hint-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* 加载骨架：模拟结果区布局（卡片行 / 宽图 / 双图 / 表格行），微光扫过 */
+.usage-skeleton { display: flex; flex-direction: column; gap: 14px; }
+.skeleton-block {
+  display: block;
+  border-radius: 10px;
+  background: linear-gradient(
+    100deg,
+    var(--surface-3) 40%,
+    color-mix(in srgb, var(--surface-3) 45%, transparent) 50%,
+    var(--surface-3) 60%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.skeleton-cards .skeleton-block { height: 72px; }
+.skeleton-chart-wide { height: 240px; }
+.skeleton-charts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.skeleton-charts .skeleton-block { height: 200px; }
+.skeleton-lines { display: flex; flex-direction: column; gap: 10px; }
+.skeleton-lines .skeleton-block { height: 14px; border-radius: 6px; }
+.skeleton-lines .skeleton-block:nth-child(2) { width: 92%; }
+.skeleton-lines .skeleton-block:nth-child(3) { width: 84%; }
+@keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block, .updating-hint { animation: none; }
+}
+
+/* 时间跨度二级 TAB：胶囊分段容器，内部复用 .seg 按钮样式 */
+.span-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.span-tabs .seg { padding: 6px 16px; font-size: 12.5px; }
 
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip-select {
@@ -918,7 +965,7 @@ td.account-actions { white-space: nowrap; }
   gap: 7px;
   padding: 6px 13px;
   border-radius: 999px;
-  background: var(--surface);
+  background: var(--field-bg);
   border: 1px solid var(--border);
   color: var(--muted);
   font-size: 13px;
@@ -1025,23 +1072,6 @@ button.secondary.danger:hover:not(:disabled) {
   color: var(--text-strong);
 }
 
-.about-feature-cards { margin-bottom: 0; }
-.about-card-text {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--text);
-}
-
-.about-notes {
-  margin: 0;
-  padding-left: 1.2em;
-  color: var(--text);
-  font-size: 13.5px;
-  line-height: 1.7;
-}
-.about-notes li + li { margin-top: 8px; }
-
 .about-deps td:nth-child(2),
 .about-deps th:nth-child(2),
 .about-deps td:last-child,
@@ -1137,11 +1167,59 @@ input.price-input {
 }
 
 .tag.custom { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.tag.remote { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
 
 .pricing-add {
   padding: 14px 22px;
   border-top: 1px solid var(--border);
   background: var(--well);
+}
+
+/* 在线更新区：地址输入 + 更新按钮 + 上次更新信息 / 有更新提示 */
+.pricing-update {
+  padding: 12px 22px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--well);
+}
+.pricing-update-grid {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.pricing-update-grid input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+}
+#pricing-update-meta { margin: 7px 0 0; }
+.update-hint {
+  margin: 7px 0 0;
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.update-hint::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  margin-right: 7px;
+  vertical-align: 1px;
+}
+
+/* 价格表 chip 检测到在线更新时的角标 */
+.chip.has-update::after {
+  content: "有更新";
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+  flex-shrink: 0;
 }
 .pricing-add-title {
   display: block;
@@ -1242,7 +1320,7 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 @media (max-width: 720px) {
   .modal { padding: 12px; }
   .modal-card { max-height: 92vh; }
-  .modal-head, .modal-toolbar, .pricing-add, .modal-foot { padding-left: 16px; padding-right: 16px; }
+  .modal-head, .modal-toolbar, .pricing-add, .pricing-update, .modal-foot { padding-left: 16px; padding-right: 16px; }
   .pricing-add-grid { grid-template-columns: 1fr 1fr; }
   .pricing-add-grid input[type="text"] { grid-column: 1 / -1; }
   #pricing-status { margin-left: 16px; margin-right: 16px; }

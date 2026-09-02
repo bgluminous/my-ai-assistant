@@ -50,6 +50,15 @@ pub fn run() {
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_min_size(Some(tauri::LogicalSize::new(1180.0, 640.0)));
+                // 主窗口以隐藏状态创建（消除启动白闪），正常由前端首帧渲染后调用 show()；
+                // 若前端初始化异常没能显示，这里兜底拉起，避免窗口永远不可见。
+                let win = win.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if !win.is_visible().unwrap_or(true) {
+                        let _ = win.show();
+                    }
+                });
             }
             Ok(())
         })
@@ -89,6 +98,8 @@ pub fn run() {
             pricing::pricing_get,
             pricing::pricing_save,
             pricing::pricing_reset,
+            pricing::pricing_update_check,
+            pricing::pricing_update_apply,
             proxy::proxy_get,
             proxy::proxy_set,
             proxy::proxy_test,
@@ -100,7 +111,6 @@ pub fn run() {
             accounts::accounts_export,
             accounts::accounts_import_file,
             accounts::accounts_set_interval,
-            accounts::accounts_set_usage_interval,
             accounts::account_refresh,
             audit::audit_list,
             audit::audit_clear,

@@ -4,7 +4,7 @@ import { getRefreshIntervalMinutes, setRefreshInterval } from "./accounts.js";
 // 设置弹窗：
 // - Token 数量单位（完整 / K·M·B / 万·亿），存 localStorage，切换时通过 unitchange 事件
 //   通知已渲染的视图即时重绘；
-// - 账户定时刷新间隔，实际存取与定时器由 accounts.js 托管，写入统一 settings.json；
+// - 定时刷新间隔（账户状态与用量统计共用），实际存取与定时器由 accounts.js 托管，写入统一 settings.json；
 // - ChatGPT 客户端路径，由后端持久化到 settings.json（codex_client_get / set / detect），用于切换账户后启动 ChatGPT。
 
 const SAMPLE = 1234567890;
@@ -17,7 +17,7 @@ function renderUnitSeg() {
   el("#unit-sample").textContent = `1,234,567,890 → ${fmtTokens(SAMPLE)}`;
 }
 
-/* ---------- 账户定时刷新 ---------- */
+/* ---------- 定时刷新（账户状态 + 用量统计） ---------- */
 
 function setIntervalStatus(kind, text) {
   fillStatus(el("#interval-status"), kind, text);
@@ -34,7 +34,7 @@ async function onIntervalChange() {
   const previous = getRefreshIntervalMinutes();
   try {
     const minutes = await setRefreshInterval(Number(select.value));
-    setIntervalStatus("ok", minutes > 0 ? `已开启定时刷新，每 ${minutes} 分钟自动刷新全部账户。` : "已关闭定时刷新。");
+    setIntervalStatus("ok", minutes > 0 ? `已开启定时刷新，每 ${minutes} 分钟自动刷新账户状态与用量统计。` : "已关闭定时刷新。");
   } catch (error) {
     select.value = String(previous);
     setIntervalStatus("bad", `设置定时刷新失败：${resetError(error)}`);

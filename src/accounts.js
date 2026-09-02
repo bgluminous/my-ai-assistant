@@ -52,7 +52,6 @@ export function planMonthlyUsd(membershipType) {
 
 let accounts = [];
 let intervalMinutes = 0;
-let usageIntervalMinutes = 0;
 let timerId = null;
 let refreshAllRunning = false;
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
@@ -83,19 +82,6 @@ export function getAccounts() {
 /** 订阅账户列表变化(增删改、刷新完成)。 */
 export function onAccountsChanged(fn) {
   changeListeners.add(fn);
-}
-
-/** 用量统计页的自动更新间隔(分钟,0 = 关闭),与账户状态刷新间隔相互独立。 */
-export function getUsageIntervalMinutes() {
-  return usageIntervalMinutes;
-}
-
-/** 保存用量统计自动更新间隔,返回后端确认后的值。 */
-export async function setUsageInterval(minutes) {
-  const view = await invoke("accounts_set_usage_interval", { intervalMinutes: minutes });
-  applyView(view);
-  render();
-  return usageIntervalMinutes;
 }
 
 /* ---------- 格式化 ---------- */
@@ -361,13 +347,13 @@ function cursorSummaryNodes(status) {
       else if (detail) meta.push(metaItem(`额度 ${detail}`));
     }
   }
-  // Grok Bot 周额度（sand）：套餐包含时展示
+  // Sand 周额度（Cursor 对 Grok Bot 额度的内部代号）：套餐包含时展示
   const sand = status.sand || null;
   if (sand && sand.included) {
     let usedPct = Number(sand.usagePercent);
     if (sand.hasAvailableUsage === false) usedPct = 100;
     const reset = sand.nextResetAt ? `重置 ${shortDate(sand.nextResetAt)}` : "";
-    const bar = quotaBar("Grok", usedPct, reset);
+    const bar = quotaBar("Sand", usedPct, reset);
     if (bar) bars.push(bar);
   }
   return { bars, meta };
@@ -759,8 +745,6 @@ function applyView(view) {
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
   const n = Number(view && view.intervalMinutes);
   if (Number.isFinite(n)) intervalMinutes = n;
-  const u = Number(view && view.usageIntervalMinutes);
-  if (Number.isFinite(u)) usageIntervalMinutes = u;
   el("#accounts-interval").value = String(intervalMinutes);
   // 清理已被移除账户的瞬态状态
   const ids = new Set(accounts.map((a) => a.id));
@@ -828,6 +812,16 @@ async function refreshIds(ids) {
   return ids.filter((id) => rowErrors.has(id)).length;
 }
 
+/**
+ * 供其他模块（用量统计页「刷新」）触发的账户状态刷新：逐个排队执行。
+ * 重入安全：切换 / 导入流程中直接跳过，正在刷新中的账户由 refreshOne 自行去重。
+ */
+export async function refreshAccounts(ids) {
+  if (switching || importing) return;
+  const valid = (ids || []).filter((id) => accounts.some((a) => a.id === id));
+  if (valid.length) await refreshIds(valid);
+}
+
 /** 刷新单组（卡片标题栏的刷新按钮）：组内账户排队逐个刷新。 */
 async function refreshGroup(kind) {
   if (groupRefreshing.has(kind) || refreshAllRunning || switching || importing) return;
@@ -870,17 +864,19 @@ function rebuildTimer() {
   }
 }
 
-/** 账户定时刷新间隔（分钟，0 = 关闭），设置弹窗用于回显。 */
+/** 定时刷新间隔（分钟，0 = 关闭），账户状态与用量统计共用；设置弹窗用于回显。 */
 export function getRefreshIntervalMinutes() {
   return intervalMinutes;
 }
 
-/** 保存账户定时刷新间隔并重建定时器，返回后端确认后的值；失败向上抛（由设置弹窗提示）。 */
+/**
+ * 保存定时刷新间隔并重建定时器，返回后端确认后的值；失败向上抛（由设置弹窗提示）。
+ * applyView 内的 notifyChange 会通知用量统计页同步自己的自动更新定时器。
+ */
 export async function setRefreshInterval(minutes) {
   const view = await invoke("accounts_set_interval", { intervalMinutes: minutes });
-  const n = Number(view && view.intervalMinutes);
-  intervalMinutes = Number.isFinite(n) ? n : minutes;
-  el("#accounts-interval").value = String(intervalMinutes);
+  applyView(view);
+  render();
   rebuildTimer();
   return intervalMinutes;
 }

@@ -17,7 +17,9 @@
         "height": 860,
         "minWidth": 1180,
         "minHeight": 640,
-        "resizable": true
+        "resizable": true,
+        "visible": false,
+        "backgroundColor": "#0a0e16"
       },
       {
         "label": "tray",

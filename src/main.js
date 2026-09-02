@@ -23,7 +23,10 @@ function setupTheme() {
 }
 
 function setupTabs() {
-  const tabs = [...document.querySelectorAll("[role='tab']")];
+  // 只绑定带 data-panel 的主导航 tab。用量页的时间跨度分段同样是 role="tab"
+  // （自带 tablist 容器与选中态管理），若一并绑定，点击会以 undefined panelId
+  // 调 select——所有面板被隐藏、导航选中态被清空，页面看起来「全部消失」。
+  const tabs = [...document.querySelectorAll("[role='tab'][data-panel]")];
   const panels = [...document.querySelectorAll("[role='tabpanel']")];
   function select(panelId) {
     for (const tab of tabs) {
@@ -48,6 +51,21 @@ function setupTabs() {
   });
 }
 
+// 主窗口以隐藏状态创建（tauri.conf.json visible:false + 深色底色，消除启动白闪），
+// 首帧渲染完成后再显示窗口；非 Tauri 环境（浏览器直开调试）静默跳过。
+// 前端初始化若中途异常，Rust 侧还有超时兜底 show()（见 lib.rs setup）。
+function revealWindow() {
+  try {
+    const w = window.__TAURI__ && window.__TAURI__.window;
+    if (!w || typeof w.getCurrentWindow !== "function") return;
+    const win = w.getCurrentWindow();
+    void win
+      .show()
+      .then(() => win.setFocus())
+      .catch(() => {});
+  } catch { /* ignore */ }
+}
+
 setupDesktopGuards();
 setupTheme();
 setupTabs();
@@ -58,3 +76,5 @@ initPricing();
 initProxy();
 initSettings();
 initAbout();
+// 两帧 rAF 确保浏览器完成首次布局与绘制后才显示窗口
+requestAnimationFrame(() => requestAnimationFrame(revealWindow));

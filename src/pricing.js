@@ -1,10 +1,20 @@
-import { el, invoke, copyText, resetError, fillStatus } from "./shared.js";
+import { el, invoke, copyText, resetError, fillStatus, fmtDateMs } from "./shared.js";
 
-// 价格表编辑弹窗：读取“默认 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
-// 覆盖写入用户目录 xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与默认不同的条目）。
+// 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
+// 覆盖写入用户目录 xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
+// 「在线更新」把远端表写入 settings.json 的 pricingRemote 缓存层（默认 < 在线 < 用户自定义）；
+// 启动时静默检测一次，仅提示存在更新，是否应用由用户手动决定。
 
-const state = { path: "", note: null, entries: [] };
+const state = {
+  path: "",
+  note: null,
+  entries: [],
+  remote: { url: "", defaultUrl: "", fetchedAtMs: null, models: 0 },
+  update: { available: false, models: 0 },
+};
 let chip = null;
+
+const SOURCE_LABEL = { default: "默认", remote: "在线", custom: "自定义" };
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -30,13 +40,19 @@ function setChip(count) {
 function applyView(view) {
   state.path = view.path || "";
   state.note = view.note ?? null;
+  state.remote = {
+    url: view.remoteUrl || "",
+    defaultUrl: view.remoteDefaultUrl || "",
+    fetchedAtMs: view.remoteFetchedAtMs ?? null,
+    models: Number(view.remoteModels) || 0,
+  };
   state.entries = (view.models || []).map((m) => ({
     key: m.key,
     input: Number(m.input) || 0,
     output: Number(m.output) || 0,
     cacheRead: Number(m.cacheRead) || 0,
     cacheWrite: Number(m.cacheWrite) || 0,
-    custom: !!m.custom,
+    source: m.source === "custom" || m.source === "remote" ? m.source : "default",
   }));
 }
 
@@ -65,7 +81,7 @@ function render() {
       ${priceCell("output", e.output)}
       ${priceCell("cacheRead", e.cacheRead)}
       ${priceCell("cacheWrite", e.cacheWrite)}
-      <td><span class="tag ${e.custom ? "custom" : ""}">${e.custom ? "自定义" : "默认"}</span></td>
+      <td><span class="tag ${e.source === "default" ? "" : e.source}">${SOURCE_LABEL[e.source] || "默认"}</span></td>
       <td class="col-actions"><button class="table-button" type="button" data-remove aria-label="删除 ${escapeHtml(e.key)}">✕</button></td>`;
     body.append(tr);
   });
@@ -83,11 +99,11 @@ function onEdit(ev) {
   if (!entry) return;
   const num = parseFloat(input.value);
   entry[input.dataset.field] = Number.isFinite(num) && num >= 0 ? num : 0;
-  entry.custom = true;
+  entry.source = "custom";
   const badge = tr.querySelector(".tag");
   if (badge) {
     badge.textContent = "自定义";
-    badge.classList.add("custom");
+    badge.className = "tag custom";
   }
 }
 
@@ -123,7 +139,7 @@ function onAdd() {
     output: num("#add-output"),
     cacheRead: num("#add-cacheRead"),
     cacheWrite: num("#add-cacheWrite"),
-    custom: true,
+    source: "custom",
   });
   for (const id of ["#add-key", "#add-input", "#add-output", "#add-cacheRead", "#add-cacheWrite"]) {
     el(id).value = "";
@@ -165,13 +181,67 @@ async function onReset() {
     const view = await invoke("pricing_reset");
     applyView(view);
     render();
+    syncUpdateArea();
     setChip(view.count);
-    setStatus("ok", "已恢复为内置默认价格表。");
+    setStatus("ok", "已恢复为内置默认价格表（同时清除了在线表缓存）。");
+    checkUpdate(); // 重置后重新检测：在线表若与默认表不同会再次提示
   } catch (err) {
     setStatus("bad", `重置失败：${resetError(err)}`);
   } finally {
     btn.disabled = false;
   }
+}
+
+/** 把 remote / 更新检测状态同步到弹窗的在线更新区与 chip 角标。 */
+function syncUpdateArea() {
+  const input = el("#pricing-update-url");
+  input.value = state.remote.url;
+  input.placeholder = state.remote.defaultUrl ? `默认：${state.remote.defaultUrl}` : "";
+  el("#pricing-update-meta").textContent = state.remote.fetchedAtMs
+    ? `上次更新：${fmtDateMs(state.remote.fetchedAtMs)} · 在线表 ${state.remote.models} 个模型`
+    : "尚未在线更新，当前使用内置默认表。";
+  const hint = el("#pricing-update-hint");
+  hint.hidden = !state.update.available;
+  if (state.update.available) {
+    hint.textContent = `检测到在线价格表有更新（远端 ${state.update.models} 个模型），点击「在线更新」应用。`;
+  }
+  if (chip) {
+    chip.classList.toggle("has-update", state.update.available);
+    chip.title = state.update.available
+      ? "检测到在线价格表有更新，点击查看"
+      : "点击查看 / 编辑价格表";
+  }
+}
+
+async function onUpdate() {
+  const btn = el("#pricing-update-btn");
+  btn.disabled = true;
+  setStatus("", "正在拉取在线价格表…");
+  try {
+    const url = el("#pricing-update-url").value.trim();
+    const view = await invoke("pricing_update_apply", { url: url || null });
+    applyView(view);
+    state.update = { available: false, models: 0 };
+    render();
+    syncUpdateArea();
+    setChip(state.entries.length);
+    setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型。`);
+  } catch (err) {
+    setStatus("bad", `在线更新失败：${resetError(err)}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 静默检测一次是否有在线更新（用已保存地址）；网络失败不打扰用户。 */
+async function checkUpdate() {
+  try {
+    const res = await invoke("pricing_update_check", { url: null });
+    state.update = { available: !!res.hasUpdate, models: Number(res.models) || 0 };
+  } catch {
+    state.update = { available: false, models: 0 };
+  }
+  syncUpdateArea();
 }
 
 async function onCopyPath() {
@@ -212,14 +282,16 @@ export async function initPricing() {
   el("#pricing-save").addEventListener("click", onSave);
   el("#pricing-reset").addEventListener("click", onReset);
   el("#pricing-copy-path").addEventListener("click", onCopyPath);
+  el("#pricing-update-btn").addEventListener("click", onUpdate);
   el("#pricing-body").addEventListener("input", onEdit);
   el("#pricing-body").addEventListener("click", onRemove);
 
   try {
     await load();
     setChip(state.entries.length);
-    chip.title = "点击查看 / 编辑价格表";
+    syncUpdateArea();
     chip.addEventListener("click", openModal);
+    checkUpdate(); // 启动时静默检测在线更新，不阻塞初始化
   } catch {
     chip.textContent = "价格表：不可用";
   }

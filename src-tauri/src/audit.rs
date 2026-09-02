@@ -25,7 +25,7 @@ pub struct AuditEntry {
     pub ts: i64,
     /// 事件类型（account_add / account_update / account_delete / account_import /
     /// account_import_file / account_export / account_state_changed /
-    /// account_refresh_failed / codex_renewed / codex_renew_failed / interval_set / usage_interval_set）。
+    /// account_refresh_failed / codex_renewed / codex_renew_failed / interval_set）。
     pub event: String,
     /// 人类可读描述（中文，敏感信息仅保留打码后的片段）。
     pub message: String,

@@ -1,4 +1,4 @@
-import { el, fmtInt, fmtTokens, fmtUsd, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, resetError, toast, dismissToast } from "./shared.js";
+import { el, listen, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, hexAlpha, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, resetError, toast, dismissToast } from "./shared.js";
 import {
   getCachedAgg as cacheGetAgg,
   getCachedScan as cacheGetScan,
@@ -9,43 +9,65 @@ import {
   clearUsageMemoryCache,
   setUsageCacheTtlMs,
   DEFAULT_USAGE_TTL_MS,
+  USAGE_CACHE_PREFIX,
+  USAGE_CACHE_EVENT,
+  USAGE_CACHE_ORIGIN,
+  forgetUsageCacheFromEvent,
+  todayRangeKey,
+  todayStartMs,
 } from "./usage_data.js";
 import {
   getAccounts,
   onAccountsChanged,
+  refreshAccounts,
   membershipLabel,
   planMonthlyUsd,
-  getUsageIntervalMinutes,
-  setUsageInterval,
+  getRefreshIntervalMinutes,
+  relativeFromUnixSeconds,
 } from "./accounts.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
 // Codex 账户不在本页展示（额度信息见「账户管理」）；Codex 账单只能来自本地会话日志，
 // 由本地扫描（CODEX_HOME）折算，在总览中作为「本地用量分析」行参与合并。
 // 视图：全部总览（各 Cursor 账户 + 本地 Codex 合并）/ 单个 Cursor 账户 / 本地 Codex 用量分析。
+// 时间跨度为二级 TAB（今天 / 近 7 / 30 天 / 全部），默认今天；
+// 「今天」用与托盘总览相同的今日缓存键（today:YYYY-MM-DD），两边数据互通，
+// 且按日图切换为当天 0–23 时的 24 小时柱（数据来自聚合结果的 hourly 序列）。
 //
-// 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v2:）。
+// 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v4:）。
 // 打开视图时先用缓存（含过期缓存）立即渲染，再在后台拉取最新数据原地刷新（stale-while-revalidate）。
+//
+// 统一刷新：任何入口（账户页 / 托盘 / 本页「刷新」/ 定时刷新）刷新账户状态后，
+// 本页监听账户变化检测「刚刷新过的账户」，后台强制预取其用量写入共享缓存——
+// 之后进入本页直接命中新缓存，不再重复统计；本页「刷新」也反向顺带刷新账户状态。
 
-const DEFAULT_TTL_MS = DEFAULT_USAGE_TTL_MS; // 未开启自动更新时的结果缓存有效期
+const DEFAULT_TTL_MS = DEFAULT_USAGE_TTL_MS; // 未开启定时刷新时的结果缓存有效期
 const OVERVIEW_CONCURRENCY = 2;
+// 账户刷新触发的用量预取：缓存比这更新鲜就跳过（防与刚完成的拉取重复走网络）
+const PREFETCH_MIN_AGE_MS = 60_000;
 
 let selection = "all"; // "all" | "local" | Cursor 账户 id
+let span = "today"; // 时间跨度："today" | "7" | "30" | "0"（全部）
 let loadSeq = 0; // 加载序号，防止过期的异步结果覆盖新视图
 let loading = false;
 let panelVisible = false;
 let renderedFor = ""; // 结果区当前展示的 selection+range（隐藏时为空）
-let renderedAt = 0;
-let usageInterval = 0; // 统计自动更新间隔（分钟，0 = 关闭），独立于账户状态刷新
+let renderedAt = 0; // 结果区数据的获取时间（显示「更新于」与缓存标记）
+let lastAttemptAt = 0; // 最近一次完整加载的完成时间（新鲜度门控；失败来源不再把整页永久拖成过期）
+let usageInterval = 0; // 定时刷新间隔（分钟，0 = 关闭），与账户状态刷新共用同一设置
 let usageTimerId = null;
 let accountIdsSig = "";
 const overviewResults = new Map(); // accountId -> { state, agg?, error? }
+const seenRefreshAt = new Map(); // accountId -> lastRefreshAt，检测「刚刷新过的账户」触发用量预取
+let seenInitialized = false; // 首批账户快照只登记不预取（启动时账户数据来自磁盘，并非刚刷新）
+let rerenderTimer = null; // 预取完成 / 对端缓存写入后的重渲染合并计时器
 
 /* ---------- 图表主题 ---------- */
 
-let barChart = null;
-let doughnutChart = null;
-let dailyChart = null;
+let tokenChart = null; // 各模型 Token 数量（环形饼图）
+let modelChart = null; // 各模型等价费用（环形饼图）
+let doughnutChart = null; // Token 构成
+let dailyChart = null; // 按日 / 按小时柱图
 
 function cssVar(name) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -61,11 +83,15 @@ function chartTheme() {
 }
 function applyChartTheme() {
   const t = chartTheme();
-  if (barChart) {
-    barChart.options.scales.x.ticks.color = t.tick;
-    barChart.options.scales.x.grid.color = t.grid;
-    barChart.options.scales.y.ticks.color = t.tickStrong;
-    barChart.update("none");
+  if (tokenChart) {
+    tokenChart.data.datasets[0].borderColor = t.border;
+    tokenChart.options.plugins.legend.labels.color = t.tickStrong;
+    tokenChart.update("none");
+  }
+  if (modelChart) {
+    modelChart.data.datasets[0].borderColor = t.border;
+    modelChart.options.plugins.legend.labels.color = t.tickStrong;
+    modelChart.update("none");
   }
   if (doughnutChart) {
     doughnutChart.data.datasets[0].borderColor = t.border;
@@ -77,6 +103,7 @@ function applyChartTheme() {
     dailyChart.options.scales.y.ticks.color = t.tickStrong;
     dailyChart.options.scales.y.grid.color = t.grid;
     dailyChart.options.plugins.legend.labels.color = t.tickStrong;
+    dailyChart.$todayBandColor = todayBandColor();
     dailyChart.update("none");
   }
 }
@@ -95,11 +122,22 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-function rangeDays() {
-  return Number(el("#usage-range").value);
+const SPAN_LABELS = { today: "今天", 7: "近 7 天", 30: "近 30 天", 0: "全部" };
+
+function isTodaySpan() {
+  return span === "today";
+}
+/** Cursor 聚合的缓存键：今天用 today:YYYY-MM-DD（与托盘共用），其余为天数 / 0。 */
+function rangeKey() {
+  return isTodaySpan() ? todayRangeKey() : span;
+}
+/** 本地 Codex 扫描的缓存键：今天同上，其余为天数 / all。 */
+function scanKey() {
+  return isTodaySpan() ? todayRangeKey() : span === "0" ? "all" : span;
 }
 function rangeBounds() {
-  const days = rangeDays();
+  if (isTodaySpan()) return { start: todayStartMs(), end: Date.now() };
+  const days = Number(span);
   if (days > 0) {
     const end = Date.now();
     return { start: end - days * 86400 * 1000, end };
@@ -107,8 +145,7 @@ function rangeBounds() {
   return { start: null, end: null };
 }
 function rangeText() {
-  const d = rangeDays();
-  return d > 0 ? `近 ${d} 天` : "全部";
+  return SPAN_LABELS[span] || "全部";
 }
 
 function maskToken(token) {
@@ -124,13 +161,14 @@ function currentAccount() {
 }
 function selectionKey() {
   if (selection === "local") {
-    return `local:${el("#usage-codex-days").value}:${el("#usage-codex-home").value.trim()}`;
+    return `local:${scanKey()}:${el("#usage-codex-home").value.trim()}`;
   }
-  return `${selection}:${rangeDays()}`;
+  // 今天的键含日期（today:YYYY-MM-DD），跨零点后自动视为新视图
+  return `${selection}:${rangeKey()}`;
 }
 /**
  * 标记结果区已渲染。at 为数据的实际获取时间（缓存数据传缓存时间），
- * renderedAt 采用数据时间，这样过期缓存渲染后下次进入页面仍会自动重新拉取。
+ * 用于「更新于」文案与（缓存）标记；新鲜度门控另见 isRenderedFresh。
  */
 function markUpdated(at) {
   renderedFor = selectionKey();
@@ -140,9 +178,22 @@ function markUpdated(at) {
   el("#usage-updated").textContent = `数据更新于 ${time}${stale ? "（缓存）" : ""}`;
 }
 
-/** 结果缓存有效期：开启自动更新后与更新间隔保持一致。 */
+/** 结果缓存有效期：开启定时刷新后与刷新间隔保持一致。 */
 function effectiveTtlMs() {
   return usageInterval > 0 ? usageInterval * 60_000 : DEFAULT_TTL_MS;
+}
+
+/**
+ * 结果区是否无需重载：正在展示当前视图，且数据时间或最近一次完整加载在有效期内。
+ * 门控同时看 lastAttemptAt 是关键——某来源持续失败时其数据时间永远陈旧，若只看
+ * renderedAt，整页会被它拖成「永久过期」，每次进页都重新统计；改为「刚试过就不再试」，
+ * 到期或手动刷新时才重试失败来源。
+ */
+function isRenderedFresh() {
+  return (
+    selectionKey() === renderedFor &&
+    Date.now() - Math.max(renderedAt, lastAttemptAt) < effectiveTtlMs()
+  );
 }
 
 function rebuildUsageTimer() {
@@ -152,23 +203,25 @@ function rebuildUsageTimer() {
   }
   if (usageInterval > 0) {
     usageTimerId = setInterval(() => {
-      // 页面可见时强制重新统计当前视图；不可见时仅作废缓存，下次打开自动重拉
+      // 页面可见时重新统计当前视图：到点时结果恰好过期（TTL = 刷新间隔），
+      // 走缓存过期逻辑即可；期间被手动刷新过的来源仍在有效期内则自动跳过。
+      // 不可见时仅作废缓存，下次打开自动重拉。
       if (panelVisible && !loading) {
-        void loadCurrent(true);
+        loadView(false);
       } else {
         clearUsageMemoryCache();
         renderedAt = 0;
+        lastAttemptAt = 0;
       }
     }, usageInterval * 60_000);
   }
 }
 
-/** 与持久化设置同步（初次加载 / 其他入口修改时）。 */
+/** 与持久化的定时刷新设置同步（初次加载 / 设置弹窗修改时）。 */
 function syncUsageInterval(minutes) {
   const n = Number(minutes);
   if (!Number.isFinite(n) || n === usageInterval) return;
   usageInterval = n;
-  el("#usage-interval").value = String(n);
   setUsageCacheTtlMs(usageInterval > 0 ? usageInterval * 60_000 : DEFAULT_TTL_MS);
   rebuildUsageTimer();
 }
@@ -207,14 +260,16 @@ let lastAggRender = null; // 单位切换时用当前数据即时重绘
  * 渲染结果区（卡片 / 图表 / 明细表）。
  * opts.plan = { monthlyUsd, equivalentUsd } 时显示「套餐月费 · 等价倍数」卡片，
  * equivalentUsd 为参与对比的等价费用（总览视图仅计入可定价套餐的 Cursor 账户）。
- * opts.dailySources 为按日堆叠柱的各来源（总览按账户分段；缺省则用 agg.daily 单列）。
+ * opts.dailySources 为按日 / 按小时堆叠柱的各来源（总览按账户分段；缺省则用 agg 单列）。
+ * 各模型等价费用饼图直接取合并后的 agg.models，不区分来源。
  */
 function renderAggregate(agg, { showActual, metaText, plan, dailySources }) {
   const sources =
     dailySources != null
       ? dailySources
-      : [{ label: "用量", daily: agg.daily || [], showActual: !!showActual }];
+      : [{ label: "用量", daily: agg.daily || [], hourly: agg.hourly || [], showActual: !!showActual }];
   lastAggRender = { agg, opts: { showActual, metaText, plan, dailySources: sources } };
+  el("#usage-skeleton").hidden = true;
   el("#usage-results").hidden = false;
   el("#sum-equivalent").textContent = fmtUsd(agg.totalEquivalentUsd);
   el("#card-actual").hidden = !showActual;
@@ -264,20 +319,19 @@ function localYmd(d) {
 function addLocalDays(d, n) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 }
-function selectedRangeDays() {
-  if (selection === "local") {
-    const n = Number(el("#usage-codex-days").value);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  }
-  return rangeDays();
+/** 按日图的横轴天数（仅非「今天」跨度使用；今天跨度走 24h 小时图）。全部 = 0（从最早日期起）。 */
+function chartRangeDays() {
+  const n = Number(span);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
+/** 按日图横轴日期，最新在左（今天最左，越往右越旧）。 */
 function dailyAxisLabels(sources) {
-  const days = selectedRangeDays();
+  const days = chartRangeDays();
   const now = new Date();
   const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   if (days > 0) {
     const labels = [];
-    for (let i = days - 1; i >= 0; i -= 1) labels.push(localYmd(addLocalDays(today0, -i)));
+    for (let i = 0; i < days; i += 1) labels.push(localYmd(addLocalDays(today0, -i)));
     return labels;
   }
   let min = null;
@@ -288,7 +342,7 @@ function dailyAxisLabels(sources) {
   }
   if (!min) {
     const labels = [];
-    for (let i = 6; i >= 0; i -= 1) labels.push(localYmd(addLocalDays(today0, -i)));
+    for (let i = 0; i <= 6; i += 1) labels.push(localYmd(addLocalDays(today0, -i)));
     return labels;
   }
   const labels = [];
@@ -300,7 +354,7 @@ function dailyAxisLabels(sources) {
     labels.push(localYmd(cur));
     cur = addLocalDays(cur, 1);
   }
-  return labels;
+  return labels.reverse();
 }
 function tickDate(ymd) {
   const p = String(ymd).split("-");
@@ -317,25 +371,77 @@ function updateDailyHover(chart, hit) {
   setChartHoverHit(chart, hit, { stroke: chartTheme().tickStrong, hitBorder: 2 });
 }
 
+/**
+ * 「今天」跨度下在 24h 小时图给当前小时列画背景带作高亮。索引挂在 chart.$todayIndex
+ * （-1 / null 不画），颜色取 chart.$todayBandColor；独立于数据集配色，
+ * 与悬停变暗逻辑（applyChartHoverDim 重建 backgroundColor）互不干扰。
+ */
+const todayBandPlugin = {
+  id: "todayBand",
+  beforeDatasetsDraw(chart) {
+    const idx = chart.$todayIndex;
+    if (idx == null || idx < 0) return;
+    const x = chart.scales.x;
+    const area = chart.chartArea;
+    if (!x || !area) return;
+    const labels = chart.data.labels || [];
+    const step = labels.length > 1 ? Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0)) : x.width;
+    if (!Number.isFinite(step) || step <= 0) return;
+    const cx = x.getPixelForValue(idx);
+    const { ctx } = chart;
+    ctx.save();
+    ctx.fillStyle = chart.$todayBandColor || "rgba(110, 168, 254, 0.10)";
+    ctx.fillRect(cx - step / 2, area.top, step, area.bottom - area.top);
+    ctx.restore();
+  },
+};
+
+function todayBandColor() {
+  const accent = cssVar("--accent");
+  return accent ? hexAlpha(accent, 0.12) : "rgba(110, 168, 254, 0.10)";
+}
+
+/**
+ * 总览各来源（Cursor 账户 + 本地分析）的统一顺序：按当前已有数据的总 Token 降序，
+ * 无数据的来源垫底（相互间保持账户原顺序）。总览表行、按日堆叠图与模型柱图
+ * 都按此顺序渲染，保证行序与两张图的账户配色一一对应。
+ */
+function overviewSourceOrder() {
+  const entries = [];
+  for (const a of getAccounts().filter((x) => x.kind === "cursor")) {
+    const r = overviewResults.get(a.id) || null;
+    entries.push({ kind: "cursor", account: a, result: r, tokens: r && r.agg ? r.agg.totalTokens : 0 });
+  }
+  const local = overviewResults.get("local") || null;
+  const scanAgg = local && local.scan ? local.scan.aggregate : null;
+  entries.push({ kind: "local", account: null, result: local, tokens: scanAgg ? scanAgg.totalTokens : 0 });
+  entries.sort((a, b) => b.tokens - a.tokens);
+  return entries;
+}
+
 function collectDailySources() {
   const sources = [];
-  for (const a of getAccounts().filter((x) => x.kind === "cursor")) {
-    const r = overviewResults.get(a.id);
-    if (!r || !r.agg) continue;
-    sources.push({
-      label: a.note || maskToken(a.token),
-      daily: r.agg.daily || [],
-      showActual: true,
-    });
-  }
-  const local = overviewResults.get("local");
-  const scanAgg = local && local.scan ? local.scan.aggregate : null;
-  if (scanAgg) {
-    sources.push({
-      label: "本地用量分析",
-      daily: scanAgg.daily || [],
-      showActual: false,
-    });
+  for (const src of overviewSourceOrder()) {
+    if (src.kind === "cursor") {
+      const r = src.result;
+      if (!r || !r.agg) continue;
+      sources.push({
+        label: src.account.note || maskToken(src.account.token),
+        daily: r.agg.daily || [],
+        hourly: r.agg.hourly || [],
+        showActual: true,
+      });
+    } else {
+      const scanAgg = src.result && src.result.scan ? src.result.scan.aggregate : null;
+      if (scanAgg) {
+        sources.push({
+          label: "本地用量分析",
+          daily: scanAgg.daily || [],
+          hourly: scanAgg.hourly || [],
+          showActual: false,
+        });
+      }
+    }
   }
   return sources;
 }
@@ -343,20 +449,39 @@ function collectDailySources() {
 function renderDailyChart(sources) {
   const t = chartTheme();
   const list = Array.isArray(sources) ? sources : [];
-  const labels = dailyAxisLabels(list);
+  // 「今天」跨度渲染当天 24 小时柱，0:00 → 23:00 从左到右（未到时段留空），
+  // 其余跨度按日渲染；两种模式共用同一图表实例，切换时原地更新。
+  const hourlyMode = isTodaySpan();
+  el("#chart-daily-title").textContent = hourlyMode ? "按小时 Token（今天）" : "按日 Token";
+  let hours = null;
+  let labels;
+  if (hourlyMode) {
+    hours = [];
+    for (let h = 0; h <= 23; h += 1) hours.push(h);
+    labels = hours.map((h) => `${h}:00`);
+  } else {
+    labels = dailyAxisLabels(list);
+  }
+  const ymd = localYmd(new Date());
   const baseColors = list.map((_, i) => colorFor(i));
   const meta = [];
   const showActual = [];
   const datasets = list.map((s, i) => {
-    const byDate = new Map((s.daily || []).map((d) => [d.date, d]));
-    meta.push(labels.map((ymd) => byDate.get(ymd) || null));
+    let rows;
+    if (hourlyMode) {
+      const byHour = new Map(
+        (s.hourly || []).filter((r) => r && r.date === ymd).map((r) => [Number(r.hour), r])
+      );
+      rows = hours.map((h) => byHour.get(h) || null);
+    } else {
+      const byDate = new Map((s.daily || []).map((d) => [d.date, d]));
+      rows = labels.map((label) => byDate.get(label) || null);
+    }
+    meta.push(rows);
     showActual.push(!!s.showActual);
     return {
       label: s.label,
-      data: labels.map((ymd) => {
-        const d = byDate.get(ymd);
-        return d && d.tokens > 0 ? d.tokens : null;
-      }),
+      data: rows.map((r) => (r && r.tokens > 0 ? r.tokens : null)),
       backgroundColor: baseColors[i],
       hoverBackgroundColor: baseColors[i],
       borderColor: baseColors[i],
@@ -374,6 +499,10 @@ function renderDailyChart(sources) {
     chart.$dailyMeta = meta;
     chart.$showActual = showActual;
     chart.$hoverKey = "";
+    chart.$hourly = hourlyMode;
+    // 高亮带：小时图标记当前小时列（按日图不再高亮，今天跨度已不走按日模式）
+    chart.$todayIndex = hourlyMode && hours ? hours.indexOf(new Date().getHours()) : -1;
+    chart.$todayBandColor = todayBandColor();
   };
 
   if (dailyChart) {
@@ -388,8 +517,10 @@ function renderDailyChart(sources) {
   dailyChart = new Chart(el("#chart-daily"), {
     type: "bar",
     data: { labels, datasets },
+    plugins: [todayBandPlugin],
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: "nearest", intersect: true, axis: "xy" },
       animation: { duration: motion, easing: "easeOutQuart" },
       animations: {
@@ -414,7 +545,13 @@ function renderDailyChart(sources) {
           callbacks: {
             title(items) {
               if (!items.length) return "";
-              return titleDate(items[0].chart.data.labels[items[0].dataIndex]);
+              const chart = items[0].chart;
+              const label = chart.data.labels[items[0].dataIndex];
+              if (chart.$hourly) {
+                const h = parseInt(label, 10);
+                return Number.isFinite(h) ? `今天 ${h}:00 – ${h + 1}:00` : String(label);
+              }
+              return titleDate(label);
             },
             label(ctx) {
               if (ctx.raw == null) return null;
@@ -441,7 +578,7 @@ function renderDailyChart(sources) {
                 const v = ds.data[idx];
                 if (typeof v === "number") sum += v;
               }
-              return `当日合计 ${fmtTokens(sum)}`;
+              return `${chart.$hourly ? "该小时合计" : "当日合计"} ${fmtTokens(sum)}`;
             },
           },
         },
@@ -481,34 +618,162 @@ function renderDailyChart(sources) {
   bindChartHoverLeave(dailyChart);
 }
 
-// 图表实例常驻，重复渲染时原地更新数据（渐进合并时不闪烁）
+/** 销毁全部图表实例并清掉画布上的孤儿注册。
+ *  Chart 构造中途失败时实例已注册到画布、模块变量却为 null，之后每次
+ *  new Chart 都会抛「Canvas is already in use」；这里连孤儿一起清理才能重建。 */
+function destroyUsageCharts() {
+  for (const chart of [dailyChart, tokenChart, modelChart, doughnutChart]) {
+    if (chart) {
+      try { chart.destroy(); } catch { /* ignore */ }
+    }
+  }
+  dailyChart = null;
+  tokenChart = null;
+  modelChart = null;
+  doughnutChart = null;
+  if (typeof Chart === "undefined" || typeof Chart.getChart !== "function") return;
+  for (const id of ["chart-daily", "chart-tokens", "chart-models", "chart-doughnut"]) {
+    const orphan = Chart.getChart(id);
+    if (orphan) {
+      try { orphan.destroy(); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * 图表渲染的防护壳：图表异常绝不能中断统计流程（否则各来源拉取根本不会
+ * 发起，状态列永远停在「统计中…」）。失败时销毁并重建一次，仍失败则本轮
+ * 放弃图表，卡片与明细表不受影响。
+ */
 function renderCharts(agg, dailySources) {
+  try {
+    renderChartsInner(agg, dailySources);
+  } catch (error) {
+    console.error("图表渲染失败，重置实例后重试：", error);
+    destroyUsageCharts();
+    try {
+      renderChartsInner(agg, dailySources);
+    } catch (retryError) {
+      console.error("图表重建仍失败，本轮跳过图表：", retryError);
+      destroyUsageCharts();
+    }
+  }
+}
+
+// 图表实例常驻，重复渲染时原地更新数据（渐进合并时不闪烁）
+/** 按指定指标取 Top N 模型切片，其余合并为「其他」（饼图共用）。 */
+function topSlices(models, metric, n) {
+  const list = (models || [])
+    .filter((m) => m[metric] > 0)
+    .slice()
+    .sort((a, b) => b[metric] - a[metric]);
+  const top = list.slice(0, n);
+  const rest = list.slice(n);
+  const slices = top.map((m) => ({ label: m.model, value: m[metric] }));
+  if (rest.length) {
+    slices.push({ label: "其他", value: rest.reduce((sum, m) => sum + m[metric], 0) });
+  }
+  return slices;
+}
+
+function renderChartsInner(agg, dailySources) {
   renderDailyChart(dailySources);
   const t = chartTheme();
-  const top = agg.models.filter((m) => m.equivalentUsd > 0).slice(0, 12);
-  const labels = top.map((m) => m.model);
-  const data = top.map((m) => Number(m.equivalentUsd.toFixed(4)));
-  const colors = top.map((_, i) => colorFor(i));
 
-  if (barChart) {
-    barChart.data.labels = labels;
-    barChart.data.datasets[0].data = data;
-    barChart.data.datasets[0].backgroundColor = colors;
-    barChart.update();
+  // 各模型 Token 数量饼图：Top 8 + 其他；未定价模型也计入
+  const tokenSlices = topSlices(agg.models, "totalTokens", 8);
+  const tokenLabels = tokenSlices.map((s) => s.label);
+  const tokenData = tokenSlices.map((s) => Math.round(s.value));
+  const tokenColors = tokenSlices.map((_, i) => colorFor(i));
+  if (tokenChart) {
+    tokenChart.data.labels = tokenLabels;
+    tokenChart.data.datasets[0].data = tokenData;
+    tokenChart.data.datasets[0].backgroundColor = tokenColors;
+    tokenChart.update();
   } else {
-    barChart = new Chart(el("#chart-bar"), {
-      type: "bar",
-      data: { labels, datasets: [{ label: "等价费用 (USD)", data, backgroundColor: colors, borderRadius: 4 }] },
+    tokenChart = new Chart(el("#chart-tokens"), {
+      type: "doughnut",
+      data: {
+        labels: tokenLabels,
+        datasets: [
+          {
+            data: tokenData,
+            backgroundColor: tokenColors,
+            borderColor: t.border,
+            borderWidth: 2,
+          },
+        ],
+      },
+      plugins: [pieSliceLabelsPlugin],
       options: {
-        indexAxis: "y",
         responsive: true,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { ticks: { color: t.tick }, grid: { color: t.grid } },
-          y: { ticks: { color: t.tickStrong }, grid: { display: false } },
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
+          tooltip: {
+            callbacks: {
+              label(ctx) {
+                const total = ctx.dataset.data.reduce((sum, v) => sum + (Number(v) || 0), 0);
+                const share = fmtShare(ctx.parsed, total);
+                return ` ${ctx.label}: ${fmtTokens(ctx.parsed)}${share ? `（${share}）` : ""}`;
+              },
+            },
+          },
         },
       },
     });
+    // 扇区上标注占比 + 紧凑 token 数；配置挂实例属性，不能进 options（scriptable 解析陷阱）
+    tokenChart.$pieSliceLabels = {
+      formatter: (value, share) => [share, compactTokens(value)],
+    };
+  }
+
+  // 各模型等价费用饼图：Top 8 + 其他；仅统计已定价（费用 > 0）的模型
+  const costSlices = topSlices(agg.models, "equivalentUsd", 8);
+  const modelLabels = costSlices.map((s) => s.label);
+  const modelData = costSlices.map((s) => Number(s.value.toFixed(4)));
+  const modelColors = costSlices.map((_, i) => colorFor(i));
+  if (modelChart) {
+    modelChart.data.labels = modelLabels;
+    modelChart.data.datasets[0].data = modelData;
+    modelChart.data.datasets[0].backgroundColor = modelColors;
+    modelChart.update();
+  } else {
+    modelChart = new Chart(el("#chart-models"), {
+      type: "doughnut",
+      data: {
+        labels: modelLabels,
+        datasets: [
+          {
+            data: modelData,
+            backgroundColor: modelColors,
+            borderColor: t.border,
+            borderWidth: 2,
+          },
+        ],
+      },
+      plugins: [pieSliceLabelsPlugin],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
+          tooltip: {
+            callbacks: {
+              label(ctx) {
+                const total = ctx.dataset.data.reduce((sum, v) => sum + (Number(v) || 0), 0);
+                const share = fmtShare(ctx.parsed, total);
+                return ` ${ctx.label}: ${fmtUsd(ctx.parsed)}${share ? `（${share}）` : ""}`;
+              },
+            },
+          },
+        },
+      },
+    });
+    // 扇区上标注占比 + 金额；配置挂实例属性，不能进 options（scriptable 解析陷阱）
+    modelChart.$pieSliceLabels = {
+      formatter: (value, share) => [share, fmtUsd(value)],
+    };
   }
 
   const sums = agg.models.reduce(
@@ -539,14 +804,21 @@ function renderCharts(agg, dailySources) {
           },
         ],
       },
+      plugins: [pieSliceLabelsPlugin],
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         plugins: {
-          legend: { position: "bottom", labels: { color: t.tickStrong } },
+          // 图例放右侧，饼图主体尽量占满定高容器
+          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
           tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${fmtTokens(ctx.parsed)}` } },
         },
       },
     });
+    // 扇区上标注占比 + 紧凑 token 数；配置挂实例属性，不能进 options（scriptable 解析陷阱）
+    doughnutChart.$pieSliceLabels = {
+      formatter: (value, share) => [share, compactTokens(value)],
+    };
   }
 }
 
@@ -582,41 +854,34 @@ function rebuildChips() {
 }
 
 function applyVisibility() {
-  el("#usage-range-wrap").hidden = selection === "local";
   el("#usage-local-form").hidden = selection !== "local";
   el("#usage-overview").hidden = selection !== "all";
   el("#usage-results").hidden = true;
+  el("#usage-skeleton").hidden = true;
   renderedFor = ""; // 结果区已被隐藏，需要重新渲染
+  lastAttemptAt = 0;
   clearStatus();
 }
 
 function selectSource(value) {
   if (selection === value) {
-    void loadCurrent(false);
+    loadView(false);
     return;
   }
   selection = value;
   rebuildChips();
   applyVisibility();
-  void loadCurrent(false);
+  loadView(false);
 }
 
 /* ---------- 数据加载与持久化缓存（与托盘总览共用 usage_data.js） ---------- */
-
-function rangeKey() {
-  return String(rangeDays());
-}
-
-function scanRangeKey(days) {
-  return days == null || days === 0 ? "all" : String(days);
-}
 
 function getCachedAgg(account) {
   return cacheGetAgg(account.id, rangeKey());
 }
 
-function getCachedScan(days, home) {
-  return cacheGetScan(scanRangeKey(days), home);
+function getCachedScan(home) {
+  return cacheGetScan(scanKey(), home);
 }
 
 function fetchAggregate(account, force) {
@@ -624,8 +889,11 @@ function fetchAggregate(account, force) {
   return fetchCursorAggregate(account, rangeKey(), { start, end, force });
 }
 
-function fetchScan(days, home, force) {
-  return fetchCodexScan({ days: days == null || days === 0 ? null : days, home, force });
+/** 按当前跨度扫描本地日志：今天用 sinceMs（fetchCodexScan 会落到今日键），其余按天数。 */
+function fetchScan(home, force) {
+  if (isTodaySpan()) return fetchCodexScan({ sinceMs: todayStartMs(), home, force });
+  const days = span === "0" ? null : Number(span);
+  return fetchCodexScan({ days, home, force });
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -674,7 +942,6 @@ function mergeAggregates(aggs) {
 }
 
 function renderOverviewTable() {
-  const accounts = getAccounts().filter((a) => a.kind === "cursor");
   const body = el("#usage-overview-body");
   body.replaceChildren();
   const numTd = (text, title) => {
@@ -688,9 +955,10 @@ function renderOverviewTable() {
   const totals = { tokens: 0, actual: 0, equivalent: 0, planUsd: 0, planEquiv: 0, planKnown: false };
   let hasData = false;
 
-  // 一行一个来源：各 Cursor 账户 + 本地 Codex 分析；showActual=false 的来源实扣列恒为 —。
-  // 统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
-  const sourceRow = ({ kind, label, stateText, stateBad, agg, showActual, planText, ratioText }) => {
+  // 一行一个来源：各 Cursor 账户 + 本地 Codex 分析，按总 Token 降序；
+  // showActual=false 的来源实扣列恒为 —。统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
+  // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
+  const sourceRow = ({ kind, label, stateText, stateBad, at, agg, showActual, planText, ratioText }) => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     const ident = document.createElement("div");
@@ -711,6 +979,14 @@ function renderOverviewTable() {
       stateTd.title = stateText;
     }
 
+    const timeTd = document.createElement("td");
+    if (Number.isFinite(at) && at > 0) {
+      timeTd.textContent = relativeFromUnixSeconds(at / 1000);
+      timeTd.title = new Date(at).toLocaleString("zh-CN", { hour12: false });
+    } else {
+      timeTd.textContent = "—";
+    }
+
     const planTd = document.createElement("td");
     planTd.textContent = planText || "—";
 
@@ -722,6 +998,7 @@ function renderOverviewTable() {
       tr.append(
         nameTd,
         stateTd,
+        timeTd,
         planTd,
         numTd(fmtTokens(agg.totalTokens), fmtInt(agg.totalTokens)),
         numTd(showActual ? fmtUsd(agg.totalActualUsd) : "—"),
@@ -729,71 +1006,77 @@ function renderOverviewTable() {
         numTd(ratioText || "—")
       );
     } else {
-      tr.append(nameTd, stateTd, planTd, numTd("—"), numTd("—"), numTd("—"), numTd("—"));
+      tr.append(nameTd, stateTd, timeTd, planTd, numTd("—"), numTd("—"), numTd("—"), numTd("—"));
     }
     body.append(tr);
   };
 
-  for (const a of accounts) {
-    const result = overviewResults.get(a.id);
-    const agg = result && result.agg ? result.agg : null;
-    let stateText = "—";
-    let stateBad = false;
-    if (result && result.state === "pending") {
-      stateText = agg ? "更新中…" : "统计中…";
-    } else if (result && result.state === "error") {
-      stateText = agg ? `更新失败：${result.error}` : result.error;
-      stateBad = true;
-    } else if (result && result.state === "ok") {
-      stateText = "完成";
+  for (const src of overviewSourceOrder()) {
+    if (src.kind === "cursor") {
+      const a = src.account;
+      const result = src.result;
+      const agg = result && result.agg ? result.agg : null;
+      let stateText = "—";
+      let stateBad = false;
+      if (result && result.state === "pending") {
+        stateText = agg ? "更新中…" : "统计中…";
+      } else if (result && result.state === "error") {
+        stateText = agg ? `更新失败：${result.error}` : result.error;
+        stateBad = true;
+      } else if (result && result.state === "ok") {
+        stateText = "完成";
+      }
+      // 套餐列：套餐名 + 月费；倍数列：等价费用 ÷ 月费（月费未知或为 0 时为 —；
+      // 「今天」跨度下单日费用对比月费无意义，恒为 —）
+      const membership = a.status ? a.status.membershipType : null;
+      const planLabel = membership ? membershipLabel(membership) : "";
+      const price = planMonthlyUsd(membership);
+      const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
+      let ratioText = "—";
+      if (agg && price > 0 && !isTodaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
+      if (agg && price != null) {
+        totals.planUsd += price;
+        totals.planEquiv += agg.totalEquivalentUsd;
+        totals.planKnown = true;
+      }
+      sourceRow({
+        kind: "cursor",
+        label: a.note || maskToken(a.token),
+        stateText,
+        stateBad,
+        at: result ? result.at : null,
+        agg,
+        showActual: true,
+        planText,
+        ratioText,
+      });
+    } else {
+      // 本地 Codex 分析行：无论有无 Cursor 账户都展示；本地日志无账户归属，无套餐可比
+      const local = src.result;
+      const localAgg = local && local.scan ? local.scan.aggregate : null;
+      let localState = "—";
+      let localBad = false;
+      if (local && local.state === "pending") {
+        localState = localAgg ? "更新中…" : "统计中…";
+      } else if (local && local.state === "error") {
+        localState = localAgg ? `更新失败：${local.error}` : local.error;
+        localBad = true;
+      } else if (local && local.state === "ok") {
+        localState = `${local.scan.sessions} 个会话`;
+      }
+      sourceRow({
+        kind: "codex",
+        label: "本地用量分析",
+        stateText: localState,
+        stateBad: localBad,
+        at: local ? local.at : null,
+        agg: localAgg,
+        showActual: false,
+        planText: "—",
+        ratioText: "—",
+      });
     }
-    // 套餐列：套餐名 + 月费；倍数列：等价费用 ÷ 月费（月费未知或为 0 时为 —）
-    const membership = a.status ? a.status.membershipType : null;
-    const planLabel = membership ? membershipLabel(membership) : "";
-    const price = planMonthlyUsd(membership);
-    const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
-    let ratioText = "—";
-    if (agg && price > 0) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
-    if (agg && price != null) {
-      totals.planUsd += price;
-      totals.planEquiv += agg.totalEquivalentUsd;
-      totals.planKnown = true;
-    }
-    sourceRow({
-      kind: "cursor",
-      label: a.note || maskToken(a.token),
-      stateText,
-      stateBad,
-      agg,
-      showActual: true,
-      planText,
-      ratioText,
-    });
   }
-
-  // 本地 Codex 分析行：无论有无 Cursor 账户都展示；本地日志无账户归属，无套餐可比
-  const local = overviewResults.get("local");
-  const localAgg = local && local.scan ? local.scan.aggregate : null;
-  let localState = "—";
-  let localBad = false;
-  if (local && local.state === "pending") {
-    localState = localAgg ? "更新中…" : "统计中…";
-  } else if (local && local.state === "error") {
-    localState = localAgg ? `更新失败：${local.error}` : local.error;
-    localBad = true;
-  } else if (local && local.state === "ok") {
-    localState = `${local.scan.sessions} 个会话`;
-  }
-  sourceRow({
-    kind: "codex",
-    label: "本地用量分析",
-    stateText: localState,
-    stateBad: localBad,
-    agg: localAgg,
-    showActual: false,
-    planText: "—",
-    ratioText: "—",
-  });
 
   if (hasData) {
     const tr = document.createElement("tr");
@@ -801,13 +1084,16 @@ function renderOverviewTable() {
     const label = document.createElement("td");
     label.textContent = "合计";
     const spacer = document.createElement("td");
+    const timeSpacer = document.createElement("td");
     const planTd = document.createElement("td");
     planTd.textContent = totals.planKnown ? `$${totals.planUsd}/月` : "—";
     // 合计倍数只按「套餐月费已知的 Cursor 账户」口径计算，与套餐列保持一致
-    const totalRatio = totals.planUsd > 0 ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
+    const totalRatio =
+      totals.planUsd > 0 && !isTodaySpan() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
     tr.append(
       label,
       spacer,
+      timeSpacer,
       planTd,
       numTd(fmtTokens(totals.tokens), fmtInt(totals.tokens)),
       numTd(fmtUsd(totals.actual)),
@@ -856,10 +1142,14 @@ function renderOverviewMerged() {
   const sources = [];
   if (cursorCount) sources.push(`${cursorCount} 个 Cursor 账户`);
   if (scanAgg) sources.push("本地 ChatGPT");
+  // 「今天」跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
+  const tail = isTodaySpan()
+    ? "柱图为今日 0–24 时分布（当前小时高亮）"
+    : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，选近 30 天时最具参考性）";
   renderAggregate(merged, {
     showActual: true,
-    plan: planKnown ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
-    metaText: `全部总览 · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，选近 30 天时最具参考性）。`,
+    plan: planKnown && !isTodaySpan() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
+    metaText: `全部总览 · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
     dailySources: collectDailySources(),
   });
   // 合并视图的数据时间取最早的来源时间（保守口径）
@@ -867,34 +1157,43 @@ function renderOverviewMerged() {
   return merged;
 }
 
+// 上次总览加载的跨度签名：跨度切换后不复用上一跨度的内存结果作种子（口径不同会串数）
+let overviewSpanSig = "";
+
 async function loadOverview(force, seq) {
   const cursorAccounts = getAccounts().filter((a) => a.kind === "cursor");
   el("#usage-overview").hidden = false;
-  const previous = new Map(overviewResults);
+  const spanSig = `${rangeKey()}:${scanKey()}`;
+  const previous = spanSig === overviewSpanSig ? new Map(overviewResults) : new Map();
+  overviewSpanSig = spanSig;
   overviewResults.clear();
 
-  // 时间范围沿用顶部选择器，目录用默认 CODEX_HOME
-  const days = rangeDays() > 0 ? rangeDays() : null;
-
-  // 1) 缓存种子：先用缓存（含过期缓存）填充各来源并立即渲染卡片 / 图表 / 明细
+  // 1) 缓存种子：先用缓存（含过期缓存）填充各来源并立即渲染卡片 / 图表 / 明细。
+  //    有效期内的来源直接标「完成」，不再进入「更新中…」；全部新鲜时静默完成（不弹提示），
+  //    这样账户同步预取过用量后再进本页，看起来就是「不重新统计」。
+  const ttl = effectiveTtlMs();
   for (const a of cursorAccounts) {
     const cached = getCachedAgg(a);
     const prev = previous.get(a.id);
     const agg = (cached && cached.agg) || (prev && prev.agg) || null;
     const at = cached ? cached.at : prev && prev.at;
-    overviewResults.set(a.id, agg ? { state: "pending", agg, at } : { state: "pending" });
+    const fresh = !force && !!cached && Date.now() - cached.at < ttl;
+    overviewResults.set(a.id, { state: fresh ? "ok" : "pending", agg, at });
   }
-  const cachedScan = getCachedScan(days, null);
+  const cachedScan = getCachedScan(null);
   const prevLocal = previous.get("local");
   const scan = (cachedScan && cachedScan.scan) || (prevLocal && prevLocal.scan) || null;
   const scanAt = cachedScan ? cachedScan.at : prevLocal && prevLocal.at;
-  overviewResults.set("local", scan ? { state: "pending", scan, at: scanAt } : { state: "pending" });
+  const scanFresh = !force && !!cachedScan && Date.now() - cachedScan.at < ttl;
+  overviewResults.set("local", { state: scanFresh ? "ok" : "pending", scan, at: scanAt });
   renderOverviewTable();
-  const seeded = renderOverviewMerged() != null;
-  setStatus("", seeded ? "已显示缓存数据，正在更新各来源用量…" : "正在统计各来源用量…（数据多时可能需要几十秒）");
+  renderOverviewMerged();
+  // 加载进度不再弹 toast：无缓存时骨架屏占位，有缓存时顶部「更新中…」+ 状态列体现
+  clearStatus();
 
   // 2) 本地 Codex 扫描与各 Cursor 账户并行拉取，每个来源完成后立即合并重绘
-  const scanJob = fetchScan(days, null, force)
+  //   （有效期内的来源在 usage_data 中直接命中缓存，不会走网络）
+  const scanJob = fetchScan(null, force)
     .then((entry) => {
       overviewResults.set("local", { state: "ok", scan: entry.scan, at: entry.at });
     })
@@ -967,23 +1266,27 @@ async function loadOverview(force, seq) {
 async function loadCursorAccount(account, force, seq) {
   const renderIt = (agg, at) => {
     const price = planMonthlyUsd(account.status ? account.status.membershipType : null);
+    const tail = isTodaySpan()
+      ? "柱图为今日 0–24 时分布（当前小时高亮）"
+      : "倍数 = 等价费用 ÷ 套餐月费";
     renderAggregate(agg, {
       showActual: true,
-      plan: price != null ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd } : null,
-      metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；倍数 = 等价费用 ÷ 套餐月费。`,
-      dailySources: [{ label: accountLabel(account), daily: agg.daily || [], showActual: true }],
+      plan:
+        price != null && !isTodaySpan()
+          ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd }
+          : null,
+      metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
+      dailySources: [
+        { label: accountLabel(account), daily: agg.daily || [], hourly: agg.hourly || [], showActual: true },
+      ],
     });
     markUpdated(at);
     if (agg.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
   };
 
-  // 先渲染缓存（含过期缓存），再后台拉取最新数据
+  // 先渲染缓存（含过期缓存），再后台拉取最新数据（进度不弹 toast，见骨架屏与「更新中…」）
   const cached = getCachedAgg(account);
   if (cached) renderIt(cached.agg, cached.at);
-  const fresh = cached && Date.now() - cached.at < effectiveTtlMs();
-  if (!fresh || force) {
-    setStatus("", cached ? "已显示缓存数据，正在更新…" : "正在拉取该账户的用量…（数据多时可能需要几十秒）");
-  }
   try {
     const entry = await fetchAggregate(account, force);
     if (seq !== loadSeq) return;
@@ -997,13 +1300,20 @@ async function loadCursorAccount(account, force, seq) {
   }
 }
 
-function renderScan(scan, days, at) {
+function renderScan(scan, at) {
   const rootsText = scan.roots.length ? scan.roots.join("、") : "未找到会话目录";
   renderAggregate(scan.aggregate, {
     showActual: false,
     plan: null,
-    metaText: `本地 ChatGPT 用量分析 · ${days ? `近 ${days} 天` : "全部"} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
-    dailySources: [{ label: "本地用量分析", daily: scan.aggregate.daily || [], showActual: false }],
+    metaText: `本地 ChatGPT 用量分析 · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
+    dailySources: [
+      {
+        label: "本地用量分析",
+        daily: scan.aggregate.daily || [],
+        hourly: scan.aggregate.hourly || [],
+        showActual: false,
+      },
+    ],
   });
   markUpdated(at);
   if (scan.aggregate.models.length === 0) {
@@ -1012,27 +1322,21 @@ function renderScan(scan, days, at) {
 }
 
 async function loadLocal(force, seq) {
-  const daysRaw = Number(el("#usage-codex-days").value);
-  const days = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : null;
   const home = el("#usage-codex-home").value.trim() || null;
-  // 先渲染缓存（含过期缓存），再后台重新扫描
-  const cached = getCachedScan(days, home);
-  if (cached) renderScan(cached.scan, days, cached.at);
-  const fresh = cached && Date.now() - cached.at < effectiveTtlMs();
-  if (!fresh || force) {
-    setStatus("", cached ? "已显示缓存数据，正在重新扫描…" : "正在扫描本地 ChatGPT 会话日志…");
-  }
+  // 先渲染缓存（含过期缓存），再后台重新扫描（进度不弹 toast，见骨架屏与「更新中…」）
+  const cached = getCachedScan(home);
+  if (cached) renderScan(cached.scan, cached.at);
   const btn = el("#usage-codex-scan");
   btn.disabled = true;
   try {
-    const entry = await fetchScan(days, home, force);
+    const entry = await fetchScan(home, force);
     if (seq !== loadSeq) return;
     clearStatus();
-    renderScan(entry.scan, days, entry.at);
+    renderScan(entry.scan, entry.at);
   } catch (error) {
     if (seq !== loadSeq) return;
     const fallback = (error && error.usageCache) || cached;
-    if (fallback && fallback.scan) renderScan(fallback.scan, days, fallback.at);
+    if (fallback && fallback.scan) renderScan(fallback.scan, fallback.at);
     setStatus("bad", fallback ? `扫描失败（仍显示上次数据）：${resetError(error)}` : `扫描失败：${resetError(error)}`);
   } finally {
     btn.disabled = false;
@@ -1040,11 +1344,15 @@ async function loadLocal(force, seq) {
 }
 
 async function loadCurrent(force) {
-  // 先作废所有在途加载，避免旧结果渲染到已切换的视图上
+  // 结果区仍展示着当前选择且未过期时无需重载。
+  // 此判断必须在递增 loadSeq 之前：否则一次「无操作」的调用（如重复点击当前 chip）
+  // 会作废在途加载却不开启新加载——lanes 提前退出、loading 永远无法复位，
+  // 总览行从此冻结在「更新中…」，定时器与账户联动刷新也全部被 loading 挡住。
+  if (!force && isRenderedFresh()) return;
+  // 作废所有在途加载，避免旧结果渲染到已切换的视图上
   const seq = ++loadSeq;
-  // 结果区仍展示着当前选择且未过期时无需重载
-  if (!force && selectionKey() === renderedFor && Date.now() - renderedAt < effectiveTtlMs()) return;
   loading = true;
+  el("#usage-loading").hidden = false;
   try {
     if (selection === "all") {
       await loadOverview(force, seq);
@@ -1061,45 +1369,145 @@ async function loadCurrent(force) {
         await loadCursorAccount(account, force, seq);
       }
     }
+  } catch (error) {
+    // 统计编排本身异常（各来源的拉取失败已在内部消化）——必须可见，
+    // 否则表现为状态列永远停在「统计中…」的无声冻结
+    console.error("统计流程异常：", error);
+    if (seq === loadSeq) setStatus("bad", `统计流程异常：${resetError(error)}，请点「刷新」重试。`);
   } finally {
-    if (seq === loadSeq) loading = false;
+    if (seq === loadSeq) {
+      loading = false;
+      el("#usage-loading").hidden = true;
+      // 全部失败等场景什么都没渲染出来，不能让骨架屏永远转下去
+      if (el("#usage-results").hidden) el("#usage-skeleton").hidden = true;
+      // 记录本轮加载完成时间：失败来源不再把整页拖成永久过期（见 isRenderedFresh）
+      lastAttemptAt = Date.now();
+    }
   }
+}
+
+/**
+ * 统一加载入口：发起加载后按同步段结果决定骨架屏——
+ * loadCurrent 的同步段会用缓存种子立即渲染（stale-while-revalidate），
+ * 走完后结果区仍隐藏说明新视图 / 新跨度无任何缓存，露出骨架占位；
+ * 首个结果渲染（renderAggregate）时骨架自动隐藏。
+ */
+function loadView(force) {
+  void loadCurrent(!!force);
+  el("#usage-skeleton").hidden = !el("#usage-results").hidden;
+}
+
+/* ---------- 统一刷新：账户刷新联动预取 / 跨窗口缓存联动 ---------- */
+
+/** 共享缓存有更新（本页预取完成 / 对端窗口写入）后，作废新鲜度并在可见时从缓存重渲染。 */
+function scheduleRerenderFromCache() {
+  renderedAt = 0;
+  lastAttemptAt = 0;
+  if (!panelVisible) return;
+  clearTimeout(rerenderTimer);
+  rerenderTimer = setTimeout(() => {
+    if (panelVisible && !loading) loadView(false);
+  }, 250);
+}
+
+/** 找出「状态刚刷新过」的账户（lastRefreshAt 变化）；首批快照只登记不算刷新。 */
+function detectRefreshedAccounts(list) {
+  const ids = new Set(list.map((a) => a.id));
+  for (const id of [...seenRefreshAt.keys()]) {
+    if (!ids.has(id)) seenRefreshAt.delete(id);
+  }
+  const refreshed = [];
+  for (const a of list) {
+    const at = Number(a.lastRefreshAt) || 0;
+    const prev = seenRefreshAt.get(a.id);
+    seenRefreshAt.set(a.id, at);
+    if (seenInitialized && at > 0 && at !== prev) refreshed.push(a);
+  }
+  seenInitialized = true;
+  return refreshed;
+}
+
+/**
+ * 统一刷新的用量侧：不论从哪个入口刷新账户状态（账户页 / 托盘 / 定时 / 本页「刷新」），
+ * 都后台按当前跨度强制预取对应来源的用量写入共享缓存，之后进本页直接命中不再重新统计。
+ * Cursor 按账户预取；Codex 账户的账单来自本地日志，任一 Codex 账户刷新预取一次本地扫描。
+ * 缓存足够新（刚被本页或托盘拉过）时跳过，避免重复走网络；并发去重由 usage_data 的
+ * in-flight 表保证（与本页正在进行的统计撞车时复用同一请求）。
+ */
+function prefetchUsageFor(accounts) {
+  const jobs = [];
+  for (const a of accounts) {
+    if (a.kind !== "cursor") continue;
+    const cached = cacheGetAgg(a.id, rangeKey());
+    if (cached && Date.now() - cached.at < PREFETCH_MIN_AGE_MS) continue;
+    jobs.push(fetchAggregate(a, true).catch(() => {}));
+  }
+  if (accounts.some((a) => a.kind === "codex")) {
+    const cached = cacheGetScan(scanKey(), "");
+    if (!cached || Date.now() - cached.at >= PREFETCH_MIN_AGE_MS) {
+      jobs.push(fetchScan(null, true).catch(() => {}));
+    }
+  }
+  if (!jobs.length) return;
+  void Promise.allSettled(jobs).then(() => scheduleRerenderFromCache());
+}
+
+/** 对端窗口写入的缓存键是否影响当前视图（跨度不同则无需重渲染）。 */
+function cacheKeyAffectsCurrentView(key) {
+  if (!key || !key.startsWith(USAGE_CACHE_PREFIX)) return true; // 通配 / 整体清理保守处理
+  const rest = key.slice(USAGE_CACHE_PREFIX.length);
+  if (rest.startsWith("agg:")) return selection !== "local" && rest.endsWith(`:${rangeKey()}`);
+  if (rest.startsWith("scan:")) {
+    if (selection !== "all" && selection !== "local") return false;
+    return rest.slice(5).startsWith(`${scanKey()}:`);
+  }
+  return true;
 }
 
 /* ---------- 初始化 ---------- */
 
+function setSpan(next) {
+  if (!Object.prototype.hasOwnProperty.call(SPAN_LABELS, next) || next === span) return;
+  span = next;
+  for (const btn of el("#usage-span").querySelectorAll("[data-span]")) {
+    const on = btn.dataset.span === next;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  }
+  // 先隐藏结果区再加载：新跨度有缓存时同步段立即重渲染（无闪烁），
+  // 无缓存时由 loadView 露出骨架占位，不残留上一跨度口径的数字
+  applyVisibility();
+  loadView(false);
+}
+
 export function initUsage() {
   el("#usage-refresh").addEventListener("click", () => {
-    void loadCurrent(true);
+    // 统一刷新：重新统计当前视图，并顺带刷新视图相关账户的状态
+    loadView(true);
+    const ids =
+      selection === "all"
+        ? getAccounts().filter((a) => a.kind === "cursor").map((a) => a.id)
+        : selection !== "local" && currentAccount()
+        ? [selection]
+        : [];
+    if (ids.length) void refreshAccounts(ids);
   });
-  el("#usage-range").addEventListener("change", () => {
-    void loadCurrent(false);
+  // 时间跨度二级 TAB（默认今天）
+  el("#usage-span").addEventListener("click", (event) => {
+    const btn = event.target instanceof Element ? event.target.closest("[data-span]") : null;
+    if (btn) setSpan(btn.dataset.span);
   });
   el("#usage-codex-scan").addEventListener("click", () => {
-    if (selection === "local") void loadCurrent(true);
-  });
-  el("#usage-interval").addEventListener("change", async () => {
-    const select = el("#usage-interval");
-    const minutes = Number(select.value);
-    const previous = usageInterval;
-    try {
-      const saved = await setUsageInterval(minutes);
-      usageInterval = Number.isFinite(Number(saved)) ? Number(saved) : minutes;
-      select.value = String(usageInterval);
-      rebuildUsageTimer();
-      setStatus("ok", usageInterval > 0 ? `统计将每 ${usageInterval} 分钟自动更新。` : "已关闭统计自动更新。");
-    } catch (error) {
-      select.value = String(previous);
-      setStatus("bad", `设置自动更新失败：${resetError(error)}`);
-    }
+    if (selection === "local") loadView(true);
   });
 
   onAccountsChanged((list) => {
-    syncUsageInterval(getUsageIntervalMinutes());
+    syncUsageInterval(getRefreshIntervalMinutes());
     const sig = list.map((a) => a.id).join(",");
     if (sig !== accountIdsSig) {
       accountIdsSig = sig;
       renderedAt = 0; // 账户增删后结果区视为过期
+      lastAttemptAt = 0;
       // 清理已删除账户的聚合缓存（内存 + localStorage）
       purgeMissingAccounts(list);
     }
@@ -1107,22 +1515,29 @@ export function initUsage() {
       // 刚更换过凭据（status 与刷新时间都被清空）的账户旧缓存作废
       if (!a.status && !a.lastRefreshAt) purgeAccountCache(a.id);
     }
+    // 统一刷新：状态刚刷新过的账户（任意入口触发）后台预取其用量
+    const refreshed = detectRefreshedAccounts(list);
+    if (refreshed.length) prefetchUsageFor(refreshed);
     const stillExists =
       selection === "all" || selection === "local" || list.some((a) => a.id === selection && a.kind === "cursor");
     rebuildChips();
     if (!stillExists) {
       applyVisibility();
-      if (panelVisible) void loadCurrent(false);
+      if (panelVisible) loadView(false);
       return;
     }
-    // 账户状态更新（如定时刷新）时，同步总览表中的额度 / 套餐信息
-    if (panelVisible && selection === "all" && !loading) renderOverviewTable();
+    // 账户状态更新（如定时刷新）时，同步总览表中的额度 / 套餐信息；
+    // 若结果区数据已过期，顺带重新统计当前视图（loadCurrent 内部有新鲜度与
+    // loading 守卫：数据未过期直接跳过，在途加载进行中也不会重复触发）。
+    if (!panelVisible || loading) return;
+    if (selection === "all") renderOverviewTable();
+    loadView(false);
   });
 
   window.addEventListener("panelshown", (event) => {
     const shown = !!(event.detail && event.detail.id === "usage-panel");
     panelVisible = shown;
-    if (shown && !loading) void loadCurrent(false);
+    if (shown && !loading) loadView(false);
   });
 
   // 数字单位切换后，用现有数据即时重绘结果区与总览表
@@ -1133,7 +1548,23 @@ export function initUsage() {
     if (!el("#usage-overview").hidden) renderOverviewTable();
   });
 
+  // 对端窗口（托盘）写入共享用量缓存后：丢掉本窗口内存旧条目，跨度相关时从缓存重渲染。
+  // 事件会回送到写入窗口，用 origin 过滤自己的写入避免自触发循环。
+  listen(USAGE_CACHE_EVENT, (event) => {
+    const payload = event.payload || {};
+    if (payload.origin && payload.origin === USAGE_CACHE_ORIGIN) return;
+    forgetUsageCacheFromEvent(payload.key);
+    if (cacheKeyAffectsCurrentView(payload.key)) scheduleRerenderFromCache();
+  }).catch(() => {
+    /* 非 Tauri 环境无事件桥，靠 storage 事件兜底 */
+  });
+  window.addEventListener("storage", (event) => {
+    if (!event.key || !event.key.startsWith(USAGE_CACHE_PREFIX)) return;
+    forgetUsageCacheFromEvent(event.key);
+    if (cacheKeyAffectsCurrentView(event.key)) scheduleRerenderFromCache();
+  });
+
   rebuildChips();
   applyVisibility();
-  setUsageCacheTtlMs(getUsageIntervalMinutes() > 0 ? getUsageIntervalMinutes() * 60_000 : DEFAULT_TTL_MS);
+  setUsageCacheTtlMs(getRefreshIntervalMinutes() > 0 ? getRefreshIntervalMinutes() * 60_000 : DEFAULT_TTL_MS);
 }

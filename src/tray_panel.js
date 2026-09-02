@@ -1,4 +1,4 @@
-import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, setupDesktopGuards } from "./shared.js";
+import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards } from "./shared.js";
 import { membershipLabel, codexPlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./accounts.js";
 import {
   USAGE_CACHE_PREFIX,
@@ -9,7 +9,6 @@ import {
   localYmd,
   todayStartMs,
   todayRangeKey,
-  recentYmds,
   peekAggForDay,
   peekAggSeries,
   peekScanForDay,
@@ -17,7 +16,6 @@ import {
   fetchCursorAggregate,
   fetchCodexScan,
   sliceDay,
-  overlayDay,
   modelsOnDay,
   forgetUsageCacheFromEvent,
 } from "./usage_data.js";
@@ -64,8 +62,9 @@ function syncHeaderRefresh() {
   const btn = el("#tray-refresh");
   const accountBusy = refreshing || switching || refreshingIds.size > 0;
   if (trayTab === "overview") {
-    btn.disabled = overviewLoading;
-    btn.classList.toggle("busy", overviewLoading);
+    // 总览刷新 = 账户状态 + 今日用量一起刷，任一进行中都置忙
+    btn.disabled = overviewLoading || refreshing || switching;
+    btn.classList.toggle("busy", overviewLoading || refreshing);
     return;
   }
   btn.disabled = accountBusy || !accounts.length;
@@ -178,13 +177,14 @@ function barsFor(account) {
     const api = miniBar("API", plan.apiPercentUsed);
     if (auto) bars.push(auto);
     if (api) bars.push(api);
-    // Grok Bot 周额度（sand）：套餐包含时展示，额度耗尽按 100% 已用处理（与主窗口一致）
+    // Sand 周额度（Cursor 对 Grok Bot 额度的内部代号）：套餐包含时展示，
+    // 额度耗尽按 100% 已用处理（与主窗口一致）
     const sand = status.sand || null;
     if (sand && sand.included) {
       let usedPct = Number(sand.usagePercent);
       if (sand.hasAvailableUsage === false) usedPct = 100;
-      const grok = miniBar("Grok", usedPct);
-      if (grok) bars.push(grok);
+      const sandBar = miniBar("Sand", usedPct);
+      if (sandBar) bars.push(sandBar);
     }
   }
   return bars;
@@ -326,7 +326,7 @@ async function load() {
   try {
     const view = await invoke("accounts_list");
     accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
-    const u = Number(view && view.usageIntervalMinutes);
+    const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
     render();
     if (trayTab === "overview") void loadOverview(false);
@@ -389,15 +389,37 @@ function overviewTip(text) {
 
 /* ---------- 总览图表（Chart.js 全局脚本，缺失时静默跳过） ---------- */
 
-let sourcePie = null;
-let modelBar = null;
-let dailyStack = null;
+// 三联迷你饼图实例（模型 Token / 模型费用 / 来源）
+const pies = { modelToken: null, modelCost: null, source: null };
+let hourlyStack = null;
 let overviewDom = null; // 常驻 DOM，刷新时原地改数字 / 更新图表，避免整页重建闪烁
 
 function destroyCharts() {
-  if (sourcePie) { sourcePie.destroy(); sourcePie = null; }
-  if (modelBar) { modelBar.destroy(); modelBar = null; }
-  if (dailyStack) { dailyStack.destroy(); dailyStack = null; }
+  for (const chart of [pies.modelToken, pies.modelCost, pies.source, hourlyStack]) {
+    if (chart) {
+      try { chart.destroy(); } catch { /* ignore */ }
+    }
+  }
+  pies.modelToken = null;
+  pies.modelCost = null;
+  pies.source = null;
+  hourlyStack = null;
+  // 构造中途失败的实例已注册到画布但模块变量拿不到，不清理会让之后的
+  // new Chart 永远抛「Canvas is already in use」
+  if (overviewDom && typeof Chart !== "undefined" && typeof Chart.getChart === "function") {
+    const canvases = [
+      overviewDom.tokenPie.canvas,
+      overviewDom.costPie.canvas,
+      overviewDom.sourcePie.canvas,
+      overviewDom.bar.canvas,
+    ];
+    for (const canvas of canvases) {
+      const orphan = Chart.getChart(canvas);
+      if (orphan) {
+        try { orphan.destroy(); } catch { /* ignore */ }
+      }
+    }
+  }
 }
 
 function teardownOverview() {
@@ -442,29 +464,14 @@ function chartSection(title, height) {
   return { wrap, canvas, box };
 }
 
-/** 坐标轴刻度用的紧凑 token 数（独立于单位偏好，轴上空间有限）。 */
-function compactTokens(n) {
-  const abs = Math.abs(n);
-  if (abs >= 1e9) return `${(n / 1e9).toFixed(abs >= 1e10 ? 0 : 1)}B`;
-  if (abs >= 1e6) return `${(n / 1e6).toFixed(abs >= 1e7 ? 0 : 1)}M`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(abs >= 1e4 ? 0 : 1)}K`;
-  return String(Math.round(n));
-}
-
-function colorForName(name) {
-  const s = String(name || "");
-  let h = 0;
-  for (let i = 0; i < s.length; i += 1) h = (h * 33 + s.charCodeAt(i)) >>> 0;
-  return colorFor(h);
-}
-
 function shortModel(name) {
   const s = String(name || "");
   if (s.length <= 20) return s;
   return `${s.slice(0, 9)}…${s.slice(-8)}`;
 }
 
-function mergeModelShares(lists) {
+/** 各来源当日模型合并为总量表（token 与等价费用），供两个模型饼图各自取 Top。 */
+function mergeModelTotals(lists) {
   const map = new Map();
   for (const list of lists || []) {
     for (const m of list || []) {
@@ -475,12 +482,19 @@ function mergeModelShares(lists) {
       map.set(key, cur);
     }
   }
-  const all = [...map.values()]
-    .filter((m) => m.tokens > 0)
-    .sort((a, b) => b.tokens - a.tokens || b.usd - a.usd);
-  if (all.length <= 5) return all;
-  const top = all.slice(0, 5);
-  const rest = all.slice(5);
+  return [...map.values()];
+}
+
+/** 按指定指标（tokens / usd）降序取 Top 5 切片，其余合并为「其他」。 */
+function topModelShares(all, metric) {
+  const other = metric === "usd" ? "tokens" : "usd";
+  const list = (all || [])
+    .filter((m) => m[metric] > 0)
+    .slice()
+    .sort((a, b) => b[metric] - a[metric] || b[other] - a[other]);
+  if (list.length <= 5) return list;
+  const top = list.slice(0, 5);
+  const rest = list.slice(5);
   top.push({
     model: "其他",
     tokens: rest.reduce((s, m) => s + m.tokens, 0),
@@ -503,94 +517,35 @@ function onChartHover(_event, elements, chart) {
   setChartHoverHit(chart, hit ? { datasetIndex: hit.datasetIndex, index: hit.index } : null);
 }
 
-/** 来源占比饼图（环形）：各来源今日 token 数；悬停高亮该扇区、其余变暗。 */
-function makeSourcePie(canvas, shares) {
-  const colors = shares.map((_, i) => colorFor(i));
+/**
+ * 三联迷你饼图（环形，无图例——空间只有约 1/3 面板宽）：扇区上标注占比，
+ * 名称与数值看 tooltip。cfg 提供各图差异点：
+ * { titleOf(row), fmtValue(value), afterOf(row) }。
+ */
+function makeMiniPie(canvas, cfg) {
   const motion = chartMotion();
   const chart = new Chart(canvas, {
     type: "doughnut",
     data: {
-      labels: shares.map((r) => r.name),
+      labels: [],
       datasets: [
         {
-          data: shares.map((r) => r.tokens),
-          backgroundColor: colors,
-          hoverBackgroundColor: colors,
+          data: [],
+          backgroundColor: [],
+          hoverBackgroundColor: [],
           borderColor: cssVar("--chart-border"),
           borderWidth: 2,
-          hoverOffset: 8,
+          hoverOffset: 6,
         },
       ],
     },
+    plugins: [pieSliceLabelsPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
       animation: { duration: motion.duration, easing: motion.easing, animateRotate: true, animateScale: true },
       animations: motion.animations,
-      cutout: "58%",
-      interaction: { mode: "nearest", intersect: true },
-      onHover: onChartHover,
-      plugins: {
-        legend: {
-          position: "right",
-          labels: { color: cssVar("--chart-tick-strong"), boxWidth: 9, boxHeight: 9, font: { size: 10.5 } },
-          onHover(event, item, legend) {
-            if (event.native && event.native.target) event.native.target.style.cursor = "pointer";
-            setChartHoverHit(legend.chart, { datasetIndex: item.datasetIndex ?? 0, index: item.index ?? -1 });
-          },
-          onLeave(_event, _item, legend) {
-            setChartHoverHit(legend.chart, null);
-          },
-        },
-        tooltip: {
-          position: "nearest",
-          callbacks: {
-            label(ctx) {
-              const total = ctx.dataset.data.reduce((s, v) => s + (Number(v) || 0), 0);
-              const pct = total > 0 ? Math.round((ctx.parsed / total) * 100) : 0;
-              return ` ${fmtTokens(ctx.parsed)}（${pct}%）`;
-            },
-            afterLabel(ctx) {
-              const row = ctx.chart.$shares && ctx.chart.$shares[ctx.dataIndex];
-              return row && Number.isFinite(row.usd) ? `等价 ${fmtUsd(row.usd)}` : "";
-            },
-          },
-        },
-      },
-    },
-  });
-  chart.$baseColors = [colors];
-  chart.$hoverKey = "";
-  chart.$hoverOpts = hoverOpts(0);
-  chart.$shares = shares;
-  bindChartHoverLeave(chart);
-  return chart;
-}
-
-/** 今日模型横向柱：合并各来源当天模型，Top 5 + 其他。 */
-function makeModelBar(canvas, shares) {
-  const colors = shares.map((s) => colorForName(s.model));
-  const motion = chartMotion();
-  const chart = new Chart(canvas, {
-    type: "bar",
-    data: {
-      labels: shares.map((s) => s.model),
-      datasets: [
-        {
-          data: shares.map((s) => s.tokens),
-          backgroundColor: colors,
-          hoverBackgroundColor: colors,
-          borderRadius: 3,
-          maxBarThickness: 16,
-        },
-      ],
-    },
-    options: {
-      indexAxis: "y",
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: motion.duration, easing: motion.easing },
-      animations: motion.animations,
+      cutout: "55%",
       interaction: { mode: "nearest", intersect: true },
       onHover: onChartHover,
       plugins: {
@@ -599,70 +554,86 @@ function makeModelBar(canvas, shares) {
           position: "nearest",
           callbacks: {
             title(items) {
-              return items.length ? String(items[0].label) : "";
+              const row = items.length ? items[0].chart.$shares && items[0].chart.$shares[items[0].dataIndex] : null;
+              return row ? cfg.titleOf(row) : "";
             },
             label(ctx) {
-              return ` ${fmtTokens(ctx.parsed.x)}`;
+              const total = ctx.dataset.data.reduce((s, v) => s + (Number(v) || 0), 0);
+              const share = fmtShare(ctx.parsed, total);
+              return ` ${cfg.fmtValue(ctx.parsed)}${share ? `（${share}）` : ""}`;
             },
             afterLabel(ctx) {
               const row = ctx.chart.$shares && ctx.chart.$shares[ctx.dataIndex];
-              return row && Number.isFinite(row.usd) ? `等价 ${fmtUsd(row.usd)}` : "";
+              return row ? cfg.afterOf(row) : "";
             },
           },
-        },
-      },
-      scales: {
-        x: {
-          beginAtZero: true,
-          ticks: {
-            color: cssVar("--chart-tick"),
-            font: { size: 9.5 },
-            maxTicksLimit: 4,
-            callback: (v) => compactTokens(v),
-          },
-          grid: { color: cssVar("--chart-grid") },
-        },
-        y: {
-          ticks: {
-            color: cssVar("--chart-tick-strong"),
-            font: { size: 10 },
-            callback(value) {
-              return shortModel(this.getLabelForValue(value));
-            },
-          },
-          grid: { display: false },
         },
       },
     },
   });
-  chart.$baseColors = [colors];
+  // 扇区上只标占比（图窄放不下数值）；配置挂实例属性，不能进 options.plugins
+  chart.$pieSliceLabels = {
+    font: 9,
+    minAngle: 0.5,
+    formatter: (_value, share) => share,
+  };
   chart.$hoverKey = "";
   chart.$hoverOpts = hoverOpts(0);
-  chart.$shares = shares;
   bindChartHoverLeave(chart);
   return chart;
 }
 
-/** 近 7 日 Token 堆叠柱：每账户一段，数据与主窗口用量页同源。 */
-function makeDailyStack(canvas, labels, sources) {
+/** 同步一个迷你饼图：rows 为空则隐藏该小节。cfg 额外提供 labelOf / valueOf。 */
+function syncMiniPie(key, section, rows, cfg) {
+  const wrap = section.wrap;
+  if (!hasChartLib() || !rows.length) {
+    if (pies[key]) {
+      pies[key].destroy();
+      pies[key] = null;
+    }
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  if (!pies[key]) pies[key] = makeMiniPie(section.canvas, cfg);
+  const chart = pies[key];
+  const colors = rows.map((_, i) => colorFor(i));
+  chart.data.labels = rows.map((r) => cfg.labelOf(r));
+  chart.data.datasets[0].data = rows.map((r) => cfg.valueOf(r));
+  chart.data.datasets[0].backgroundColor = colors;
+  chart.data.datasets[0].hoverBackgroundColor = colors;
+  chart.$baseColors = [colors];
+  chart.$shares = rows;
+  chart.$hoverKey = "";
+  chart.update();
+}
+
+// 三联饼图的差异配置：模型 Token / 模型费用 / 来源
+const TOKEN_PIE_CFG = {
+  labelOf: (r) => shortModel(r.model),
+  valueOf: (r) => Math.round(r.tokens),
+  titleOf: (r) => r.model,
+  fmtValue: (v) => fmtTokens(v),
+  afterOf: (r) => (r.usd > 0 ? `等价 ${fmtUsd(r.usd)}` : ""),
+};
+const COST_PIE_CFG = {
+  labelOf: (r) => shortModel(r.model),
+  valueOf: (r) => r.usd,
+  titleOf: (r) => r.model,
+  fmtValue: (v) => fmtUsd(v),
+  afterOf: (r) => (r.tokens > 0 ? `${fmtTokens(r.tokens)} tok` : ""),
+};
+const SOURCE_PIE_CFG = {
+  labelOf: (r) => r.name,
+  valueOf: (r) => Math.round(r.tokens),
+  titleOf: (r) => r.name,
+  fmtValue: (v) => fmtTokens(v),
+  afterOf: (r) => (Number.isFinite(r.usd) ? `等价 ${fmtUsd(r.usd)}` : ""),
+};
+
+/** 今日 24 小时 Token 堆叠柱：每账户一段，0:00 → 23:00 从左到右，与统计页「今天」视图一致。 */
+function makeHourlyStack(canvas, labels, datasets) {
   const motion = chartMotion();
-  const baseColors = sources.map((_, i) => colorFor(i));
-  const datasets = sources.map((s, i) => {
-    const byDate = new Map((s.daily || []).map((d) => [d.date, d]));
-    return {
-      label: s.label,
-      data: labels.map((ymd) => {
-        const d = byDate.get(ymd);
-        return d && d.tokens > 0 ? d.tokens : null;
-      }),
-      backgroundColor: baseColors[i],
-      hoverBackgroundColor: baseColors[i],
-      borderRadius: 2,
-      maxBarThickness: 18,
-      stack: "daily",
-      skipNull: true,
-    };
-  });
   const chart = new Chart(canvas, {
     type: "bar",
     data: { labels, datasets },
@@ -681,9 +652,8 @@ function makeDailyStack(canvas, labels, sources) {
           callbacks: {
             title(items) {
               if (!items.length) return "";
-              const ymd = items[0].chart.data.labels[items[0].dataIndex];
-              const p = String(ymd).split("-");
-              return p.length === 3 ? `${Number(p[1])}月${Number(p[2])}日` : ymd;
+              const h = parseInt(items[0].chart.data.labels[items[0].dataIndex], 10);
+              return Number.isFinite(h) ? `今天 ${h}:00 – ${h + 1}:00` : "";
             },
             label(ctx) {
               if (ctx.raw == null) return null;
@@ -697,7 +667,7 @@ function makeDailyStack(canvas, labels, sources) {
                 const v = ds.data[idx];
                 if (typeof v === "number") sum += v;
               }
-              return `当日合计 ${fmtTokens(sum)}`;
+              return `该小时合计 ${fmtTokens(sum)}`;
             },
           },
         },
@@ -707,13 +677,10 @@ function makeDailyStack(canvas, labels, sources) {
           stacked: true,
           ticks: {
             color: cssVar("--chart-tick"),
-            font: { size: 9.5 },
+            font: { size: 9 },
             maxRotation: 0,
-            callback(value) {
-              const ymd = this.getLabelForValue(value);
-              const p = String(ymd).split("-");
-              return p.length === 3 ? `${Number(p[1])}/${Number(p[2])}` : ymd;
-            },
+            autoSkip: true,
+            maxTicksLimit: 7,
           },
           grid: { display: false },
         },
@@ -731,101 +698,57 @@ function makeDailyStack(canvas, labels, sources) {
       },
     },
   });
-  chart.$baseColors = baseColors;
   chart.$hoverKey = "";
   chart.$hoverOpts = hoverOpts(2);
   bindChartHoverLeave(chart);
   return chart;
 }
 
-function syncSourcePie(shares) {
-  const wrap = overviewDom.pie.wrap;
-  if (!hasChartLib() || !shares.length) {
-    if (sourcePie) { sourcePie.destroy(); sourcePie = null; }
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-  const colors = shares.map((_, i) => colorFor(i));
-  const labels = shares.map((r) => r.name);
-  const data = shares.map((r) => r.tokens);
-  if (sourcePie) {
-    sourcePie.data.labels = labels;
-    sourcePie.data.datasets[0].data = data;
-    sourcePie.data.datasets[0].backgroundColor = colors;
-    sourcePie.data.datasets[0].hoverBackgroundColor = colors;
-    sourcePie.$baseColors = [colors];
-    sourcePie.$shares = shares;
-    sourcePie.$hoverKey = "";
-    sourcePie.update();
-    return;
-  }
-  sourcePie = makeSourcePie(overviewDom.pie.canvas, shares);
-}
-
-function syncModelBar(shares) {
-  const wrap = overviewDom.model.wrap;
-  if (!hasChartLib() || !shares.length) {
-    if (modelBar) { modelBar.destroy(); modelBar = null; }
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-  overviewDom.model.box.style.height = `${Math.max(80, shares.length * 24 + 28)}px`;
-  const colors = shares.map((s) => colorForName(s.model));
-  const labels = shares.map((s) => s.model);
-  const data = shares.map((s) => s.tokens);
-  if (modelBar) {
-    modelBar.data.labels = labels;
-    modelBar.data.datasets[0].data = data;
-    modelBar.data.datasets[0].backgroundColor = colors;
-    modelBar.data.datasets[0].hoverBackgroundColor = colors;
-    modelBar.$baseColors = [colors];
-    modelBar.$shares = shares;
-    modelBar.$hoverKey = "";
-    modelBar.update();
-    return;
-  }
-  modelBar = makeModelBar(overviewDom.model.canvas, shares);
-}
-
-function syncDailyStack(sources) {
+/** 今日 24 小时堆叠柱：数据取各来源聚合结果的 hourly（仅当天），0:00 → 23:00 从左到右。 */
+function syncHourlyStack(sources) {
   const wrap = overviewDom.bar.wrap;
-  const labels = recentYmds(7);
+  const ymd = localYmd();
+  const hours = [];
+  for (let h = 0; h <= 23; h += 1) hours.push(h);
+  const labels = hours.map((h) => `${h}:00`);
   const list = (sources || []).filter((s) => s && s.label);
-  const hasAny = list.some((s) => (s.daily || []).some((d) => d && d.tokens > 0));
-  if (!hasChartLib() || !list.length || !hasAny) {
-    if (dailyStack) { dailyStack.destroy(); dailyStack = null; }
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
   const baseColors = list.map((_, i) => colorFor(i));
+  let hasAny = false;
   const datasets = list.map((s, i) => {
-    const byDate = new Map((s.daily || []).map((d) => [d.date, d]));
+    const byHour = new Map(
+      (s.hourly || []).filter((r) => r && r.date === ymd).map((r) => [Number(r.hour), r])
+    );
     return {
       label: s.label,
-      data: labels.map((ymd) => {
-        const d = byDate.get(ymd);
-        return d && d.tokens > 0 ? d.tokens : null;
+      data: hours.map((h) => {
+        const row = byHour.get(h);
+        if (row && row.tokens > 0) hasAny = true;
+        return row && row.tokens > 0 ? row.tokens : null;
       }),
       backgroundColor: baseColors[i],
       hoverBackgroundColor: baseColors[i],
       borderRadius: 2,
-      maxBarThickness: 18,
-      stack: "daily",
+      maxBarThickness: 10,
+      stack: "hourly",
       skipNull: true,
     };
   });
-  if (dailyStack) {
-    dailyStack.data.labels = labels;
-    dailyStack.data.datasets = datasets;
-    dailyStack.$baseColors = baseColors;
-    dailyStack.$hoverKey = "";
-    dailyStack.update();
+  if (!hasChartLib() || !list.length || !hasAny) {
+    if (hourlyStack) { hourlyStack.destroy(); hourlyStack = null; }
+    wrap.hidden = true;
     return;
   }
-  dailyStack = makeDailyStack(overviewDom.bar.canvas, labels, list);
+  wrap.hidden = false;
+  if (hourlyStack) {
+    hourlyStack.data.labels = labels;
+    hourlyStack.data.datasets = datasets;
+    hourlyStack.$baseColors = baseColors;
+    hourlyStack.$hoverKey = "";
+    hourlyStack.update();
+    return;
+  }
+  hourlyStack = makeHourlyStack(overviewDom.bar.canvas, labels, datasets);
+  hourlyStack.$baseColors = baseColors;
 }
 
 function ensureOverviewDom() {
@@ -841,25 +764,31 @@ function ensureOverviewDom() {
   const usd = document.createElement("span");
   usd.className = "tray-ov-usd";
   total.append(tokens, usd);
-  const pie = chartSection("今日来源", 136);
-  pie.wrap.hidden = true;
-  pie.box.classList.add("tray-chart-pie");
-  const model = chartSection("今日模型", 128);
-  model.wrap.hidden = true;
-  const bar = chartSection("近 7 日 Token", 128);
+  // 图表顺序与统计页一致：24 小时柱在上，下方三个饼图三等分并排
+  const bar = chartSection("今日 Token（按小时）", 128);
   bar.wrap.hidden = true;
+  const tokenPie = chartSection("模型 Token", 104);
+  tokenPie.wrap.hidden = true;
+  const costPie = chartSection("模型费用", 104);
+  costPie.wrap.hidden = true;
+  const sourcePie = chartSection("来源", 104);
+  sourcePie.wrap.hidden = true;
+  const pieRow = document.createElement("div");
+  pieRow.className = "tray-pie-row";
+  pieRow.append(tokenPie.wrap, costPie.wrap, sourcePie.wrap);
   const rows = document.createElement("div");
   rows.className = "tray-ov-rows";
   const foot = document.createElement("div");
   foot.className = "tray-ov-foot";
   foot.hidden = true;
-  root.replaceChildren(label, total, pie.wrap, model.wrap, bar.wrap, rows, foot);
-  overviewDom = { tokens, usd, rows, foot, pie, model, bar };
+  root.replaceChildren(label, total, bar.wrap, pieRow, rows, foot);
+  overviewDom = { tokens, usd, rows, foot, tokenPie, costPie, sourcePie, pieRow, bar };
 }
 
 function renderOverview(data, statAtMs) {
-  const hasChart = (data.dailySources || []).some((s) => (s.daily || []).some((d) => d && d.tokens > 0))
-    || (data.modelShares || []).some((m) => m && m.tokens > 0);
+  const hasChart = (data.hourlySources || []).some((s) => (s.hourly || []).some((r) => r && r.tokens > 0))
+    || (data.modelTokenShares || []).some((m) => m && m.tokens > 0)
+    || (data.modelCostShares || []).some((m) => m && m.usd > 0);
   if (!data.rows.length && !hasChart) {
     overviewTip("暂无用量数据");
     return;
@@ -869,10 +798,21 @@ function renderOverview(data, statAtMs) {
   overviewDom.tokens.title = fmtInt(data.totalTokens);
   overviewDom.usd.textContent = fmtUsd(data.totalUsd);
 
-  const shares = data.rows.filter((r) => r.tokens > 0);
-  syncSourcePie(shares);
-  syncModelBar(data.modelShares || []);
-  syncDailyStack(data.dailySources || []);
+  const shares = data.rows.filter((r) => r.tokens > 0 && !r.empty);
+  // 图表异常不得中断总览渲染（数字与来源明细仍要照常更新），
+  // 失败时销毁实例（含孤儿注册），下轮渲染自动重建。
+  try {
+    syncHourlyStack(data.hourlySources || []);
+    syncMiniPie("modelToken", overviewDom.tokenPie, data.modelTokenShares || [], TOKEN_PIE_CFG);
+    syncMiniPie("modelCost", overviewDom.costPie, data.modelCostShares || [], COST_PIE_CFG);
+    syncMiniPie("source", overviewDom.sourcePie, shares, SOURCE_PIE_CFG);
+  } catch (error) {
+    console.error("托盘图表渲染失败，已重置实例：", error);
+    destroyCharts();
+  }
+  // 三个饼图全空时整行收起，避免残留空隙
+  overviewDom.pieRow.hidden =
+    overviewDom.tokenPie.wrap.hidden && overviewDom.costPie.wrap.hidden && overviewDom.sourcePie.wrap.hidden;
 
   overviewDom.rows.replaceChildren();
   for (const r of data.rows) {
@@ -913,12 +853,17 @@ function renderOverview(data, statAtMs) {
   }
 }
 
-/** 从共享缓存拼出托盘总览：今日数字用当天切片，近 7 日柱用更长范围的 daily。 */
+/** 优先取今日键聚合里的 hourly，缺失时退回长范围缓存（若为今天拉取，同样带当天 hourly）。 */
+function pickHourly(dayAgg, seriesAgg) {
+  if (dayAgg && Array.isArray(dayAgg.hourly) && dayAgg.hourly.length) return dayAgg.hourly;
+  return (seriesAgg && seriesAgg.hourly) || [];
+}
+
+/** 从共享缓存拼出托盘总览：今日数字用当天切片，24 小时柱用聚合结果的 hourly。
+ *  来源（各账户 + 本地分析）按今日 Token 降序排列，行序与各图表配色一一对应。 */
 function buildOverviewData(ymd) {
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
-  const rows = [];
-  const dailySources = [];
-  const modelLists = [];
+  const entries = []; // { row, hourlySource, modelSource }
   const ats = [];
   let totalTokens = 0;
   let totalUsd = 0;
@@ -935,14 +880,14 @@ function buildOverviewData(ymd) {
     const slice = sliceDay(sliceAgg, ymd, sliceKey);
     totalTokens += slice.tokens;
     totalUsd += slice.usd;
-    rows.push({ id: a.id, name: label, tokens: slice.tokens, usd: slice.usd });
-    const seriesAgg = (seriesHit || dayHit).entry.agg;
-    dailySources.push({
-      label,
-      daily: overlayDay(seriesAgg.daily || [], ymd, slice),
-      showActual: true,
+    entries.push({
+      row: { id: a.id, name: label, tokens: slice.tokens, usd: slice.usd },
+      hourlySource: {
+        label,
+        hourly: pickHourly(dayHit && dayHit.entry.agg, seriesHit && seriesHit.entry.agg),
+      },
+      modelSource: { id: a.id, label, models: modelsOnDay(sliceAgg, ymd, sliceKey) },
     });
-    modelLists.push(modelsOnDay(sliceAgg, ymd, sliceKey));
   }
 
   const scanDay = peekScanForDay(ymd, "");
@@ -956,18 +901,31 @@ function buildOverviewData(ymd) {
     if (slice.tokens > 0 || (seriesAgg.daily && seriesAgg.daily.length) || (agg.models && agg.models.length)) {
       totalTokens += slice.tokens;
       totalUsd += slice.usd;
-      rows.push({ id: "local", name: "本地 ChatGPT", tokens: slice.tokens, usd: slice.usd });
-      dailySources.push({
-        label: "本地用量分析",
-        daily: overlayDay(seriesAgg.daily || [], ymd, slice),
-        showActual: false,
+      entries.push({
+        row: { id: "local", name: "本地 ChatGPT", tokens: slice.tokens, usd: slice.usd },
+        hourlySource: {
+          label: "本地用量分析",
+          hourly: pickHourly(
+            scanDay && scanDay.entry.scan.aggregate,
+            scanSeries && scanSeries.entry.scan.aggregate
+          ),
+        },
+        modelSource: { id: "local", label: "本地 ChatGPT", models: modelsOnDay(agg, ymd, hit.rangeKey) },
       });
-      modelLists.push(modelsOnDay(agg, ymd, hit.rangeKey));
     }
   }
 
+  entries.sort((a, b) => b.row.tokens - a.row.tokens);
+  const modelTotals = mergeModelTotals(entries.map((e) => e.modelSource.models));
   return {
-    data: { totalTokens, totalUsd, rows, dailySources, modelShares: mergeModelShares(modelLists) },
+    data: {
+      totalTokens,
+      totalUsd,
+      rows: entries.map((e) => e.row),
+      hourlySources: entries.map((e) => e.hourlySource),
+      modelTokenShares: topModelShares(modelTotals, "tokens"),
+      modelCostShares: topModelShares(modelTotals, "usd"),
+    },
     at: ats.length ? Math.min(...ats) : 0,
   };
 }
@@ -1005,7 +963,7 @@ function loadOverview(force) {
   return overviewTail;
 }
 
-/** 统计今日用量：先读主窗口写入的 7/30/90 天缓存，缺的再拉今日并写回同一套 localStorage。 */
+/** 统计今日用量：先读主窗口写入的 7/30/全部缓存，缺的再拉今日并写回同一套 localStorage。 */
 async function loadOverviewInner(force) {
   const ymd = localYmd();
   const dayStart = todayStartMs();
@@ -1292,10 +1250,15 @@ async function doSwitch(id) {
 /* ---------- 初始化 ---------- */
 
 setupDesktopGuards();
-// 全部刷新按当前 tab 分流：总览 = 忽略缓存重新统计今日用量；账户 tab = 刷新全部账户状态
+// 统一刷新：总览 tab = 刷新全部账户状态 + 忽略缓存重算今日用量；账户 tab = 刷新全部账户状态
+// （账户状态刷新会广播 accounts-changed，主窗口据此按其当前跨度预取用量，各处数据一并更新）
 el("#tray-refresh").addEventListener("click", () => {
-  if (trayTab === "overview") void loadOverview(true);
-  else void refreshAll();
+  if (trayTab === "overview") {
+    if (accounts.length) void refreshAll();
+    void loadOverview(true);
+    return;
+  }
+  void refreshAll();
 });
 el("#tray-open").addEventListener("click", () => { void invoke("tray_open_main"); });
 for (const btn of document.querySelectorAll(".tray-tab")) {
@@ -1312,7 +1275,7 @@ window.addEventListener("focus", () => {
 listen("accounts-changed", (event) => {
   const view = event.payload;
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
-  const u = Number(view && view.usageIntervalMinutes);
+  const u = Number(view && view.intervalMinutes);
   if (Number.isFinite(u)) setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
   render();
   if (trayTab === "overview") void loadOverview(false);

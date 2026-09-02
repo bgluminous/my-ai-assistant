@@ -1,11 +1,16 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 use tauri::AppHandle;
 
+use crate::audit;
 use crate::settings;
 
 const DEFAULT_JSON: &str = include_str!("../resources/pricing.default.json");
+
+/// 在线价格表默认更新地址（用户未自定义地址时使用）。
+pub const DEFAULT_UPDATE_URL: &str = "https://inf.xil.to/kv/MAA-Price-Table";
 
 /// 每百万 token 的美元单价。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -42,24 +47,56 @@ impl PricingTable {
     }
 }
 
+/// 在线价格表缓存层：「在线更新」成功后写入 settings.json，
+/// 生效顺序位于内置默认表之上、用户覆盖之下。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingRemote {
+    /// 更新地址；为空时使用 DEFAULT_UPDATE_URL。
+    #[serde(default)]
+    pub url: String,
+    /// 上次成功更新时间（unix 毫秒）。None 表示从未在线更新。
+    #[serde(default)]
+    pub fetched_at_ms: Option<i64>,
+    /// 已应用的在线表。
+    #[serde(default)]
+    pub table: PricingTable,
+}
+
 pub fn defaults() -> PricingTable {
     serde_json::from_str::<PricingTable>(DEFAULT_JSON)
         .unwrap_or_default()
         .lowercased()
 }
 
-/// 加载“默认表 + 用户覆盖表”。
-pub fn load() -> PricingTable {
-    let mut table = defaults();
-    if let Ok(user) = settings::read(|s| s.pricing.clone()) {
-        let user = user.lowercased();
-        if user.note.is_some() {
-            table.note = user.note;
-        }
-        for (k, v) in user.models {
-            table.models.insert(k, v);
-        }
+/// 把一层表叠加到 base 上：note 为 Some 时覆盖，models 同键覆盖。
+fn overlay(base: &mut PricingTable, layer: PricingTable) {
+    if layer.note.is_some() {
+        base.note = layer.note;
     }
+    for (k, v) in layer.models {
+        base.models.insert(k, v);
+    }
+}
+
+/// 基础层 = 内置默认表 + 给定在线表（纯函数，便于测试）。
+fn base_of(remote: PricingTable) -> PricingTable {
+    let mut table = defaults();
+    overlay(&mut table, remote.lowercased());
+    table
+}
+
+/// 基础层 = 内置默认表 + 已缓存的在线表（用户覆盖判定与保存都以此为基准）。
+pub fn base() -> PricingTable {
+    base_of(settings::read(|s| s.pricing_remote.table.clone()).unwrap_or_default())
+}
+
+/// 加载“默认表 + 在线表 + 用户覆盖表”。
+pub fn load() -> PricingTable {
+    let (remote, user) = settings::read(|s| (s.pricing_remote.table.clone(), s.pricing.clone()))
+        .unwrap_or_default();
+    let mut table = base_of(remote);
+    overlay(&mut table, user.lowercased());
     table
 }
 
@@ -96,6 +133,19 @@ pub struct DailyUsage {
     pub actual_usd: f64,
     #[serde(default)]
     pub models: Vec<DailyModelUsage>,
+}
+
+/// 聚合执行日（本地时区）内某小时的合计，供「今天」跨度的 24 小时柱图。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HourlyUsage {
+    /// 本地日 YYYY-MM-DD；跨零点后前端据此丢弃旧数据。
+    pub date: String,
+    /// 本地小时 0-23。
+    pub hour: u32,
+    pub tokens: f64,
+    pub equivalent_usd: f64,
+    pub actual_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,10 +186,18 @@ pub struct UsageAggregate {
     pub total_cache_write_usd: f64,
     /// 按本地自然日合计，日期升序。无时间戳的行不在此列。
     pub daily: Vec<DailyUsage>,
+    /// 聚合执行日当天的按小时合计，小时升序，仅含有数据的小时。
+    /// 无论统计范围多长都只记当天（最多 24 条），供「今天」跨度的 24h 柱图。
+    pub hourly: Vec<HourlyUsage>,
 }
 
-fn local_ymd(ms: i64) -> Option<String> {
-    DateTime::from_timestamp_millis(ms).map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+/// 时间戳 → 本地（日期, 小时）。
+fn local_ymd_hour(ms: i64) -> Option<(String, u32)> {
+    use chrono::Timelike;
+    DateTime::from_timestamp_millis(ms).map(|dt| {
+        let local = dt.with_timezone(&Local);
+        (local.format("%Y-%m-%d").to_string(), local.hour())
+    })
 }
 
 fn row_equivalent_usd(row: &TokenRow, table: &PricingTable) -> f64 {
@@ -158,7 +216,12 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
     let mut map: BTreeMap<String, ModelUsage> = BTreeMap::new();
     let mut daily_map: BTreeMap<String, DailyUsage> = BTreeMap::new();
     let mut daily_models: BTreeMap<String, BTreeMap<String, DailyModelUsage>> = BTreeMap::new();
-    for r in rows {
+    // 当天按小时合计：(tokens, equivalent_usd, actual_usd)
+    let today_ymd = Local::now().format("%Y-%m-%d").to_string();
+    let mut hourly_map: BTreeMap<u32, (f64, f64, f64)> = BTreeMap::new();
+    for mut r in rows {
+        // 同一模型的不同思考 / 效率等级并入一行统计（价格表精确收录的名字保持独立）
+        r.model = crate::model_match::display_key(table, &r.model);
         let entry = map.entry(r.model.clone()).or_insert_with(|| ModelUsage {
             model: r.model.clone(),
             priced: false,
@@ -183,10 +246,16 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
         entry.cache_write_tokens += r.cache_write;
         entry.actual_usd += r.actual_cents / 100.0;
 
-        if let Some(date) = r.timestamp_ms.and_then(local_ymd) {
+        if let Some((date, hour)) = r.timestamp_ms.and_then(local_ymd_hour) {
             let tokens = r.input + r.output + r.cache_read + r.cache_write;
             let equivalent_usd = row_equivalent_usd(&r, table);
             let actual_usd = r.actual_cents / 100.0;
+            if date == today_ymd {
+                let slot = hourly_map.entry(hour).or_insert((0.0, 0.0, 0.0));
+                slot.0 += tokens;
+                slot.1 += equivalent_usd;
+                slot.2 += actual_usd;
+            }
             let day = daily_map.entry(date.clone()).or_insert_with_key(|k| DailyUsage {
                 date: k.clone(),
                 tokens: 0.0,
@@ -295,6 +364,16 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
                 day
             })
             .collect(),
+        hourly: hourly_map
+            .into_iter()
+            .map(|(hour, (tokens, equivalent_usd, actual_usd))| HourlyUsage {
+                date: today_ymd.clone(),
+                hour,
+                tokens,
+                equivalent_usd,
+                actual_usd,
+            })
+            .collect(),
     }
 }
 
@@ -319,9 +398,10 @@ pub struct PricingEntry {
     pub cache_read: f64,
     #[serde(default, alias = "cache_write")]
     pub cache_write: f64,
-    /// 是否相对内置默认表有改动（新增或改价）。仅用于展示，保存时忽略。
+    /// 价格来源："default"（内置）/ "remote"（在线表）/ "custom"（用户改动）。
+    /// 仅用于展示，保存时忽略。
     #[serde(default)]
-    pub custom: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,6 +411,14 @@ pub struct PricingView {
     pub note: Option<String>,
     pub count: usize,
     pub models: Vec<PricingEntry>,
+    /// 用户保存的更新地址（空 = 使用默认地址）。
+    pub remote_url: String,
+    /// 内置默认更新地址（供前端展示 placeholder）。
+    pub remote_default_url: String,
+    /// 上次在线更新时间（unix 毫秒）；None 表示从未更新。
+    pub remote_fetched_at_ms: Option<i64>,
+    /// 在线表缓存层的条目数。
+    pub remote_models: usize,
 }
 
 fn price_eq(a: &ModelPrice, b: &ModelPrice) -> bool {
@@ -339,19 +427,25 @@ fn price_eq(a: &ModelPrice, b: &ModelPrice) -> bool {
         && eq(a.cache_write, b.cache_write)
 }
 
-/// 读取“默认 + 用户覆盖”的有效价格表，按键排序返回，供应用内编辑。
+/// 读取“默认 + 在线 + 用户覆盖”的有效价格表，按键排序返回，供应用内编辑。
 #[tauri::command]
 pub fn pricing_get(_app: AppHandle) -> Result<PricingView, String> {
     settings::ensure_loaded()?;
     let defaults = defaults();
+    let base = base();
     let effective = load();
+    let remote = settings::read(|s| s.pricing_remote.clone())?;
     let mut models: Vec<PricingEntry> = effective
         .models
         .iter()
         .map(|(k, v)| {
-            let custom = match defaults.models.get(k) {
-                Some(d) => !price_eq(d, v),
-                None => true,
+            // 与基础层（默认+在线）不同 → 用户改动；否则与内置默认不同 → 来自在线表。
+            let source = if base.models.get(k).map(|b| price_eq(b, v)) != Some(true) {
+                "custom"
+            } else if defaults.models.get(k).map(|d| price_eq(d, v)) != Some(true) {
+                "remote"
+            } else {
+                "default"
             };
             PricingEntry {
                 key: k.clone(),
@@ -359,7 +453,7 @@ pub fn pricing_get(_app: AppHandle) -> Result<PricingView, String> {
                 output: v.output,
                 cache_read: v.cache_read,
                 cache_write: v.cache_write,
-                custom,
+                source: source.to_string(),
             }
         })
         .collect();
@@ -369,20 +463,20 @@ pub fn pricing_get(_app: AppHandle) -> Result<PricingView, String> {
         note: effective.note,
         count: models.len(),
         models,
+        remote_url: remote.url,
+        remote_default_url: DEFAULT_UPDATE_URL.to_string(),
+        remote_fetched_at_ms: remote.fetched_at_ms,
+        remote_models: remote.table.models.len(),
     })
 }
 
-/// 保存用户价格表：只把“与默认不同 / 默认表没有”的条目写入用户文件（保持精简，
-/// 未改动的模型仍随默认表更新）。数值需为有限非负数。
-#[tauri::command]
-pub fn pricing_save(
-    _app: AppHandle,
-    models: Vec<PricingEntry>,
-    note: Option<String>,
-) -> Result<PricingStatus, String> {
-    let defaults = defaults();
+/// 计算相对基础层的用户覆盖：丢弃与基础层一致的条目，数值需为有限非负数。
+fn diff_overrides(
+    base: &PricingTable,
+    models: &[PricingEntry],
+) -> Result<HashMap<String, ModelPrice>, String> {
     let mut overrides = HashMap::new();
-    for m in &models {
+    for m in models {
         let key = m.key.trim().to_lowercase();
         if key.is_empty() {
             continue;
@@ -398,12 +492,25 @@ pub fn pricing_save(
             cache_read: m.cache_read,
             cache_write: m.cache_write,
         };
-        // 与默认完全一致的条目无需写入（避免锁死默认表后续更新）。
-        if defaults.models.get(&key).map(|d| price_eq(d, &candidate)).unwrap_or(false) {
+        // 与基础层（默认+在线）完全一致的条目无需写入（避免锁死后续更新）。
+        if base.models.get(&key).map(|d| price_eq(d, &candidate)).unwrap_or(false) {
             continue;
         }
         overrides.insert(key, candidate);
     }
+    Ok(overrides)
+}
+
+/// 保存用户价格表：只把“与基础层（默认+在线）不同 / 基础层没有”的条目写入用户文件
+/// （保持精简，未改动的模型仍随默认表与在线表更新）。数值需为有限非负数。
+#[tauri::command]
+pub fn pricing_save(
+    _app: AppHandle,
+    models: Vec<PricingEntry>,
+    note: Option<String>,
+) -> Result<PricingStatus, String> {
+    settings::ensure_loaded()?;
+    let overrides = diff_overrides(&base(), &models)?;
 
     let note = note.and_then(|n| {
         let n = n.trim().to_string();
@@ -425,13 +532,127 @@ pub fn pricing_save(
     })
 }
 
-/// 清空用户价格覆盖，恢复为内置默认表（不删除 settings.json）。
+/// 清空用户价格覆盖与在线表缓存，恢复为内置默认表（不删除 settings.json）。
 #[tauri::command]
 pub fn pricing_reset(app: AppHandle) -> Result<PricingView, String> {
     settings::mutate(|s| {
         s.pricing = PricingTable::default();
+        s.pricing_remote = PricingRemote::default();
         Ok(())
     })?;
+    pricing_get(app)
+}
+
+// ---------- 在线更新 ----------
+
+/// 两张表内容一致（note 相同、models 键集相同且各价格相等）。
+fn tables_eq(a: &PricingTable, b: &PricingTable) -> bool {
+    a.note == b.note
+        && a.models.len() == b.models.len()
+        && a
+            .models
+            .iter()
+            .all(|(k, v)| b.models.get(k).map(|o| price_eq(v, o)).unwrap_or(false))
+}
+
+/// 解析更新地址：None → 用已保存地址；空白或等于默认地址 → 默认地址（保存为空，
+/// 以便默认地址将来变化时自动跟随）。返回（请求地址, 落盘地址）。
+fn resolve_update_url(url: Option<String>) -> Result<(String, String), String> {
+    let raw = match url {
+        Some(u) => u.trim().to_string(),
+        None => settings::read(|s| s.pricing_remote.url.trim().to_string())?,
+    };
+    if raw.is_empty() || raw == DEFAULT_UPDATE_URL {
+        return Ok((DEFAULT_UPDATE_URL.to_string(), String::new()));
+    }
+    if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        return Err("invalid_update_url".into());
+    }
+    Ok((raw.clone(), raw))
+}
+
+/// 拉取并校验在线价格表，返回小写化后的表。
+async fn fetch_remote_table(url: &str) -> Result<PricingTable, String> {
+    let resp = crate::http::client()
+        .get(url)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("fetch_failed: {e}"))?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("http_status_{status}"));
+    }
+    let text = resp.text().await.map_err(|e| format!("read_failed: {e}"))?;
+    let table = serde_json::from_str::<PricingTable>(&text)
+        .map_err(|e| format!("parse_failed: {e}"))?
+        .lowercased();
+    if table.models.is_empty() {
+        return Err("remote_table_empty".into());
+    }
+    for (k, p) in &table.models {
+        for val in [p.input, p.output, p.cache_read, p.cache_write] {
+            if !val.is_finite() || val < 0.0 {
+                return Err(format!("invalid_price:{k}"));
+            }
+        }
+    }
+    Ok(table)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingUpdateCheck {
+    /// 应用远端表后基础层是否会变化。
+    pub has_update: bool,
+    /// 远端表条目数。
+    pub models: usize,
+    /// 实际请求的地址。
+    pub url: String,
+}
+
+/// 拉取远端表并与当前基础层（默认+已缓存在线表）比较，判断是否有更新。不写盘。
+#[tauri::command]
+pub async fn pricing_update_check(
+    _app: AppHandle,
+    url: Option<String>,
+) -> Result<PricingUpdateCheck, String> {
+    settings::ensure_loaded()?;
+    let (fetch_url, _) = resolve_update_url(url)?;
+    let fetched = fetch_remote_table(&fetch_url).await?;
+    let models = fetched.models.len();
+    let has_update = !tables_eq(&base_of(fetched), &base());
+    Ok(PricingUpdateCheck {
+        has_update,
+        models,
+        url: fetch_url,
+    })
+}
+
+/// 拉取远端表并写入在线缓存层（用户覆盖保持不变），返回最新视图。
+#[tauri::command]
+pub async fn pricing_update_apply(
+    app: AppHandle,
+    url: Option<String>,
+) -> Result<PricingView, String> {
+    settings::ensure_loaded()?;
+    let (fetch_url, store_url) = resolve_update_url(url)?;
+    let fetched = fetch_remote_table(&fetch_url).await?;
+    let count = fetched.models.len();
+    settings::mutate(|s| {
+        s.pricing_remote = PricingRemote {
+            url: store_url,
+            fetched_at_ms: Some(Utc::now().timestamp_millis()),
+            table: fetched,
+        };
+        Ok(())
+    })?;
+    audit::log(
+        &app,
+        "pricing_update",
+        format!("在线价格表已更新：{count} 个模型（{fetch_url}）"),
+        None,
+    );
     pricing_get(app)
 }
 
@@ -498,6 +719,25 @@ mod daily_tests {
     }
 
     #[test]
+    fn effort_levels_merge_into_base_model() {
+        let table = defaults();
+        let a = ms("2026-06-15T12:00:00Z");
+        let agg = aggregate_and_price(
+            vec![
+                row("claude-4.5-sonnet-thinking", 100.0, Some(a)),
+                row("claude-4.5-sonnet", 50.0, Some(a)),
+            ],
+            &table,
+        );
+        assert_eq!(agg.models.len(), 1);
+        assert_eq!(agg.models[0].model, "claude-4.5-sonnet");
+        assert_eq!(agg.models[0].total_tokens, 150.0);
+        assert_eq!(agg.daily.len(), 1);
+        assert_eq!(agg.daily[0].models.len(), 1);
+        assert_eq!(agg.daily[0].models[0].tokens, 150.0);
+    }
+
+    #[test]
     fn missing_timestamp_excluded_from_daily() {
         let table = defaults();
         let a = ms("2026-06-15T12:00:00Z");
@@ -505,5 +745,130 @@ mod daily_tests {
         assert_eq!(agg.daily.len(), 1);
         assert_eq!(agg.daily[0].tokens, 100.0);
         assert_eq!(agg.total_tokens, 150.0);
+    }
+
+    #[test]
+    fn hourly_buckets_only_for_today() {
+        use chrono::Timelike;
+        let table = defaults();
+        let now_ms = Local::now().timestamp_millis();
+        let old = ms("2026-06-15T12:00:00Z");
+        let agg = aggregate_and_price(
+            vec![row("gpt-5", 100.0, Some(now_ms)), row("gpt-5", 50.0, Some(old))],
+            &table,
+        );
+        // 只有今天的行进入 hourly，旧日期不进入
+        assert_eq!(agg.hourly.len(), 1);
+        let h = &agg.hourly[0];
+        let local = DateTime::from_timestamp_millis(now_ms).unwrap().with_timezone(&Local);
+        assert_eq!(h.date, local.format("%Y-%m-%d").to_string());
+        assert_eq!(h.hour, local.hour());
+        assert_eq!(h.tokens, 100.0);
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    fn price(input: f64, output: f64) -> ModelPrice {
+        ModelPrice {
+            input,
+            output,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        }
+    }
+
+    fn table(note: Option<&str>, models: &[(&str, ModelPrice)]) -> PricingTable {
+        PricingTable {
+            note: note.map(str::to_string),
+            models: models
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    fn entry(key: &str, p: &ModelPrice) -> PricingEntry {
+        PricingEntry {
+            key: key.to_string(),
+            input: p.input,
+            output: p.output,
+            cache_read: p.cache_read,
+            cache_write: p.cache_write,
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn remote_layer_overrides_defaults_and_adds_models() {
+        let d = defaults();
+        let remote = table(
+            Some("远端说明"),
+            &[("gpt-5", price(9.0, 90.0)), ("brand-new", price(1.0, 2.0))],
+        );
+        let base = base_of(remote);
+        assert_eq!(base.note.as_deref(), Some("远端说明"));
+        assert!(price_eq(base.models.get("gpt-5").unwrap(), &price(9.0, 90.0)));
+        assert!(base.models.contains_key("brand-new"));
+        // 未覆盖的模型保持默认价，总数 = 默认 + 新增
+        assert!(price_eq(
+            base.models.get("gpt-4o").unwrap(),
+            d.models.get("gpt-4o").unwrap()
+        ));
+        assert_eq!(base.models.len(), d.models.len() + 1);
+    }
+
+    #[test]
+    fn base_of_empty_equals_defaults() {
+        assert!(tables_eq(&base_of(PricingTable::default()), &defaults()));
+    }
+
+    #[test]
+    fn remote_keys_lowercased() {
+        let base = base_of(table(None, &[("GPT-5", price(9.0, 90.0))]));
+        assert!(price_eq(base.models.get("gpt-5").unwrap(), &price(9.0, 90.0)));
+    }
+
+    #[test]
+    fn diff_overrides_keeps_only_changes() {
+        let base = base_of(table(None, &[("remote-model", price(9.0, 90.0))]));
+        let unchanged = base.models.get("gpt-5").unwrap().clone();
+        let entries = vec![
+            entry("gpt-5", &unchanged),               // 与默认一致 → 丢弃
+            entry("remote-model", &price(9.0, 90.0)), // 与在线层一致 → 丢弃
+            entry("my-custom", &price(1.0, 2.0)),     // 基础层没有 → 保留
+            entry("  GPT-5 ", &price(0.5, 0.5)),      // 改价（键归一化）→ 保留
+        ];
+        let overrides = diff_overrides(&base, &entries).unwrap();
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides.contains_key("my-custom"));
+        assert!(price_eq(overrides.get("gpt-5").unwrap(), &price(0.5, 0.5)));
+    }
+
+    #[test]
+    fn diff_overrides_rejects_invalid_numbers() {
+        let bad = ModelPrice {
+            input: f64::NAN,
+            ..ModelPrice::default()
+        };
+        assert!(diff_overrides(&defaults(), &[entry("x", &bad)]).is_err());
+        let neg = ModelPrice {
+            output: -1.0,
+            ..ModelPrice::default()
+        };
+        assert!(diff_overrides(&defaults(), &[entry("y", &neg)]).is_err());
+    }
+
+    #[test]
+    fn update_check_equality_semantics() {
+        // 远端内容与内置默认一致 → 视为无更新
+        assert!(tables_eq(&base_of(defaults()), &base_of(PricingTable::default())));
+        // 远端改价 → 有更新；应用（缓存同表）后再查 → 无更新
+        let mut fetched = defaults();
+        fetched.models.insert("gpt-5".into(), price(9.0, 90.0));
+        assert!(!tables_eq(&base_of(fetched.clone()), &base_of(PricingTable::default())));
+        assert!(tables_eq(&base_of(fetched.clone()), &base_of(fetched)));
     }
 }

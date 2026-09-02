@@ -13,7 +13,7 @@ use crate::audit;
 use crate::codex_local::CodexClientConfig;
 use crate::cursor_local::CursorClientConfig;
 use crate::paths;
-use crate::pricing::PricingTable;
+use crate::pricing::{PricingRemote, PricingTable};
 use crate::proxy::{self, ProxyConfig};
 
 /// 用户设置文件结构（camelCase）。
@@ -25,11 +25,11 @@ pub struct Settings {
     #[serde(default)]
     pub interval_minutes: u32,
     #[serde(default)]
-    pub usage_interval_minutes: u32,
-    #[serde(default)]
     pub proxy: ProxyConfig,
     #[serde(default)]
     pub pricing: PricingTable,
+    #[serde(default)]
+    pub pricing_remote: PricingRemote,
     #[serde(default)]
     pub cursor_client: CursorClientConfig,
     #[serde(default)]
@@ -41,14 +41,12 @@ impl Settings {
         AccountsFile {
             accounts: self.accounts.clone(),
             interval_minutes: self.interval_minutes,
-            usage_interval_minutes: self.usage_interval_minutes,
         }
     }
 
     pub fn apply_accounts(&mut self, data: AccountsFile) {
         self.accounts = data.accounts;
         self.interval_minutes = data.interval_minutes;
-        self.usage_interval_minutes = data.usage_interval_minutes;
     }
 }
 
@@ -75,6 +73,7 @@ pub fn path_display() -> String {
 fn sanitize_loaded(mut data: Settings) -> Settings {
     data.proxy = proxy::sanitize(data.proxy);
     data.pricing = data.pricing.lowercased();
+    data.pricing_remote.table = data.pricing_remote.table.lowercased();
     data
 }
 

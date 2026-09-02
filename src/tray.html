@@ -176,7 +176,9 @@
       .tray-chart { margin-top: 14px; }
       .tray-chart .tray-ov-label { margin-bottom: 7px; }
       .tray-chart-box { position: relative; }
-      .tray-chart-pie { padding: 6px; }
+      /* 三联迷你饼图：等宽并排（模型 Token / 模型费用 / 来源），行内小节不再各自留顶距 */
+      .tray-pie-row { display: flex; gap: 8px; margin-top: 14px; }
+      .tray-pie-row .tray-chart { flex: 1; min-width: 0; margin-top: 0; }
       /* 底部统计时间戳 */
       .tray-ov-foot { margin-top: 12px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
       /* 提示条：悬浮在面板底部（弹窗之下、列表之上），不再挤动列表 */

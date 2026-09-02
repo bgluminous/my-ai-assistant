@@ -2,14 +2,28 @@ import { invoke, emit } from "./shared.js";
 
 // 主窗口用量页与托盘总览共用的聚合缓存。
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
-// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 90 / 0（全部）或 today:YYYY-MM-DD。
-// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / 90 / all 或 today:YYYY-MM-DD。
+// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）或 today:YYYY-MM-DD。
+// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today:YYYY-MM-DD。
 
-export const USAGE_CACHE_PREFIX = "usage-cache:v2:";
+export const USAGE_CACHE_PREFIX = "usage-cache:v4:";
 export const USAGE_CACHE_EVENT = "usage-cache-changed";
+
+// 旧版缓存一次性清理：聚合口径随版本演进（v3 合并思考等级、v4 小版本号点号归一），
+// 旧条目继续保留只会与新数据混排。
+try {
+  for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith("usage-cache:v2:") || k.startsWith("usage-cache:v3:"))) {
+      localStorage.removeItem(k);
+    }
+  }
+} catch { /* ignore */ }
+// 本窗口的写入者标识：广播缓存变更时带上，接收方据此忽略自己窗口的写入
+// （事件会回送到发出的窗口，不过滤会造成无意义的重渲染循环）。
+export const USAGE_CACHE_ORIGIN = `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 export const DEFAULT_USAGE_TTL_MS = 5 * 60_000;
-const PEEK_DAY_RANGES = ["7", "30", "90", "0"];
-const PEEK_SCAN_RANGES = ["7", "30", "90", "all"];
+const PEEK_DAY_RANGES = ["7", "30", "0"];
+const PEEK_SCAN_RANGES = ["7", "30", "all"];
 
 let ttlMs = DEFAULT_USAGE_TTL_MS;
 const memAgg = new Map();
@@ -65,7 +79,7 @@ export function dailyOn(agg, ymd) {
 }
 
 function notifyUsageCache(key) {
-  emit(USAGE_CACHE_EVENT, { key });
+  emit(USAGE_CACHE_EVENT, { key, origin: USAGE_CACHE_ORIGIN });
 }
 
 function cacheStore(key, entry) {
@@ -147,9 +161,9 @@ export function peekScanForDay(ymd, home) {
   return null;
 }
 
-/** 优先 90/30/7/全部的按日序列，供托盘近 7 日柱图；没有再退回今日键。 */
+/** 优先 30/7/全部的按日序列，供托盘近 7 日柱图；没有再退回今日键。 */
 export function peekAggSeries(accountId, ymd) {
-  for (const rk of ["90", "30", "7", "0"]) {
+  for (const rk of ["30", "7", "0"]) {
     const entry = getCachedAgg(accountId, rk);
     if (entry && entry.agg && Array.isArray(entry.agg.daily) && entry.agg.daily.length) {
       return { entry, rangeKey: rk };
@@ -160,7 +174,7 @@ export function peekAggSeries(accountId, ymd) {
 
 export function peekScanSeries(ymd, home) {
   const h = home || "";
-  for (const rk of ["90", "30", "7", "all"]) {
+  for (const rk of ["30", "7", "all"]) {
     const entry = getCachedScan(rk, h);
     if (entry && entry.scan && entry.scan.aggregate && Array.isArray(entry.scan.aggregate.daily)
       && entry.scan.aggregate.daily.length) {
@@ -176,17 +190,36 @@ function attachUsageCache(error, cached) {
   return err;
 }
 
+// 单次统计拉取的兜底超时。正常失败由后端 40s/请求超时保证会返回错误；
+// 这里防的是命令异常（如 panic）导致 invoke 永不落定：一旦发生，inflight
+// 去重会把挂起的 Promise 无限复用，界面永远停在「更新中」且刷新无效。
+// 超时后转为普通错误，inflight 随之清理，下次刷新即可重试。
+const FETCH_TIMEOUT_MS = 10 * 60_000;
+
+function withTimeout(promise, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}_timeout`)), FETCH_TIMEOUT_MS);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
 export function fetchCursorAggregate(account, rangeKey, { start, end, force } = {}) {
   const key = `${account.id}:${rangeKey}`;
   const cached = getCachedAgg(account.id, rangeKey);
   if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
   const inflightKey = `agg:${key}`;
   if (inflight.has(inflightKey)) return inflight.get(inflightKey);
-  const p = invoke("cursor_aggregate", {
-    sessionToken: account.token,
-    start: start ?? null,
-    end: end ?? null,
-  })
+  const p = withTimeout(
+    invoke("cursor_aggregate", {
+      sessionToken: account.token,
+      start: start ?? null,
+      end: end ?? null,
+    }),
+    "cursor_aggregate"
+  )
     .then((agg) => {
       const entry = { agg, at: Date.now() };
       memAgg.set(key, entry);
@@ -214,11 +247,14 @@ export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
   if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
   const inflightKey = `scan:${key}`;
   if (inflight.has(inflightKey)) return inflight.get(inflightKey);
-  const p = invoke("codex_scan_sessions", {
-    days: days == null || days === 0 ? null : days,
-    sinceMs: sinceMs ?? null,
-    home: h || null,
-  })
+  const p = withTimeout(
+    invoke("codex_scan_sessions", {
+      days: days == null || days === 0 ? null : days,
+      sinceMs: sinceMs ?? null,
+      home: h || null,
+    }),
+    "codex_scan_sessions"
+  )
     .then((scan) => {
       const entry = { scan, at: Date.now() };
       memScan.set(key, entry);

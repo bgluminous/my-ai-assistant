@@ -141,59 +141,62 @@
 
       <!-- ============ 用量统计 ============ -->
       <section id="usage-panel" class="panel" role="tabpanel" hidden>
-        <div class="surface">
-          <div id="usage-sources" class="chip-row" role="group" aria-label="统计对象"></div>
-          <div class="row">
-            <label class="inline" id="usage-range-wrap">时间范围
-              <select id="usage-range">
-                <option value="7">近 7 天</option>
-                <option value="30" selected>近 30 天</option>
-                <option value="90">近 90 天</option>
-                <option value="0">全部</option>
-              </select>
-            </label>
-            <label class="inline" title="独立于账户状态的定时刷新，按间隔自动重新统计当前视图">自动更新
-              <select id="usage-interval">
-                <option value="0" selected>关闭</option>
-                <option value="5">5 分钟</option>
-                <option value="15">15 分钟</option>
-                <option value="30">30 分钟</option>
-                <option value="60">60 分钟</option>
-              </select>
-            </label>
-            <button id="usage-refresh" class="secondary" type="button">刷新</button>
-            <span id="usage-updated" class="muted small"></span>
+        <!-- 筛选工具栏：统计对象 / 时间跨度两组，右侧刷新与数据更新时间 -->
+        <div class="surface usage-toolbar">
+          <div class="toolbar-group">
+            <span class="toolbar-label">统计对象</span>
+            <div id="usage-sources" class="chip-row" role="group" aria-label="统计对象"></div>
+          </div>
+          <div class="toolbar-group">
+            <span class="toolbar-label">时间跨度</span>
+            <!-- 时间跨度二级 TAB：默认今天；本地 ChatGPT 视图与账户视图共用 -->
+            <div id="usage-span" class="span-tabs" role="tablist" aria-label="时间跨度">
+              <button type="button" class="seg active" role="tab" aria-selected="true" data-span="today">今天</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-span="7">近 7 天</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-span="30">近 30 天</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-span="0">全部</button>
+            </div>
+            <div class="toolbar-side">
+              <span id="usage-updated" class="muted small"></span>
+              <span id="usage-loading" class="muted small updating-hint" hidden>更新中…</span>
+              <button id="usage-refresh" class="icon-action" type="button" title="重新统计当前视图，并刷新相关账户状态" aria-label="刷新">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+            </div>
           </div>
         </div>
 
-        <!-- 总览：各来源（Cursor 账户 + 本地 Codex 分析）账单小计 -->
-        <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT 为本机日志分析，无实扣金额</span></div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>账户</th><th>状态</th><th>套餐</th><th class="num">总 Token</th><th class="num">实际支出</th><th class="num">等价费用</th><th class="num">倍数</th>
-                </tr>
-              </thead>
-              <tbody id="usage-overview-body"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 本地 Codex 用量分析：扫描本机会话日志折算等价费用 -->
+        <!-- 本地 Codex 用量分析：扫描本机会话日志折算等价费用；统计范围由上方时间跨度 TAB 决定 -->
         <div id="usage-local-form" class="surface" hidden>
           <div class="row wrap">
-            <label class="inline">统计范围（天）
-              <input id="usage-codex-days" type="number" min="0" value="30" />
-            </label>
             <label class="inline">CODEX_HOME
               <input id="usage-codex-home" type="text" spellcheck="false" placeholder="留空使用默认 ~/.codex" />
             </label>
             <button id="usage-codex-scan" class="secondary" type="button">重新扫描</button>
           </div>
-          <p class="muted small">统计本机会话日志的 token 用量并按官方 API 价折算，为本机所有 ChatGPT 登录的合并结果（日志不含账户标识）；账户额度与套餐见「账户管理」。</p>
+          <p class="muted small">统计本机会话日志的 token 用量并按官方 API 价折算，为本机所有 ChatGPT 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度与套餐见「账户管理」。</p>
         </div>
+
+        <!-- 加载骨架：新视图 / 新跨度无缓存可即时渲染时占位，首个结果渲染后隐藏 -->
+        <section id="usage-skeleton" class="surface usage-skeleton" hidden aria-hidden="true">
+          <div class="skeleton-cards">
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+          </div>
+          <div class="skeleton-chart-wide skeleton-block"></div>
+          <div class="skeleton-charts">
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+          </div>
+          <div class="skeleton-lines">
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
+          </div>
+        </section>
 
         <!-- 统计结果（Cursor 聚合 / Codex 本地扫描共用） -->
         <section id="usage-results" class="surface" hidden>
@@ -222,9 +225,10 @@
           <div id="usage-meta" class="muted small"></div>
           <div id="usage-breakdown" class="cost-breakdown" hidden></div>
           <div class="charts">
-            <div class="chart-box chart-box-wide"><h4>按日 Token</h4><canvas id="chart-daily"></canvas></div>
-            <div class="chart-box"><h4>各模型等价费用（USD）</h4><canvas id="chart-bar"></canvas></div>
-            <div class="chart-box"><h4>Token 构成</h4><canvas id="chart-doughnut"></canvas></div>
+            <div class="chart-box chart-box-wide"><h4 id="chart-daily-title">按日 Token</h4><div class="chart-canvas"><canvas id="chart-daily"></canvas></div></div>
+            <div class="chart-box"><h4>各模型 Token 数量</h4><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div></div>
+            <div class="chart-box"><h4>各模型等价费用（USD）</h4><div class="chart-canvas"><canvas id="chart-models"></canvas></div></div>
+            <div class="chart-box"><h4>Token 构成</h4><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div></div>
           </div>
           <div class="table-wrap">
             <table>
@@ -237,6 +241,21 @@
             </table>
           </div>
           <p class="muted small usage-legend">明细表中每个 token 数下方为该项按官方价折算的等价费用，缓存读 / 缓存写费用单独列示。</p>
+        </section>
+
+        <!-- 总览：各来源（Cursor 账户 + 本地 Codex 分析）账单小计，按总 Token 降序；置于图表之后 -->
+        <section id="usage-overview" class="surface" hidden>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT 为本机日志分析，无实扣金额</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>数据更新</th><th>套餐</th><th class="num">总 Token</th><th class="num">实际支出</th><th class="num">等价费用</th><th class="num">倍数</th>
+                </tr>
+              </thead>
+              <tbody id="usage-overview-body"></tbody>
+            </table>
+          </div>
         </section>
       </section>
 
@@ -296,45 +315,6 @@
               <dd>Tauri v2 / Rust / 原生 HTML·CSS·JS / Chart.js</dd>
             </div>
           </dl>
-        </div>
-
-        <div class="surface">
-          <div class="section-heading">
-            <h3>功能概览</h3>
-          </div>
-          <div class="cards about-feature-cards">
-            <div class="card">
-              <span class="card-label">账户管理</span>
-              <p class="about-card-text">保存 Cursor / ChatGPT 账户，查看套餐、额度与存活状态，支持定时刷新与一键切换。</p>
-            </div>
-            <div class="card">
-              <span class="card-label">用量统计</span>
-              <p class="about-card-text">按账户与模型汇总 Token，折算等价官方 API 费用，并绘制按日堆叠柱状图与模型图表。</p>
-            </div>
-            <div class="card">
-              <span class="card-label">审计日志</span>
-              <p class="about-card-text">记录账户变更、刷新失败与续期结果，可筛选与清空。</p>
-            </div>
-            <div class="card">
-              <span class="card-label">系统托盘</span>
-              <p class="about-card-text">关闭窗口后继续后台运行，托盘面板可查看额度并切换账户。</p>
-            </div>
-            <div class="card">
-              <span class="card-label">显示与代理</span>
-              <p class="about-card-text">可切换 Token 单位、配置客户端路径与网络代理。</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="surface">
-          <div class="section-heading">
-            <h3>使用说明</h3>
-          </div>
-          <ul class="about-notes">
-            <li>本应用调用 Cursor / OpenAI 的非公开内部接口，随时可能变动或失效。</li>
-            <li>Token 只发往官方域名，不会发到第三方。</li>
-            <li>仅供个人本地使用，请遵守相应服务条款并自担风险。</li>
-          </ul>
         </div>
 
         <div class="surface">
@@ -435,6 +415,16 @@
           </div>
         </div>
 
+        <div class="pricing-update">
+          <span class="pricing-add-title">在线更新</span>
+          <div class="pricing-update-grid">
+            <input id="pricing-update-url" type="text" spellcheck="false" />
+            <button id="pricing-update-btn" class="secondary compact" type="button">在线更新</button>
+          </div>
+          <p id="pricing-update-meta" class="muted small"></p>
+          <p id="pricing-update-hint" class="update-hint" hidden></p>
+        </div>
+
         <p id="pricing-status" class="status" hidden></p>
 
         <div class="modal-foot">
@@ -472,7 +462,7 @@
 
           <hr class="modal-divider" />
 
-          <label for="accounts-interval">账户定时刷新</label>
+          <label for="accounts-interval">定时刷新</label>
           <select id="accounts-interval" class="compact-select">
             <option value="0" selected>关闭</option>
             <option value="5">5 分钟</option>
@@ -480,7 +470,7 @@
             <option value="30">30 分钟</option>
             <option value="60">60 分钟</option>
           </select>
-          <p class="muted small">按设定间隔自动刷新全部账户状态。</p>
+          <p class="muted small">按设定间隔自动刷新全部账户状态，并重新统计用量数据。</p>
           <p id="interval-status" class="status" hidden></p>
 
           <hr class="modal-divider" />
