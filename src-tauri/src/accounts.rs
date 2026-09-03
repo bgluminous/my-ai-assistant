@@ -421,6 +421,8 @@ pub fn accounts_delete(app: AppHandle, id: String) -> Result<AccountsView, Strin
         Ok(())
     })?;
     if let Some(acc) = &removed {
+        // 全量用量存档随账户删除清理（与前端删账户时清 localStorage 缓存一致）
+        crate::usage_archive::remove(&acc.id);
         audit::log(
             &app,
             "account_delete",

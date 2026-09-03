@@ -326,6 +326,7 @@ pub async fn cursor_aggregate(
     session_token: String,
     start: Option<i64>,
     end: Option<i64>,
+    archive_account_id: Option<String>,
 ) -> Result<UsageAggregate, String> {
     let token = http::normalize_cursor_token(&session_token);
     let client = http::client();
@@ -350,7 +351,19 @@ pub async fn cursor_aggregate(
         }
     }
     let table = pricing::load();
-    Ok(pricing::aggregate_and_price(rows, &table))
+    let agg = pricing::aggregate_and_price(rows, &table);
+    // 「全部」跨度（无起止时间）的成功结果顺手落盘存档：
+    // 账户失效后「生成快照」的兜底数据源。写盘失败静默，不影响返回。
+    if start.is_none() && end.is_none() {
+        if let Some(id) = archive_account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            crate::usage_archive::store(id, &agg);
+        }
+    }
+    Ok(agg)
 }
 
 // ---------------------------------------------------------------------------

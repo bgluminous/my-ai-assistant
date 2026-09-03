@@ -12,6 +12,7 @@ mod process;
 mod proxy;
 mod settings;
 mod tray;
+mod usage_archive;
 
 use serde::Serialize;
 use tauri::Manager;
@@ -114,6 +115,8 @@ pub fn run() {
             accounts::account_refresh,
             audit::audit_list,
             audit::audit_clear,
+            usage_archive::usage_archive_get,
+            usage_archive::usage_snapshot_save,
             tray::tray_open_main,
             app_info,
         ])

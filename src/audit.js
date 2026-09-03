@@ -11,6 +11,7 @@ const EVENT_META = {
   account_import: { label: "本机导入", cls: "ok", group: "account" },
   account_import_file: { label: "导入账户", cls: "ok", group: "account" },
   account_export: { label: "导出账户", cls: "accent", group: "account" },
+  usage_snapshot: { label: "用量快照", cls: "accent", group: "account" },
   account_state_changed: { label: "状态变化", cls: "warn", group: "state" },
   account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },
   codex_renewed: { label: "自动续期", cls: "ok", group: "renew" },

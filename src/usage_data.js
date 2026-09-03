@@ -217,6 +217,9 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force } = 
       sessionToken: account.token,
       start: start ?? null,
       end: end ?? null,
+      // 「全部」跨度的成功结果由后端顺手写入磁盘存档（usage-archive/<账户id>.json），
+      // 作为账户失效后「生成快照」的兜底数据源。
+      archiveAccountId: rangeKey === "0" ? account.id : null,
     }),
     "cursor_aggregate"
   )

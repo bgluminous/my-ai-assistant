@@ -25,6 +25,7 @@ import {
   getRefreshIntervalMinutes,
   relativeFromUnixSeconds,
 } from "./accounts.js";
+import { generateCursorSnapshot } from "./snapshot.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
 // Codex 账户不在本页展示（额度信息见「账户管理」）；Codex 账单只能来自本地会话日志，
@@ -856,6 +857,8 @@ function rebuildChips() {
 function applyVisibility() {
   el("#usage-local-form").hidden = selection !== "local";
   el("#usage-overview").hidden = selection !== "all";
+  // 「生成快照」仅对单个 Cursor 账户视图开放（总览 / 本地分析无对应存档口径）
+  el("#usage-snapshot").hidden = selection === "all" || selection === "local";
   el("#usage-results").hidden = true;
   el("#usage-skeleton").hidden = true;
   renderedFor = ""; // 结果区已被隐藏，需要重新渲染
@@ -1494,6 +1497,23 @@ export function initUsage() {
         ? [selection]
         : [];
     if (ids.length) void refreshAccounts(ids);
+  });
+  // 生成全量用量快照图片：数据获取（在线 / 本地存档回退）与绘制见 snapshot.js
+  const snapshotBtn = el("#usage-snapshot");
+  snapshotBtn.addEventListener("click", async () => {
+    const account = currentAccount();
+    if (!account || snapshotBtn.disabled) return;
+    snapshotBtn.disabled = true;
+    toast("", "正在生成用量快照…", { key: "snapshot" });
+    try {
+      const result = await generateCursorSnapshot(account);
+      if (result && result.cancelled) dismissToast("snapshot");
+      else toast("ok", `快照已保存：${result.path}`, { key: "snapshot" });
+    } catch (error) {
+      toast("bad", `生成快照失败：${resetError(error)}`, { key: "snapshot" });
+    } finally {
+      snapshotBtn.disabled = false;
+    }
   });
   // 时间跨度二级 TAB（默认今天）
   el("#usage-span").addEventListener("click", (event) => {
