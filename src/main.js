@@ -1,4 +1,4 @@
-import { setupDesktopGuards } from "./shared.js";
+import { setupDesktopGuards, invoke } from "./shared.js";
 import { initAccounts } from "./accounts.js";
 import { initUsage } from "./usage.js";
 import { initAudit } from "./audit.js";
@@ -53,11 +53,16 @@ function setupTabs() {
 
 // 主窗口以隐藏状态创建（tauri.conf.json visible:false + 深色底色，消除启动白闪），
 // 首帧渲染完成后再显示窗口；非 Tauri 环境（浏览器直开调试）静默跳过。
-// 前端初始化若中途异常，Rust 侧还有超时兜底 show()（见 lib.rs setup）。
-function revealWindow() {
+// 开机自启动 + 静默启动的组合下保持隐藏（仅托盘运行，双击托盘再唤出）。
+// 前端初始化若中途异常，Rust 侧还有超时兜底 show()（见 lib.rs setup，静默启动同样跳过）。
+async function revealWindow() {
   try {
     const w = window.__TAURI__ && window.__TAURI__.window;
     if (!w || typeof w.getCurrentWindow !== "function") return;
+    try {
+      const info = await invoke("launch_info");
+      if (info && info.silentStart) return;
+    } catch { /* 查询失败按正常启动处理 */ }
     const win = w.getCurrentWindow();
     void win
       .show()
@@ -77,4 +82,4 @@ initProxy();
 initSettings();
 initAbout();
 // 两帧 rAF 确保浏览器完成首次布局与绘制后才显示窗口
-requestAnimationFrame(() => requestAnimationFrame(revealWindow));
+requestAnimationFrame(() => requestAnimationFrame(() => { void revealWindow(); }));

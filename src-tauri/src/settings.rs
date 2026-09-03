@@ -37,6 +37,10 @@ pub struct Settings {
     pub codex_client: CodexClientConfig,
     #[serde(default)]
     pub claude_client: ClaudeClientConfig,
+    /// 开机自启动拉起时是否静默启动（不弹主窗口，仅托盘运行）。
+    /// 自启动开关本身注册在系统里（Windows 注册表 / macOS LaunchAgent），不落本文件。
+    #[serde(default)]
+    pub autostart_silent: bool,
 }
 
 impl Settings {
@@ -73,7 +77,8 @@ pub fn path_display() -> String {
         .unwrap_or_default()
 }
 
-fn sanitize_loaded(mut data: Settings) -> Settings {
+/// 归一化外部来源的设置数据（磁盘载入 / 全量备份导入共用）。
+pub(crate) fn sanitize_loaded(mut data: Settings) -> Settings {
     data.proxy = proxy::sanitize(data.proxy);
     data.pricing = data.pricing.lowercased();
     data.pricing_remote.table = data.pricing_remote.table.lowercased();

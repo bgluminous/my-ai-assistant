@@ -21,7 +21,7 @@
     <div class="page">
       <header class="site-header">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          <span class="brand-mark" aria-hidden="true"><img src="app-icon.png" alt="" /></span>
           <div>
             <h1>AI 助手 · 用量与费用</h1>
             <p class="subtitle">Cursor / ChatGPT / Claude 用量统计、图表与按官方 API 价格折算的等价费用。</p>
@@ -347,7 +347,7 @@
       <section id="about-panel" class="panel" role="tabpanel" hidden>
         <div class="surface">
           <div class="about-hero">
-            <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+            <span class="brand-mark" aria-hidden="true"><img src="app-icon.png" alt="" /></span>
             <div>
               <h3>AI 助手 · 用量与费用</h3>
               <p class="muted">个人用的桌面应用，用于管理 Cursor / ChatGPT / Claude 账户、统计用量与费用。</p>
@@ -381,6 +381,8 @@
               <tbody>
                 <tr><td>tauri</td><td>2.11.5</td><td>桌面壳 / WebView</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>tauri-plugin-single-instance</td><td>2.4.3</td><td>单实例</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-dialog</td><td>2.7.3</td><td>系统文件对话框</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-autostart</td><td>2.5.1</td><td>开机自启动</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>serde</td><td>1.0.229</td><td>序列化</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>serde_json</td><td>1.0.151</td><td>JSON</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>reqwest</td><td>0.12.28</td><td>HTTP 客户端</td><td>MIT OR Apache-2.0</td></tr>
@@ -392,6 +394,8 @@
                 <tr><td>SQLite</td><td>bundled</td><td>rusqlite bundled 静态嵌入</td><td>公共领域</td></tr>
                 <tr><td>sha2</td><td>0.10.9</td><td>SHA-2</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>getrandom</td><td>0.2.17</td><td>系统随机数</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>aes-gcm</td><td>0.10.3</td><td>备份文件加密（AES-256-GCM）</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>pbkdf2</td><td>0.12.2</td><td>备份密码派生密钥</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>tokio</td><td>1.53.1</td><td>异步运行时</td><td>MIT</td></tr>
                 <tr><td>chart.js</td><td>4.5.1</td><td>用量图表</td><td>MIT</td></tr>
                 <tr><td>@kurkle/color</td><td>0.3.4</td><td>Chart.js 颜色（随 UMD 打进 vendor）</td><td>MIT</td></tr>
@@ -527,6 +531,24 @@
 
           <hr class="modal-divider" />
 
+          <label>开机启动</label>
+          <div class="toggle-group">
+            <label class="toggle">
+              <input id="autostart-enabled" type="checkbox" />
+              <span class="toggle-track" aria-hidden="true"></span>
+              <span class="toggle-text">开机自启动</span>
+            </label>
+            <label class="toggle">
+              <input id="autostart-silent" type="checkbox" />
+              <span class="toggle-track" aria-hidden="true"></span>
+              <span class="toggle-text">静默启动（不弹主窗口，仅托盘运行）</span>
+            </label>
+          </div>
+          <p class="muted small">随系统登录自动运行本应用；开启「静默启动」后开机拉起时只挂托盘图标，双击托盘可随时打开主窗口。</p>
+          <p id="autostart-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
           <label for="cursor-exe-path">Cursor 客户端路径</label>
           <div class="row">
             <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 Cursor.exe / Cursor.app 完整路径" />
@@ -556,6 +578,21 @@
           </div>
           <p class="muted small">用于切换 Claude 账户后启动 Claude Desktop（切号写入的是 Claude Code 凭据）；留空则自动检测常见安装位置。点「完成」保存。</p>
           <p id="claude-path-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
+          <label>数据备份</label>
+          <div class="row">
+            <button id="backup-export" class="secondary" type="button">导出全部数据…</button>
+            <button id="backup-import" class="secondary" type="button">导入全部数据…</button>
+          </div>
+          <div id="backup-password-row" class="row" hidden>
+            <input id="backup-password" class="grow" type="password" spellcheck="false" autocomplete="off" placeholder="" />
+            <button id="backup-password-ok" class="secondary compact" type="button">确认</button>
+            <button id="backup-password-cancel" class="secondary compact" type="button">取消</button>
+          </div>
+          <p class="muted small">导出为单个 JSON 文件，包含全部设置、账号（含 Token，可选密码加密）与界面偏好。导入为合并模式：账号去重后合并，其余设置以备份文件为准，导入后立即生效。</p>
+          <p id="backup-status" class="status" hidden></p>
         </div>
 
         <div class="modal-foot">

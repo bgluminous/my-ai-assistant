@@ -48,8 +48,10 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保�
 
 ### 其它
 
-- **审计日志**：记录账户增删改、导入导出、存活状态变化、刷新失败、ChatGPT 续期结果、定时间隔变更等。日志为 JSON Lines，超限后轮转并保留最近约 2000 条。页面可按类型筛选或清空。
+- **审计日志**：记录账户增删改、导入导出、存活状态变化、刷新失败、ChatGPT 续期结果、定时间隔变更、开机启动开关、全量备份导入导出等。日志为 JSON Lines，超限后轮转并保留最近约 2000 条。页面可按类型筛选或清空。
 - **系统托盘**：关闭主窗口时转入托盘，定时刷新继续运行。左键单击打开账户面板，双击打开主窗口；面板失焦或再次单击后隐藏。托盘菜单提供显示主窗口与退出；只有「退出」结束进程。
+- **开机启动**：设置中可开启开机自启动（Windows 注册表 Run 项 / macOS LaunchAgent），可选「静默启动」——开机拉起时不弹主窗口，仅托盘运行。
+- **数据备份**：设置中可把全部数据（所有设置、账号含 Token、界面偏好）导出为单个 JSON 文件，支持可选密码加密（PBKDF2-SHA256 + AES-256-GCM）；导入为合并模式——账号按身份去重后合并，其余设置以备份文件为准，导入后立即生效无需重启。
 - **显示**：深色 / 浅色主题；token 数量可在完整数字、K·M·B、万·亿之间切换。
 - **网络代理**：系统代理、直连或自定义 HTTP / SOCKS 代理，保存后立即生效。
 - **单实例**：重复启动只唤出已有主窗口，避免并发读写配置文件。
@@ -109,7 +111,7 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 
 | 文件 | 内容 |
 | --- | --- |
-| `settings.json` | 账户、刷新间隔、代理、价格覆盖、Cursor / ChatGPT / Claude Desktop 客户端路径 |
+| `settings.json` | 账户、刷新间隔、代理、价格覆盖、Cursor / ChatGPT / Claude Desktop 客户端路径、静默启动偏好 |
 | `audit.jsonl` | 审计日志 |
 
 应用内可复制上述路径。
@@ -118,7 +120,7 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 
 **凭据以明文 JSON 存放在本机。** 不要把该目录提交到版本库，也不要分享 `settings.json`。审计日志只记录备注或打码后的 token，不含完整凭据。
 
-主题与 token 显示单位保存在 WebView 的 `localStorage` 中，不进入 `settings.json`。
+主题与 token 显示单位保存在 WebView 的 `localStorage` 中，不进入 `settings.json`；全量备份导出时会把这两项界面偏好一并写入备份文件。开机自启动开关本身注册在系统（Windows 注册表 / macOS LaunchAgent），不随备份迁移。
 
 ## 价格表
 

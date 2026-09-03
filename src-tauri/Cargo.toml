@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # native-tls：Windows 走 Schannel。rustls 的 JA3 会被 cursor.com（Vercel）当成非浏览器，
@@ -28,6 +29,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 getrandom = "0.2"
 tokio = { version = "1", features = ["time", "sync"] }
+# 全量备份文件的可选密码加密：PBKDF2-SHA256 派生密钥 + AES-256-GCM
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
 
 [profile.release]
 opt-level = "z"

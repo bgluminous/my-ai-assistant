@@ -82,6 +82,12 @@ fn current() -> AccountsFile {
     settings::read(|s| s.accounts_file()).unwrap_or_default()
 }
 
+/// 绕过本模块 mutate 直接改动账户数据的入口（如全量备份导入）在写盘后调用，
+/// 向所有窗口广播最新账户视图；广播失败不影响数据。
+pub(crate) fn broadcast_changed(app: &AppHandle) {
+    let _ = app.emit("accounts-changed", view(&current()));
+}
+
 // ---------------------------------------------------------------------------
 // 视图与入参
 // ---------------------------------------------------------------------------
@@ -114,14 +120,14 @@ pub struct NewAccount {
     pub refresh_token: Option<String>,
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let millis = Utc::now().timestamp_millis();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     format!("acc-{millis}-{seq}")
 }
 
-fn sanitize_kind(kind: &str) -> Result<String, String> {
+pub(crate) fn sanitize_kind(kind: &str) -> Result<String, String> {
     match kind.trim() {
         "cursor" => Ok("cursor".to_string()),
         "codex" => Ok("codex".to_string()),
@@ -131,7 +137,7 @@ fn sanitize_kind(kind: &str) -> Result<String, String> {
 }
 
 /// 归一化并校验 token：cursor 走 normalize_cursor_token，codex 仅 trim；空值报错。
-fn sanitize_token(kind: &str, token: &str) -> Result<String, String> {
+pub(crate) fn sanitize_token(kind: &str, token: &str) -> Result<String, String> {
     let token = if kind == "cursor" {
         http::normalize_cursor_token(token)
     } else {
@@ -274,7 +280,7 @@ pub(crate) fn account_identity(kind: &str, token: &str) -> Option<String> {
 
 /// 查重：与同 kind 现有账户逐个比对身份（不分大小写），新 token 身份解析不出时
 /// 回退「同 kind 且 token 字符串全等」。编辑场景用 exclude_id 排除自身。
-fn is_duplicate_account(
+pub(crate) fn is_duplicate_account(
     accounts: &[Account],
     kind: &str,
     token: &str,
@@ -1076,7 +1082,12 @@ pub struct ImportFileResult {
     pub view: AccountsView,
 }
 
-fn pick_json_path(app: &AppHandle, title: &str, file_name: Option<&str>, save: bool) -> Option<PathBuf> {
+pub(crate) fn pick_json_path(
+    app: &AppHandle,
+    title: &str,
+    file_name: Option<&str>,
+    save: bool,
+) -> Option<PathBuf> {
     let mut builder = app
         .dialog()
         .file()
@@ -1096,7 +1107,7 @@ fn pick_json_path(app: &AppHandle, title: &str, file_name: Option<&str>, save: b
     picked.and_then(|p| p.simplified().into_path().ok())
 }
 
-fn ensure_json_ext(mut path: PathBuf) -> PathBuf {
+pub(crate) fn ensure_json_ext(mut path: PathBuf) -> PathBuf {
     let missing = path
         .extension()
         .and_then(|e| e.to_str())

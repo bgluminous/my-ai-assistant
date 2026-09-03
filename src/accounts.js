@@ -792,6 +792,8 @@ function applyView(view) {
   const n = Number(view && view.intervalMinutes);
   if (Number.isFinite(n)) intervalMinutes = n;
   el("#accounts-interval").value = String(intervalMinutes);
+  // 间隔与现行定时器不一致时重建（如全量备份导入等其它入口改动后热生效）
+  if (intervalMinutes !== timerMinutes) rebuildTimer();
   // 清理已被移除账户的瞬态状态
   const ids = new Set(accounts.map((a) => a.id));
   for (const id of [...rowErrors.keys()]) {
@@ -897,7 +899,11 @@ async function refreshAll() {
   render();
 }
 
+// 现行定时器对应的间隔（分钟），applyView 据此判断是否需要重建
+let timerMinutes = 0;
+
 function rebuildTimer() {
+  timerMinutes = intervalMinutes;
   if (timerId != null) {
     clearInterval(timerId);
     timerId = null;

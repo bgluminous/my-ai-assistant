@@ -1,5 +1,6 @@
 mod accounts;
 mod audit;
+mod backup;
 mod claude;
 mod claude_local;
 mod claude_oauth;
@@ -8,6 +9,7 @@ mod codex_local;
 mod cursor;
 mod cursor_local;
 mod http;
+mod launch;
 mod model_match;
 mod paths;
 mod pricing;
@@ -36,6 +38,8 @@ fn app_info() -> AppInfo {
 }
 
 pub fn run() {
+    // 是否由开机自启动拉起（注册自启动项时写入 --autostart 参数）
+    let autostart_launch = launch::launched_by_autostart();
     tauri::Builder::default()
         // 单实例：重复启动不再新开进程（多实例会并发读写 settings.json，
         // 撞上写入瞬间的实例会以空数据运行），改为唤出并聚焦已有主窗口。
@@ -47,8 +51,15 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
+        .setup(move |app| {
             settings::load(app.handle());
+            // 静默启动 = 开机自启动拉起 + 设置勾选静默；需在设置载入后判定
+            let silent = autostart_launch && settings::read(|s| s.autostart_silent).unwrap_or(false);
+            launch::set_silent_launch(silent);
             tray::setup(app.handle())?;
             // 最小窗口尺寸运行时兜底（与 tauri.conf.json 的 minWidth/minHeight 一致），
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
@@ -56,13 +67,16 @@ pub fn run() {
                 let _ = win.set_min_size(Some(tauri::LogicalSize::new(1180.0, 640.0)));
                 // 主窗口以隐藏状态创建（消除启动白闪），正常由前端首帧渲染后调用 show()；
                 // 若前端初始化异常没能显示，这里兜底拉起，避免窗口永远不可见。
-                let win = win.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    if !win.is_visible().unwrap_or(true) {
-                        let _ = win.show();
-                    }
-                });
+                // 静默启动（开机自启动 + 仅托盘）时不兜底，保持隐藏。
+                if !silent {
+                    let win = win.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        if !win.is_visible().unwrap_or(true) {
+                            let _ = win.show();
+                        }
+                    });
+                }
             }
             Ok(())
         })
@@ -131,6 +145,12 @@ pub fn run() {
             usage_archive::usage_archive_get,
             usage_archive::usage_snapshot_save,
             tray::tray_open_main,
+            launch::autostart_get,
+            launch::autostart_set,
+            launch::launch_info,
+            backup::backup_export,
+            backup::backup_import_inspect,
+            backup::backup_import_apply,
             app_info,
         ])
         .run(tauri::generate_context!())

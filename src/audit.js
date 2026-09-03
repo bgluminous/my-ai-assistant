@@ -24,6 +24,9 @@ const EVENT_META = {
   settings_load_failed: { label: "设置载入失败", cls: "bad", group: "settings" },
   interval_set: { label: "定时设置", cls: "accent", group: "settings" },
   usage_interval_set: { label: "统计设置", cls: "accent", group: "settings" },
+  autostart_set: { label: "开机启动", cls: "accent", group: "settings" },
+  backup_export: { label: "导出备份", cls: "accent", group: "settings" },
+  backup_import: { label: "导入备份", cls: "ok", group: "settings" },
 };
 
 let entries = [];
