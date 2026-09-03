@@ -981,6 +981,9 @@ function renderOverviewTable() {
 
     const timeTd = document.createElement("td");
     if (Number.isFinite(at) && at > 0) {
+      // 原始时间戳存 dataset，供定时器重算相对文案（否则文本会冻结在渲染时刻，如一直显示「刚刚」）
+      timeTd.className = "usage-data-at";
+      timeTd.dataset.at = String(at);
       timeTd.textContent = relativeFromUnixSeconds(at / 1000);
       timeTd.title = new Date(at).toLocaleString("zh-CN", { hour12: false });
     } else {
@@ -1563,6 +1566,15 @@ export function initUsage() {
     forgetUsageCacheFromEvent(event.key);
     if (cacheKeyAffectsCurrentView(event.key)) scheduleRerenderFromCache();
   });
+
+  // 总览表「数据更新」列的相对时间随时间流逝定期重算（与账户页节奏一致），
+  // 只改时间文本，不整表重绘
+  setInterval(() => {
+    for (const cell of el("#usage-overview-body").querySelectorAll(".usage-data-at")) {
+      const at = Number(cell.dataset.at);
+      if (at > 0) cell.textContent = relativeFromUnixSeconds(at / 1000);
+    }
+  }, 30_000);
 
   rebuildChips();
   applyVisibility();
