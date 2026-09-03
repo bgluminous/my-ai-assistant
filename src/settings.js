@@ -5,7 +5,8 @@ import { getRefreshIntervalMinutes, setRefreshInterval } from "./accounts.js";
 // - Token 数量单位（完整 / K·M·B / 万·亿），存 localStorage，切换时通过 unitchange 事件
 //   通知已渲染的视图即时重绘；
 // - 定时刷新间隔（账户状态与用量统计共用），实际存取与定时器由 accounts.js 托管，写入统一 settings.json；
-// - ChatGPT 客户端路径，由后端持久化到 settings.json（codex_client_get / set / detect），用于切换账户后启动 ChatGPT。
+// - Cursor / ChatGPT / Claude Desktop 客户端路径，由后端持久化到 settings.json
+//   （*_client_get / set / detect），用于切换账户后启动对应客户端。
 
 const SAMPLE = 1234567890;
 
@@ -100,6 +101,46 @@ async function onCodexDetect() {
   }
 }
 
+/* ---------- Claude Desktop 路径 ---------- */
+
+function setClaudePathStatus(kind, text) {
+  fillStatus(el("#claude-path-status"), kind, text);
+}
+
+function clearClaudePathStatus() {
+  const box = el("#claude-path-status");
+  box.hidden = true;
+  box.textContent = "";
+}
+
+async function loadClaudePath() {
+  try {
+    const v = await invoke("claude_client_get");
+    el("#claude-exe-path").value = (v && v.exePath) || "";
+  } catch {
+    // 非 Tauri 环境静默
+  }
+}
+
+async function onClaudeDetect() {
+  const btn = el("#claude-detect");
+  btn.disabled = true;
+  setClaudePathStatus("", "正在搜索本机 Claude Desktop…");
+  try {
+    const r = await invoke("claude_client_detect");
+    if (r && r.exePath) {
+      el("#claude-exe-path").value = r.exePath;
+      setClaudePathStatus("ok", `已填入：${r.exePath}。点「完成」保存。`);
+    } else {
+      setClaudePathStatus("warn", "未找到 Claude Desktop，请手动填写完整路径。");
+    }
+  } catch (error) {
+    setClaudePathStatus("bad", `搜索失败：${resetError(error)}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 let scanning = false;
 let sessionActive = false; // 是否有可继续的扫描会话（上次命中且未扫完）
 let unlistenScan = null;
@@ -178,7 +219,7 @@ async function onScanCancel() {
   sessionActive = false;
 }
 
-// 点「完成」：保存 Cursor / ChatGPT 路径并关闭；路径无效则提示且不关闭。空路径 = 清除配置。
+// 点「完成」：保存 Cursor / ChatGPT / Claude Desktop 路径并关闭；路径无效则提示且不关闭。空路径 = 清除配置。
 async function onDone() {
   const modal = el("#settings-modal");
   if (scanning) void onScanCancel();
@@ -200,6 +241,15 @@ async function onDone() {
       return;
     }
   }
+  const claudePath = el("#claude-exe-path").value.trim();
+  try {
+    await invoke("claude_client_set", { exePath: claudePath });
+  } catch (error) {
+    if (resetError(error) === "claude_exe_invalid") {
+      setClaudePathStatus("bad", "路径无效或文件不存在，请修正或清空后再完成。");
+      return;
+    }
+  }
   modal.hidden = true;
 }
 
@@ -213,6 +263,7 @@ export function initSettings() {
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
     clearCursorPathStatus();
     clearCodexPathStatus();
+    clearClaudePathStatus();
     setScanProgress("");
     sessionActive = false;
     updateScanButton();
@@ -220,6 +271,7 @@ export function initSettings() {
     modal.hidden = false;
     void loadCursorPath();
     void loadCodexPath();
+    void loadClaudePath();
   });
   for (const node of modal.querySelectorAll("[data-close]")) {
     node.addEventListener("click", () => {
@@ -243,5 +295,6 @@ export function initSettings() {
   el("#cursor-detect").addEventListener("click", () => { void onStep(); });
   el("#cursor-scan-cancel").addEventListener("click", () => { void onScanCancel(); });
   el("#codex-detect").addEventListener("click", () => { void onCodexDetect(); });
+  el("#claude-detect").addEventListener("click", () => { void onClaudeDetect(); });
   el("#settings-done").addEventListener("click", () => { void onDone(); });
 }

@@ -1,7 +1,7 @@
 import { el, invoke, fmtDateMs, resetError, toast, dismissToast } from "./shared.js";
 import { onAccountsChanged } from "./accounts.js";
 
-// 审计日志：展示后端记录的账户增删改、状态变化、Codex 续期、设置变更等事件。
+// 审计日志：展示后端记录的账户增删改、状态变化、Codex / Claude 续期、设置变更等事件。
 // 日志由后端写入 {用户目录}/xilore/myaiassistant/audit.jsonl，这里只读展示 + 清空。
 
 const EVENT_META = {
@@ -16,6 +16,11 @@ const EVENT_META = {
   account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },
   codex_renewed: { label: "自动续期", cls: "ok", group: "renew" },
   codex_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
+  claude_renewed: { label: "自动续期", cls: "ok", group: "renew" },
+  claude_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
+  cursor_switch_local: { label: "切换登录", cls: "accent", group: "account" },
+  codex_switch_local: { label: "切换登录", cls: "accent", group: "account" },
+  claude_switch_local: { label: "切换登录", cls: "accent", group: "account" },
   settings_load_failed: { label: "设置载入失败", cls: "bad", group: "settings" },
   interval_set: { label: "定时设置", cls: "accent", group: "settings" },
   usage_interval_set: { label: "统计设置", cls: "accent", group: "settings" },

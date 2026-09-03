@@ -816,6 +816,7 @@ td.account-actions { white-space: nowrap; }
 
 .tag.kind-cursor { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tag.kind-codex { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.tag.kind-claude { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
 .tag.renewable { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
 
 /* 通用额度进度条（账户列表），标签 / 进度 / 剩余值单行排布，

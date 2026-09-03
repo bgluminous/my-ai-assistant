@@ -24,7 +24,7 @@
           <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
           <div>
             <h1>AI 助手 · 用量与费用</h1>
-            <p class="subtitle">Cursor / ChatGPT 用量统计、图表与按官方 API 价格折算的等价费用。</p>
+            <p class="subtitle">Cursor / ChatGPT / Claude 用量统计、图表与按官方 API 价格折算的等价费用。</p>
           </div>
         </div>
         <div class="header-actions">
@@ -137,6 +137,44 @@
             <p id="accounts-empty-codex" class="muted empty" hidden>暂无 ChatGPT 账户。</p>
           </div>
         </div>
+
+        <div class="surface">
+          <div class="section-heading">
+            <h3><span class="tag kind-claude">Claude</span> 账户</h3>
+            <div class="heading-side">
+              <span id="accounts-count-claude" class="muted small"></span>
+              <div class="heading-actions">
+                <button id="accounts-refresh-claude" class="icon-action" type="button" title="刷新全部 Claude 账户" aria-label="刷新全部 Claude 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </button>
+                <button id="accounts-import-claude" class="icon-action" type="button" title="从文件导入 Claude 账户" aria-label="从文件导入 Claude 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </button>
+                <button id="accounts-export-claude" class="icon-action" type="button" title="导出 Claude 账户" aria-label="导出 Claude 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </button>
+                <button id="accounts-add-claude" class="icon-action" type="button" title="添加 Claude 账户" aria-label="添加 Claude 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <!-- 列结构与上两表完全一致；Claude 无超额 / 余额概念，该列恒为 — -->
+              <colgroup>
+                <col class="col-account" /><col class="col-state" /><col class="col-plan" /><col /><col class="col-ondemand" /><col class="col-time" /><col class="col-actions" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>套餐</th><th>用量摘要</th><th>余额</th><th>上次刷新</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="accounts-body-claude"></tbody>
+            </table>
+            <p id="accounts-empty-claude" class="muted empty" hidden>暂无 Claude 账户。</p>
+          </div>
+        </div>
       </section>
 
       <!-- ============ 用量统计 ============ -->
@@ -178,6 +216,17 @@
             <button id="usage-codex-scan" class="secondary" type="button">重新扫描</button>
           </div>
           <p class="muted small">统计本机会话日志的 token 用量并按官方 API 价折算，为本机所有 ChatGPT 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度与套餐见「账户管理」。</p>
+        </div>
+
+        <!-- 本地 Claude Code 用量分析：扫描 ~/.claude/projects 会话日志；统计范围由上方时间跨度 TAB 决定 -->
+        <div id="usage-claude-form" class="surface" hidden>
+          <div class="row wrap">
+            <label class="inline">CLAUDE_CONFIG_DIR
+              <input id="usage-claude-home" type="text" spellcheck="false" placeholder="留空使用默认 ~/.claude（支持逗号分隔多个目录）" />
+            </label>
+            <button id="usage-claude-scan" class="secondary" type="button">重新扫描</button>
+          </div>
+          <p class="muted small">统计本机 Claude Code 会话日志的 token 用量并按官方 API 价折算，为本机所有 Claude 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度窗口见「账户管理」。</p>
         </div>
 
         <!-- 加载骨架：新视图 / 新跨度无缓存可即时渲染时占位，首个结果渲染后隐藏 -->
@@ -248,7 +297,7 @@
 
         <!-- 总览：各来源（Cursor 账户 + 本地 Codex 分析）账单小计，按总 Token 降序；置于图表之后 -->
         <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT 为本机日志分析，无实扣金额</span></div>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT / Claude 为本机日志分析，无实扣金额</span></div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -271,7 +320,7 @@
                 <option value="all" selected>全部</option>
                 <option value="account">账户变更</option>
                 <option value="state">状态与刷新</option>
-                <option value="renew">ChatGPT 续期</option>
+                <option value="renew">凭据续期</option>
                 <option value="settings">设置变更</option>
               </select>
             </label>
@@ -301,7 +350,7 @@
             <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
             <div>
               <h3>AI 助手 · 用量与费用</h3>
-              <p class="muted">个人用的桌面应用，用于管理 Cursor / ChatGPT 账户、统计用量与费用。</p>
+              <p class="muted">个人用的桌面应用，用于管理 Cursor / ChatGPT / Claude 账户、统计用量与费用。</p>
             </div>
           </div>
           <dl class="about-meta">
@@ -497,6 +546,16 @@
           </div>
           <p class="muted small">用于切换账户后启动 ChatGPT；留空则自动检测 Microsoft Store / 常见安装位置。点「完成」保存。</p>
           <p id="codex-path-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
+          <label for="claude-exe-path">Claude Desktop 路径</label>
+          <div class="row">
+            <input id="claude-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 claude.exe / Claude.app 完整路径" />
+            <button id="claude-detect" class="secondary compact" type="button">自动搜索</button>
+          </div>
+          <p class="muted small">用于切换 Claude 账户后启动 Claude Desktop（切号写入的是 Claude Code 凭据）；留空则自动检测常见安装位置。点「完成」保存。</p>
+          <p id="claude-path-status" class="status" hidden></p>
         </div>
 
         <div class="modal-foot">
@@ -514,7 +573,7 @@
         <div class="modal-head">
           <div>
             <h3 id="proxy-modal-title">代理设置</h3>
-            <p class="muted small">配置所有对 Cursor / OpenAI 请求所走的网络代理，保存后立即生效。</p>
+            <p class="muted small">配置所有对 Cursor / OpenAI / Anthropic 请求所走的网络代理，保存后立即生效。</p>
           </div>
           <button id="proxy-close" class="icon-btn" type="button" aria-label="关闭" data-close>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -570,6 +629,19 @@
           <div id="account-kind" class="segmented segmented-full" role="group" aria-label="账户类型">
             <button class="seg active" type="button" data-kind="cursor">Cursor</button>
             <button class="seg" type="button" data-kind="codex">ChatGPT</button>
+            <button class="seg" type="button" data-kind="claude">Claude</button>
+          </div>
+
+          <!-- Claude 专属：浏览器 OAuth 授权，登录后粘贴回调页展示的授权码即可自动填好凭据 -->
+          <div id="account-oauth-field" hidden>
+            <label for="account-oauth-code">OAuth 授权（推荐）</label>
+            <div class="row">
+              <button id="account-oauth-open" class="secondary compact" type="button">浏览器授权</button>
+              <input id="account-oauth-code" class="grow" type="text" spellcheck="false" placeholder="登录后把页面展示的授权码粘贴到这里" />
+              <button id="account-oauth-finish" class="secondary compact" type="button">完成授权</button>
+            </div>
+            <p class="muted small">点「浏览器授权」用 claude.ai 账号登录并授权，完成后页面会展示一串授权码；粘贴到上方并点「完成授权」即可添加账户（无需手动填 Token）。</p>
+            <hr class="modal-divider" />
           </div>
 
           <label for="account-note">备注</label>

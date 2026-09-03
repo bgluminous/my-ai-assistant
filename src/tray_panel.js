@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards } from "./shared.js";
-import { membershipLabel, codexPlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./accounts.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./accounts.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -13,16 +13,20 @@ import {
   peekAggSeries,
   peekScanForDay,
   peekScanSeries,
+  peekClaudeScanForDay,
+  peekClaudeScanSeries,
   fetchCursorAggregate,
   fetchCodexScan,
+  fetchClaudeScan,
   sliceDay,
   modelsOnDay,
   forgetUsageCacheFromEvent,
 } from "./usage_data.js";
 
-// 托盘面板：托盘图标单击弹出的简易面板，分三个 tab：
-// 总览（今日 token 用量合计）/ Cursor / Codex（账户列表，查看状态额度、单账户刷新 / 一键切换、全部刷新），
-// 增删改等完整功能在主窗口。窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
+// 托盘面板：托盘图标单击弹出的简易面板，分四个 tab：
+// 总览（今日 token 用量合计）/ Cursor / ChatGPT / Claude（账户列表，查看状态额度、
+// 单账户刷新 / 一键切换、全部刷新），增删改等完整功能在主窗口。
+// 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
 
 let accounts = [];
 let refreshing = false;
@@ -78,7 +82,7 @@ const TAB_KEY = "trayTab";
 function readTab() {
   try {
     const v = localStorage.getItem(TAB_KEY);
-    return v === "cursor" || v === "codex" || v === "overview" ? v : "overview";
+    return v === "cursor" || v === "codex" || v === "claude" || v === "overview" ? v : "overview";
   } catch {
     return "overview";
   }
@@ -165,7 +169,8 @@ function barsFor(account) {
   const status = account.status || null;
   if (!status || status.alive === false) return [];
   const bars = [];
-  if (account.kind === "codex") {
+  if (account.kind !== "cursor") {
+    // Codex / Claude 的额度窗口结构一致（windows: label / usedPercent）
     const windows = Array.isArray(status.windows) ? status.windows : [];
     for (const w of windows.slice(0, 2)) {
       const bar = w && miniBar(w.label || "窗口", w.usedPercent);
@@ -216,11 +221,14 @@ function accountRow(account) {
   const status = account.status || null;
   const plan = account.kind === "codex"
     ? codexPlanLabel(status && status.plan)
+    : account.kind === "claude"
+    ? claudePlanLabel(status && status.plan)
     : membershipLabel(status && status.membershipType);
   const parts = [];
   if (plan) parts.push(plan);
-  // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期
-  const endIso = status && status.alive === true
+  // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
+  // Claude 接口不提供订阅起止，不展示有效期
+  const endIso = status && status.alive === true && account.kind !== "claude"
     ? (account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
     : null;
   const endMs = endIso ? Date.parse(endIso) : NaN;
@@ -238,7 +246,11 @@ function accountRow(account) {
       ? `订阅至 ${endText}${renewHint}`
       : `本期计费周期截止 ${endText}（到期自动续期，额度重置）`);
   }
-  const extra = account.kind === "codex" ? creditsBrief(status) : onDemandBrief(status);
+  const extra = account.kind === "codex"
+    ? creditsBrief(status)
+    : account.kind === "cursor"
+    ? onDemandBrief(status)
+    : null; // Claude 无超额 / 余额概念
   if (extra) {
     parts.push(extra.text);
     if (extra.title) titles.push(extra.title);
@@ -277,16 +289,18 @@ function accountRow(account) {
   refreshBtn.disabled = rowBusy;
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
 
-  // 仅已验证有效的账户可切换（Codex 还需 Refresh Token 换新凭据）；确认在弹窗内进行
+  // 仅已验证有效的账户可切换（Codex / Claude 还需 Refresh Token 换新凭据）；确认在弹窗内进行
   const aliveOk = alive === true;
   const switchBtn = iconAction("switch", "切换");
-  if (account.kind === "codex") {
+  if (account.kind === "codex" || account.kind === "claude") {
     const hasRt = !!String(account.refreshToken || "").trim();
     switchBtn.disabled = rowBusy || !aliveOk || !hasRt;
     switchBtn.title = !aliveOk
       ? "请先刷新验证该账户"
       : !hasRt
       ? "该账户没有 Refresh Token，无法切换"
+      : account.kind === "claude"
+      ? "切换本机 Claude Code 登录（会关闭正在运行的 Claude Desktop）"
       : "切换本机 ChatGPT 登录（会关闭正在运行的 ChatGPT）";
     switchBtn.setAttribute("aria-label", switchBtn.title);
   } else {
@@ -305,13 +319,13 @@ function render() {
   if (trayTab !== "overview") {
     const list = el("#tray-list");
     list.replaceChildren();
-    const subset = trayTab === "codex"
-      ? accounts.filter((a) => a.kind === "codex")
-      : accounts.filter((a) => a.kind !== "codex");
+    const kind = trayTab === "codex" ? "codex" : trayTab === "claude" ? "claude" : "cursor";
+    const subset = accounts.filter((a) => a.kind === kind);
     if (!subset.length) {
       const empty = document.createElement("div");
       empty.className = "tray-empty";
-      empty.textContent = trayTab === "codex" ? "暂无 ChatGPT 账户，请到主窗口添加。" : "暂无 Cursor 账户，请到主窗口添加。";
+      const label = kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
+      empty.textContent = `暂无 ${label} 账户，请到主窗口添加。`;
       list.append(empty);
     } else {
       for (const account of subset) list.append(accountRow(account));
@@ -890,9 +904,9 @@ function buildOverviewData(ymd) {
     });
   }
 
-  const scanDay = peekScanForDay(ymd, "");
-  const scanSeries = peekScanSeries(ymd, "");
-  if (scanDay || scanSeries) {
+  // 本地扫描来源（Codex / Claude）共用的切片逻辑
+  const pushScanEntry = (id, name, scanDay, scanSeries) => {
+    if (!scanDay && !scanSeries) return;
     const hit = scanDay || scanSeries;
     if (Number.isFinite(hit.entry.at)) ats.push(hit.entry.at);
     const agg = hit.entry.scan.aggregate;
@@ -902,18 +916,20 @@ function buildOverviewData(ymd) {
       totalTokens += slice.tokens;
       totalUsd += slice.usd;
       entries.push({
-        row: { id: "local", name: "本地 ChatGPT", tokens: slice.tokens, usd: slice.usd },
+        row: { id, name, tokens: slice.tokens, usd: slice.usd },
         hourlySource: {
-          label: "本地用量分析",
+          label: name,
           hourly: pickHourly(
             scanDay && scanDay.entry.scan.aggregate,
             scanSeries && scanSeries.entry.scan.aggregate
           ),
         },
-        modelSource: { id: "local", label: "本地 ChatGPT", models: modelsOnDay(agg, ymd, hit.rangeKey) },
+        modelSource: { id, label: name, models: modelsOnDay(agg, ymd, hit.rangeKey) },
       });
     }
-  }
+  };
+  pushScanEntry("local", "本地 ChatGPT", peekScanForDay(ymd, ""), peekScanSeries(ymd, ""));
+  pushScanEntry("local-claude", "本地 Claude", peekClaudeScanForDay(ymd, ""), peekClaudeScanSeries(ymd, ""));
 
   entries.sort((a, b) => b.row.tokens - a.row.tokens);
   const modelTotals = mergeModelTotals(entries.map((e) => e.modelSource.models));
@@ -942,11 +958,12 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
       data.rows.push({ id: a.id, name: trayAccountLabel(a), tokens: 0, usd: 0, error: err, empty: true });
     }
   }
-  if (fetchErrors.has("local")) {
-    const err = fetchErrors.get("local");
-    const row = data.rows.find((r) => r.id === "local");
+  for (const [id, name] of [["local", "本地 ChatGPT"], ["local-claude", "本地 Claude"]]) {
+    if (!fetchErrors.has(id)) continue;
+    const err = fetchErrors.get(id);
+    const row = data.rows.find((r) => r.id === id);
     if (row) row.error = err;
-    else data.rows.push({ id: "local", name: "本地 ChatGPT", tokens: 0, usd: 0, error: err, empty: true });
+    else data.rows.push({ id, name, tokens: 0, usd: 0, error: err, empty: true });
   }
   return data;
 }
@@ -989,6 +1006,13 @@ async function loadOverviewInner(force) {
       })
     );
   }
+  if (needsTodayFetch(peekClaudeScanForDay(ymd, ""), force)) {
+    jobs.push(
+      fetchClaudeScan({ sinceMs: dayStart, force }).catch((error) => {
+        fetchErrors.set("local-claude", resetError(error));
+      })
+    );
+  }
 
   if (cached.data.rows.length) renderOverview(cached.data, cached.at);
   else if (!jobs.length) overviewTip("暂无用量数据");
@@ -1026,6 +1050,10 @@ const SWITCH_ERRORS = {
   codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
   codex_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
   codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
+  not_claude_account: "该账户不是 Claude 账户。",
+  claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
+  claude_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
+  claude_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
 };
 
 // 切换弹窗：busy（检测中）→ confirm（可取消）→ steps（进行中，禁止关闭）→ result（仅「关闭」）
@@ -1200,6 +1228,49 @@ async function doSwitch(id) {
       trayModal.finish(true, l.launched ? "已切换账户并启动 ChatGPT。" : "已切换，请手动启动 ChatGPT。");
       return;
     }
+    if (account && account.kind === "claude") {
+      // 写入的是 Claude Code 凭据；Claude Desktop 仅联动关闭 / 启动，未安装也可切
+      trayModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
+      const st = await invoke("claude_client_status", { id });
+      const hasDesktop = !!st.exeConfigured;
+      const agreed = await trayModal.toConfirm(st.running
+        ? { body: "Claude Desktop 正在运行，切换将先关闭它，未保存内容可能丢失。确定继续？", confirmText: "关闭并切换", danger: true }
+        : hasDesktop
+        ? { body: "将把该账户写入本机 Claude Code 登录并启动 Claude Desktop。确定继续？", confirmText: "切换" }
+        : { body: "将把该账户写入本机 Claude Code 登录（未检测到 Claude Desktop，跳过启动）。确定继续？", confirmText: "切换" });
+      if (!agreed) {
+        trayModal.close();
+        return;
+      }
+      const steps = [];
+      if (st.running) steps.push("关闭 Claude Desktop");
+      steps.push("换取登录凭证并写入");
+      if (hasDesktop) steps.push("启动 Claude Desktop");
+      trayModal.toSteps(steps);
+      if (st.running) {
+        trayModal.stepStart();
+        const c = await invoke("claude_client_close");
+        if (!c.closed) {
+          trayModal.stepFail();
+          trayModal.finish(false, "未能完全关闭 Claude Desktop，请手动关闭后重试。");
+          return;
+        }
+        trayModal.stepDone();
+      }
+      trayModal.stepStart();
+      await invoke("claude_switch_local", { id });
+      trayModal.stepDone();
+      await load();
+      if (hasDesktop) {
+        trayModal.stepStart();
+        const l = await invoke("claude_client_launch");
+        trayModal.stepDone();
+        trayModal.finish(true, l.launched ? "已切换账户并启动 Claude Desktop。" : "已切换，请手动启动 Claude Desktop。");
+      } else {
+        trayModal.finish(true, "已切换本机 Claude Code 登录。");
+      }
+      return;
+    }
     trayModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
     const st = await invoke("cursor_client_status", { id });
     if (!st.exeConfigured) {
@@ -1238,6 +1309,8 @@ async function doSwitch(id) {
     // 写登录文件失败的错误码带冒号细节（codex_auth_write_failed:…），按前缀匹配
     const text = code.startsWith("codex_auth_write_failed")
       ? "写入本机 ChatGPT 登录文件失败，请检查文件权限后重试。"
+      : code.startsWith("claude_creds_write_failed")
+      ? "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。"
       : SWITCH_ERRORS[code] || code;
     trayModal.stepFail();
     trayModal.finish(false, `切换失败：${text}`);

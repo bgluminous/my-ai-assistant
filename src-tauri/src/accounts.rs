@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{audit, codex, codex_local, cursor, cursor_local, http, settings};
+use crate::{audit, claude, claude_local, claude_oauth, codex, codex_local, cursor, cursor_local, http, settings};
 
 /// 账户 JSON 导入/导出文件标识。
 const EXPORT_FORMAT: &str = "my-ai-assistant-accounts";
@@ -25,7 +25,7 @@ const REFRESH_AHEAD_SECS: i64 = 1800;
 // 数据结构与持久化
 // ---------------------------------------------------------------------------
 
-/// 单个托管账户。kind 取值："cursor" | "codex"。
+/// 单个托管账户。kind 取值："cursor" | "codex" | "claude"。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -36,9 +36,9 @@ pub struct Account {
     /// 备注是否为自动生成（未手填时用邮箱/用户名兜底）。为 true 时刷新会用最新身份回填。
     #[serde(default)]
     pub note_auto: bool,
-    /// Cursor user token / Codex access_token（JWT）。
+    /// Cursor user token / Codex access_token（JWT）/ Claude access_token（不透明值）。
     pub token: String,
-    /// 仅 Codex：用于自动续期。
+    /// Codex / Claude：用于自动续期。
     #[serde(default)]
     pub refresh_token: Option<String>,
     /// 上次刷新时间（unix 秒）。
@@ -125,6 +125,7 @@ fn sanitize_kind(kind: &str) -> Result<String, String> {
     match kind.trim() {
         "cursor" => Ok("cursor".to_string()),
         "codex" => Ok("codex".to_string()),
+        "claude" => Ok("claude".to_string()),
         _ => Err("invalid_kind".to_string()),
     }
 }
@@ -147,8 +148,12 @@ fn sanitize_refresh_token(rt: Option<String>) -> Option<String> {
 }
 
 /// 从账户凭据本地解析默认备注（无网络）：Codex 用 JWT 里的邮箱，Cursor 用 JWT sub 的 user_id。
+/// Claude 的 access_token 是不透明值，本地解析不出身份（刷新成功后用接口返回的邮箱回填）。
 /// 解析不到时回退到 token 的 `user_xxx` 前缀，最终仍可能为空。
 fn default_note_from_token(kind: &str, token: &str) -> String {
+    if kind == "claude" {
+        return String::new();
+    }
     if kind == "codex" {
         if let Some(email) = http::decode_jwt_payload(token)
             .and_then(|c| {
@@ -195,10 +200,10 @@ fn best_identity(acc: &Account) -> String {
 }
 
 fn kind_label(kind: &str) -> &'static str {
-    if kind == "codex" {
-        "ChatGPT"
-    } else {
-        "Cursor"
+    match kind {
+        "codex" => "ChatGPT",
+        "claude" => "Claude",
+        _ => "Cursor",
     }
 }
 
@@ -225,8 +230,12 @@ fn alive_text(v: Option<bool>) -> &'static str {
 /// 离线解析账户身份标识（不联网），供查重比对：
 /// - cursor：`user_xxx::<jwt>` 的前缀，否则 JWT sub 里 `provider|user_id` 的 user_id → "cursor:{user_id}"
 /// - codex：JWT 的 chatgpt_account_id → "codex:{id}"，缺失时回退邮箱 → "codex:email:{email}"
+/// - claude：access_token 为不透明值，无法本地解析 → None
 /// 解析不出返回 None（调用方回退 token 全等判重）。
 pub(crate) fn account_identity(kind: &str, token: &str) -> Option<String> {
+    if kind == "claude" {
+        return None;
+    }
     if kind == "codex" {
         let claims = http::decode_jwt_payload(token)?;
         if let Some(id) = claims
@@ -691,6 +700,114 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
     finish(app, id, status)
 }
 
+/// Claude 续期成功的统一收尾：写回凭据、记审计。返回新的 token 过期时刻。
+fn apply_claude_renewal(
+    app: &AppHandle,
+    id: &str,
+    name: &str,
+    token: &mut String,
+    refresh_token: &mut Option<String>,
+    access_token: String,
+    new_rt: Option<String>,
+    expires_at_ms: Option<i64>,
+) -> Result<Option<i64>, String> {
+    *token = access_token;
+    if new_rt.is_some() {
+        *refresh_token = new_rt;
+    }
+    persist_tokens(app, id, token, refresh_token)?;
+    audit::log(
+        app,
+        "claude_renewed",
+        format!("Claude access_token 已自动续期：{name}"),
+        Some(json!({ "id": id })),
+    );
+    Ok(expires_at_ms)
+}
+
+/// Claude 账户刷新：access_token 非 JWT，过期时刻取上次续期时记录的
+/// status.tokenExpiresAtMs；临期先续期，401/403 时补一次续期重试。
+async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Result<Account, String> {
+    let name = display_name(&snap.kind, &snap.note, &snap.token);
+    let mut token = snap.token;
+    let mut refresh_token = snap.refresh_token;
+    let mut expires_at_ms = snap
+        .status
+        .as_ref()
+        .and_then(|s| s.get("tokenExpiresAtMs"))
+        .and_then(Value::as_i64);
+    let mut refreshed = false;
+
+    // 1) 已记录过期时刻且临期（或已过期）、有 refresh_token 时先续期
+    let near_expiry = expires_at_ms
+        .map(|ms| ms / 1000 - Utc::now().timestamp() < REFRESH_AHEAD_SECS)
+        .unwrap_or(false);
+    if near_expiry {
+        if let Some(rt) = refresh_token.clone() {
+            match claude_oauth::request_claude_refresh(&rt).await? {
+                claude_oauth::ClaudeRefreshOutcome::Success {
+                    access_token,
+                    refresh_token: new_rt,
+                    expires_at_ms: new_exp,
+                    ..
+                } => {
+                    expires_at_ms = apply_claude_renewal(
+                        app, id, &name, &mut token, &mut refresh_token, access_token, new_rt,
+                        new_exp,
+                    )?;
+                    refreshed = true;
+                }
+                claude_oauth::ClaudeRefreshOutcome::Denied { body } => {
+                    audit::log(
+                        app,
+                        "claude_renew_failed",
+                        format!("Claude 续期被拒绝：{name}（{body}）"),
+                        Some(json!({ "id": id })),
+                    );
+                    return finish(app, id, json!({ "alive": false, "refreshError": body }));
+                }
+            }
+        }
+    }
+
+    // 2) 查询额度；token 失效（401/403）且本次尚未续期过则补一次续期并重试一次
+    let mut usage = claude::claude_usage(token.clone()).await?;
+    if !usage.alive && (usage.status == 401 || usage.status == 403) && !refreshed {
+        if let Some(rt) = refresh_token.clone() {
+            match claude_oauth::request_claude_refresh(&rt).await? {
+                claude_oauth::ClaudeRefreshOutcome::Success {
+                    access_token,
+                    refresh_token: new_rt,
+                    expires_at_ms: new_exp,
+                    ..
+                } => {
+                    expires_at_ms = apply_claude_renewal(
+                        app, id, &name, &mut token, &mut refresh_token, access_token, new_rt,
+                        new_exp,
+                    )?;
+                    usage = claude::claude_usage(token.clone()).await?;
+                }
+                claude_oauth::ClaudeRefreshOutcome::Denied { body } => {
+                    audit::log(
+                        app,
+                        "claude_renew_failed",
+                        format!("Claude 续期被拒绝：{name}（{body}）"),
+                        Some(json!({ "id": id })),
+                    );
+                    return finish(app, id, json!({ "alive": false, "refreshError": body }));
+                }
+            }
+        }
+    }
+
+    let mut status = to_status(&usage)?;
+    // token 过期时刻不来自接口，由续期流程维护，随状态一起缓存供下次判断
+    if let (Some(obj), Some(ms)) = (status.as_object_mut(), expires_at_ms) {
+        obj.insert("tokenExpiresAtMs".into(), json!(ms));
+    }
+    finish(app, id, status)
+}
+
 /// 全局凭据操作队列：所有账户刷新与本机 Codex 切换（见 codex_local::codex_switch_local，
 /// 同样会轮换 refresh_token）在此排队，同一时刻只执行一个。
 /// tokio Mutex 公平（FIFO），先到先执行；主窗口、托盘面板等所有入口共用一条队列，
@@ -723,6 +840,7 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, Stri
             Err(e) => Err(e),
         },
         "codex" => refresh_codex_account(&app, &id, snap).await,
+        "claude" => refresh_claude_account(&app, &id, snap).await,
         _ => Err("invalid_kind".into()),
     };
 
@@ -830,10 +948,10 @@ pub fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocal
     let mut imported: Vec<ImportedItem> = Vec::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
     let mut candidates: Vec<LocalLogin> = Vec::new();
-    let read = if kind == "codex" {
-        codex_local::read_local_login()
-    } else {
-        cursor_local::read_local_login()
+    let read = match kind.as_str() {
+        "codex" => codex_local::read_local_login(),
+        "claude" => claude_local::read_local_login(),
+        _ => cursor_local::read_local_login(),
     };
     match read {
         LocalLoginRead::Found(login) => candidates.push(login),
@@ -991,10 +1109,10 @@ fn ensure_json_ext(mut path: PathBuf) -> PathBuf {
 }
 
 fn default_export_name(kind: &str) -> &'static str {
-    if kind == "codex" {
-        "chatgpt-accounts.json"
-    } else {
-        "cursor-accounts.json"
+    match kind {
+        "codex" => "chatgpt-accounts.json",
+        "claude" => "claude-accounts.json",
+        _ => "cursor-accounts.json",
     }
 }
 
@@ -1011,10 +1129,11 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
             note: a.note.clone(),
             note_auto: a.note_auto,
             token: a.token.clone(),
-            refresh_token: if kind == "codex" {
-                a.refresh_token.clone()
-            } else {
+            // Cursor 没有 refresh_token 概念；Codex / Claude 随导出（用于自动续期）
+            refresh_token: if kind == "cursor" {
                 None
+            } else {
+                a.refresh_token.clone()
             },
         })
         .collect();
@@ -1123,10 +1242,10 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                     });
                     continue;
                 }
-                let refresh_token = if kind == "codex" {
-                    sanitize_refresh_token(item.refresh_token)
-                } else {
+                let refresh_token = if kind == "cursor" {
                     None
+                } else {
+                    sanitize_refresh_token(item.refresh_token)
                 };
                 let entry = Account {
                     id: new_id(),
@@ -1163,6 +1282,61 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
         cancelled: false,
         imported,
         skipped,
+        view: view(&data),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Claude OAuth 授权添加（浏览器授权 → 粘贴授权码 → 直接落库）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeOauthAddResult {
+    pub id: String,
+    pub label: String,
+    pub view: AccountsView,
+}
+
+/// 用浏览器授权返回的授权码换取凭据组并添加为 Claude 账户。
+/// 需先调用 claude_oauth_begin 打开授权页；备注用接口返回的邮箱兜底。
+#[tauri::command]
+pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeOauthAddResult, String> {
+    settings::ensure_loaded()?;
+    let result = claude_oauth::exchange_code(&code).await?;
+    let note = result.email.clone().unwrap_or_default();
+    let entry = Account {
+        id: new_id(),
+        kind: "claude".into(),
+        note,
+        note_auto: true,
+        token: result.access_token,
+        refresh_token: result.refresh_token,
+        last_refresh_at: None,
+        // 记录 token 过期时刻，刷新流程据此提前续期
+        status: result
+            .expires_at_ms
+            .map(|ms| json!({ "tokenExpiresAtMs": ms })),
+    };
+    let name = display_name(&entry.kind, &entry.note, &entry.token);
+    let label = import_label(&entry.note, &entry.token);
+    let entry_id = entry.id.clone();
+    let data = mutate(&app, move |d| {
+        if is_duplicate_account(&d.accounts, &entry.kind, &entry.token, None) {
+            return Err("duplicate_account".into());
+        }
+        d.accounts.push(entry);
+        Ok(())
+    })?;
+    audit::log(
+        &app,
+        "account_add",
+        format!("OAuth 授权添加账户：{name}"),
+        Some(json!({ "id": entry_id })),
+    );
+    Ok(ClaudeOauthAddResult {
+        id: entry_id,
+        label,
         view: view(&data),
     })
 }

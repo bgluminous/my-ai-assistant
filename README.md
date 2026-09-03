@@ -4,13 +4,13 @@
 
 # my-ai-assistant
 
-**my-ai-assistant** 是一个本地桌面程序，用于管理 Cursor 与 ChatGPT 账户、查询套餐与额度，并按模型汇总 token 用量与费用。
+**my-ai-assistant** 是一个本地桌面程序，用于管理 Cursor、ChatGPT 与 Claude 账户、查询套餐与额度，并按模型汇总 token 用量与费用。
 
 程序基于 [Tauri](https://tauri.app/) 2，前端为原生 HTML / CSS / JavaScript，图表使用 [Chart.js](https://www.chartjs.org/)，网络请求由 Rust 侧 `reqwest` 发出。当前面向 **Windows** 与 **macOS**。
 
-HTTP 请求只发往 Cursor / OpenAI 官方域名。账户凭据保存在本机，不经过第三方服务。
+HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保存在本机，不经过第三方服务。
 
-> 用量与账户状态依赖 Cursor、OpenAI 的非公开接口，字段与可用性可能随时变化。使用前请自行核对各服务条款。
+> 用量与账户状态依赖 Cursor、OpenAI、Anthropic 的非公开接口，字段与可用性可能随时变化。使用前请自行核对各服务条款。
 
 ## 目录
 
@@ -27,11 +27,12 @@ HTTP 请求只发往 Cursor / OpenAI 官方域名。账户凭据保存在本机�
 
 ### 账户管理
 
-- 分别维护 Cursor 与 ChatGPT 账户：添加、编辑、删除、刷新；可按类型导出/导入 JSON，也可从本机已登录客户端导入（仅导入当前类型）。
-- 列表展示存活状态、套餐与有效期、额度摘要、按需消费（Cursor）或 Credits（ChatGPT），以及上次刷新时间。
+- 分别维护 Cursor、ChatGPT 与 Claude 账户：添加、编辑、删除、刷新；可按类型导出/导入 JSON，也可从本机已登录客户端导入（仅导入当前类型）。
+- Claude 账户支持应用内 OAuth 授权添加：打开浏览器用 claude.ai 账号登录，粘贴回调页展示的授权码即可，无需手动找 token。
+- 列表展示存活状态、套餐与有效期、额度摘要、按需消费（Cursor）或 Credits（ChatGPT）、额度窗口（ChatGPT / Claude 的 5 小时与每周窗口），以及上次刷新时间。
 - 支持按间隔定时刷新（账户状态与用量统计共用同一间隔），也可手动刷新单个或一组账户。
-- 可将本机 Cursor / ChatGPT（或 Codex）客户端切换到指定账户并启动。客户端路径可手动指定，也可自动搜索常见安装位置。
-- ChatGPT 账户可保存 `refresh_token`。access token 临近过期，或请求返回 401 / 403 时自动续期，并写回本机凭据。
+- 可将本机 Cursor / ChatGPT（或 Codex）客户端切换到指定账户并启动；Claude 切号写入本机 Claude Code 凭据（Windows 为 `~/.claude/.credentials.json`，macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。客户端路径可手动指定，也可自动搜索常见安装位置。
+- ChatGPT / Claude 账户可保存 `refresh_token`。access token 临近过期，或请求返回 401 / 403 时自动续期，并写回本机凭据（ChatGPT）/ 账户（Claude）。
 
 ### 用量统计
 
@@ -43,6 +44,7 @@ HTTP 请求只发往 Cursor / OpenAI 官方域名。账户凭据保存在本机�
 - **总览**：逐账户列出总 token、实际支出与按官方 API 价折算的等价费用；按日 Token 堆叠柱状图（按账户分段），并按模型绘制柱状图、环形图与明细表。
 - **单个 Cursor 账户**：按时间范围拉取用量，按模型聚合输入 / 输出 / 缓存读 / 缓存写 token，同时给出实扣金额与等价费用。
 - **本机 ChatGPT 会话**：扫描 Codex CLI 会话日志（默认 `~/.codex/sessions`），按模型聚合 token 并折算等价费用。解析按文件修改时间增量进行。
+- **本机 Claude Code 会话**：扫描 Claude Code 会话日志（默认 `~/.claude/projects`，支持 `CLAUDE_CONFIG_DIR` 多目录），按模型聚合 token 并折算等价费用；按 message id + request id + 会话去重，流式重复与 sidechain 重放不重复计数。
 
 ### 其它
 
@@ -107,7 +109,7 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 
 | 文件 | 内容 |
 | --- | --- |
-| `settings.json` | 账户、刷新间隔、代理、价格覆盖、Cursor / ChatGPT 客户端路径 |
+| `settings.json` | 账户、刷新间隔、代理、价格覆盖、Cursor / ChatGPT / Claude Desktop 客户端路径 |
 | `audit.jsonl` | 审计日志 |
 
 应用内可复制上述路径。
@@ -132,9 +134,10 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 | --- | --- | --- |
 | Cursor | `WorkosCursorSessionToken`（支持 `user_xxx::<jwt>`，`%3A%3A` 会归一为 `::`） | 用量摘要、计费周期、按事件聚合、Grok 周额度、账户邮箱、本机会话切换 |
 | ChatGPT | `Authorization: Bearer` + `ChatGPT-Account-Id` | 额度窗口、订阅信息；续期走 OAuth `refresh_token` |
-| 本机会话 | 无网络 | 读取 Codex CLI 的 `sessions/**/*.jsonl`，按轮次 token 与模型归属聚合 |
+| Claude | `Authorization: Bearer`（OAuth access token）+ `anthropic-beta: oauth-2025-04-20` | 额度窗口（5 小时 / 每周）、账户邮箱与组织；授权与续期走 Claude Code 同款 OAuth（PKCE） |
+| 本机会话 | 无网络 | 读取 Codex CLI 的 `sessions/**/*.jsonl` 与 Claude Code 的 `projects/**/*.jsonl`，按轮次 token 与模型归属聚合 |
 
-Cursor 套餐有效期取自当期计费周期起止；到期后由官方侧续期并重置额度。ChatGPT 套餐有效期来自订阅接口（JWT 通常不含该字段）。
+Cursor 套餐有效期取自当期计费周期起止；到期后由官方侧续期并重置额度。ChatGPT 套餐有效期来自订阅接口（JWT 通常不含该字段）。Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 
 ## 仓库布局
 
@@ -157,4 +160,4 @@ my-ai-assistant/
 
 ## 声明
 
-本程序调用 Cursor 与 OpenAI 的非公开接口，仅供在本机查询自己的账户与用量。接口变更、账号限制或服务条款冲突导致的任何后果由使用者自行承担。本仓库与 Cursor、OpenAI、Anthropic、Google、xAI 无附属关系。
+本程序调用 Cursor、OpenAI 与 Anthropic 的非公开接口，仅供在本机查询自己的账户与用量。接口变更、账号限制或服务条款冲突导致的任何后果由使用者自行承担。本仓库与 Cursor、OpenAI、Anthropic、Google、xAI 无附属关系。

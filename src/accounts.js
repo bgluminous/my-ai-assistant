@@ -1,6 +1,6 @@
 import { el, invoke, listen, fmtDateMs, resetError, toast, dismissToast, fillStatus } from "./shared.js";
 
-// 账户管理：Cursor / Codex 账户的增删改查、单个 / 全部刷新与定时刷新。
+// 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
 // 刷新失败时保留旧数据，仅在对应行展示错误。
 
@@ -11,6 +11,7 @@ const QUOTA_LOW_REMAIN_PERCENT = 15;
 const TOKEN_PLACEHOLDERS = {
   cursor: "user_xxx::eyJ... 或 WorkosCursorSessionToken",
   codex: "~/.codex/auth.json 里的 tokens.access_token",
+  claude: "sk-ant-oat01-…（~/.claude/.credentials.json 里的 accessToken）",
 };
 
 const MEMBERSHIP_LABELS = {
@@ -32,6 +33,15 @@ const CODEX_PLAN_LABELS = {
   business: "Business",
   free: "Free",
   edu: "Edu",
+};
+
+// Claude 订阅类型映射（subscription_type -> 展示名），未知值原样显示
+const CLAUDE_PLAN_LABELS = {
+  free: "Free",
+  pro: "Pro",
+  max: "Max",
+  team: "Team",
+  enterprise: "Enterprise",
 };
 
 // Cursor 套餐月费（美元 / 月），用量统计页用于对比等价 API 费用；未收录的套餐（如企业定制）视为未知
@@ -56,7 +66,7 @@ let timerId = null;
 let refreshAllRunning = false;
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
 let importing = false; // 本机导入 / 文件导入导出进行中（防重入，期间禁用相关按钮）
-const groupRefreshing = new Set(); // 组内整体刷新进行中的组（"cursor" / "codex"）
+const groupRefreshing = new Set(); // 组内整体刷新进行中的组（"cursor" / "codex" / "claude"）
 const refreshingIds = new Set();
 const rowErrors = new Map();
 
@@ -128,6 +138,12 @@ export function codexPlanLabel(value) {
   return CODEX_PLAN_LABELS[key] || String(value);
 }
 
+export function claudePlanLabel(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return "";
+  return CLAUDE_PLAN_LABELS[key] || String(value);
+}
+
 /* ---------- 状态提示 ---------- */
 
 function setStatus(kind, text) {
@@ -157,7 +173,7 @@ function fillStateCell(cell, account) {
   dot.className = `dot ${alive === true ? "ok" : alive === false ? "bad" : "unknown"}`;
   const text = document.createElement("span");
   let stateText = alive === true ? "有效" : alive === false ? "已失效" : "未检测";
-  // Codex 有效时在状态后附上登录凭据（Token）剩余时长，如「有效（7d）」
+  // Codex / Claude 有效时在状态后附上登录凭据（Token）剩余时长，如「有效（7d）」
   if (account.kind === "codex" && alive === true) {
     const exp = Number(status && status.exp);
     if (Number.isFinite(exp) && exp > 0) {
@@ -167,13 +183,23 @@ function fillStateCell(cell, account) {
         text.title = `Token 到期：${fmtDateMs(exp * 1000)}（登录凭据有效期，非套餐周期）`;
       }
     }
+  } else if (account.kind === "claude" && alive === true) {
+    // Claude access_token 非 JWT，过期时刻由续期流程记录在 status.tokenExpiresAtMs
+    const expMs = Number(status && status.tokenExpiresAtMs);
+    if (Number.isFinite(expMs) && expMs > 0) {
+      const info = remainInfo(expMs);
+      if (!info.expired) {
+        stateText += `（${info.text}）`;
+        text.title = `Token 到期：${fmtDateMs(expMs)}（登录凭据有效期，有 Refresh Token 会自动续期）`;
+      }
+    }
   }
   text.textContent = stateText;
   wrap.append(dot, text);
   cell.append(wrap);
 
-  // Codex 有 Refresh Token 时可自动续期，作为状态补充展示在第二行
-  if (account.kind === "codex" && String(account.refreshToken || "").trim()) {
+  // Codex / Claude 有 Refresh Token 时可自动续期，作为状态补充展示在第二行
+  if (account.kind !== "cursor" && String(account.refreshToken || "").trim()) {
     const line = document.createElement("div");
     line.className = "state-tag-line";
     const tag = document.createElement("span");
@@ -224,11 +250,15 @@ function fillPlanCell(cell, account) {
     ? ""
     : account.kind === "codex"
     ? codexPlanLabel(status.plan)
+    : account.kind === "claude"
+    ? claudePlanLabel(status.plan)
     : membershipLabel(status.membershipType);
   const name = document.createElement("div");
   name.textContent = label || "—";
   cell.append(name);
   if (!status || status.alive === false) return;
+  // Claude 的额度窗口重置时间见摘要列，接口不提供订阅起止日期
+  if (account.kind === "claude") return;
   const endIso = account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd;
   const endText = isoDateText(endIso);
   if (!endText) return;
@@ -529,9 +559,10 @@ function codexSummaryNodes(status, anchorSec) {
 
 function fillSummaryCell(cell, account) {
   const status = account.status || null;
+  // Claude 的额度窗口结构与 Codex 一致（windows: label / usedPercent / resetAt），共用渲染
   const { bars, meta } = !status || status.alive === false
     ? { bars: [], meta: [] }
-    : account.kind === "codex"
+    : account.kind !== "cursor"
     ? codexSummaryNodes(status, account.lastRefreshAt)
     : cursorSummaryNodes(status);
   if (bars.length) {
@@ -656,7 +687,8 @@ function accountRow(account) {
     switchBtn.addEventListener("click", () => { void onSwitchAccount(account.id); });
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   } else {
-    // Codex 切换靠 Refresh Token 换新凭据，未验证或没有 Refresh Token 的账户不可切
+    // Codex / Claude 切换靠 Refresh Token 换新凭据，未验证或没有 Refresh Token 的账户不可切
+    const isClaude = account.kind === "claude";
     const aliveOk = !!(account.status && account.status.alive === true);
     const hasRt = !!String(account.refreshToken || "").trim();
     const switchBtn = iconAction(
@@ -665,10 +697,14 @@ function accountRow(account) {
         ? "请先刷新验证账户后再切换"
         : !hasRt
         ? "该账户没有 Refresh Token，无法切换本机登录"
+        : isClaude
+        ? "切换本机 Claude Code 登录（会关闭正在运行的 Claude Desktop）"
         : "切换本机 ChatGPT 登录（会关闭正在运行的 ChatGPT）"
     );
     switchBtn.disabled = busy || switching || !aliveOk || !hasRt;
-    switchBtn.addEventListener("click", () => { void onSwitchCodexAccount(account.id); });
+    switchBtn.addEventListener("click", () => {
+      void (isClaude ? onSwitchClaudeAccount(account.id) : onSwitchCodexAccount(account.id));
+    });
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   }
 
@@ -689,13 +725,13 @@ function updateGroupMeta(kind) {
 }
 
 function kindDisplay(kind) {
-  return kind === "codex" ? "ChatGPT" : "Cursor";
+  return kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
 }
 
 /** 卡片标题栏的刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
 function updateHeadingActions() {
   const blocked = switching || importing || refreshAllRunning;
-  for (const kind of ["cursor", "codex"]) {
+  for (const kind of ["cursor", "codex", "claude"]) {
     const running = groupRefreshing.has(kind) || refreshAllRunning;
     const refreshBtn = el(`#accounts-refresh-${kind}`);
     refreshBtn.disabled = blocked || groupRefreshing.has(kind);
@@ -717,9 +753,19 @@ function renderGroup(kind, bodyId, emptyId) {
 function render() {
   renderGroup("cursor", "#accounts-body-cursor", "#accounts-empty-cursor");
   renderGroup("codex", "#accounts-body-codex", "#accounts-empty-codex");
+  renderGroup("claude", "#accounts-body-claude", "#accounts-empty-claude");
   updateHeadingActions();
   // 首批进度条渲染完成后，后续重绘不再重放生长动画
   if (!quotaIntroPlayed && document.querySelector(".quota-bar")) quotaIntroPlayed = true;
+}
+
+/** 账户类型对应的表格 tbody 选择器。 */
+function bodyIdFor(kind) {
+  return kind === "codex"
+    ? "#accounts-body-codex"
+    : kind === "claude"
+    ? "#accounts-body-claude"
+    : "#accounts-body-cursor";
 }
 
 /** 只重建单个账户行（如刷新前后），避免整表重绘打断其它行的动画；行不存在时退回全量渲染。 */
@@ -729,7 +775,7 @@ function updateRow(id) {
     render();
     return;
   }
-  const bodyId = acc.kind === "codex" ? "#accounts-body-codex" : "#accounts-body-cursor";
+  const bodyId = bodyIdFor(acc.kind);
   const old = el(bodyId).querySelector(`tr[data-id="${CSS.escape(id)}"]`);
   if (!old) {
     render();
@@ -1066,6 +1112,9 @@ function mapSwitchError(err) {
   if (code.startsWith("codex_auth_write_failed")) {
     return "写入本机 ChatGPT 登录文件失败，请检查文件权限后重试。";
   }
+  if (code.startsWith("claude_creds_write_failed")) {
+    return "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
+  }
   const M = {
     account_not_verified: "该账户尚未验证有效，请先刷新后再切换。",
     cursor_running: "Cursor 仍在运行，请关闭后重试。",
@@ -1075,6 +1124,7 @@ function mapSwitchError(err) {
     unsupported_platform: "当前系统不支持该操作。",
     not_cursor_account: "该账户不是 Cursor 账户。",
     not_codex_account: "该账户不是 ChatGPT 账户。",
+    not_claude_account: "该账户不是 Claude 账户。",
     empty_token: "账户 Token 为空。",
     invalid_session_token: "User Token 已失效，请在账户管理更新后重试。",
     poll_timeout: "未能换取登录凭证，请重试。",
@@ -1085,6 +1135,11 @@ function mapSwitchError(err) {
     codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
     codex_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
     codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
+    claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
+    claude_exe_not_found: "未找到 Claude Desktop，请在设置中配置路径。",
+    claude_exe_invalid: "配置的 Claude Desktop 路径无效或文件不存在。",
+    claude_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
+    claude_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
   };
   return M[code] || code;
 }
@@ -1212,13 +1267,90 @@ async function onSwitchCodexAccount(id) {
   }
 }
 
+// Claude 切换：写入的是 Claude Code 凭据（CLI）；Claude Desktop 仅作为客户端联动
+// （运行中先关闭、已安装则完成后启动），未安装 Desktop 也可完成切号。
+async function onSwitchClaudeAccount(id) {
+  if (switching) return;
+  const acc = accounts.find((a) => a.id === id);
+  const hasRt = !!(acc && String(acc.refreshToken || "").trim());
+  if (!acc || !(acc.status && acc.status.alive === true) || !hasRt) return;
+  switching = true;
+  render();
+  switchModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
+  try {
+    const st = await invoke("claude_client_status", { id });
+    const running = !!st.running;
+    const hasDesktop = !!st.exeConfigured;
+    const ok = await switchModal.toConfirm(
+      running
+        ? {
+            body: "检测到 Claude Desktop 正在运行。切换需要先关闭它，未保存的内容可能会丢失。确定继续？",
+            confirmText: "关闭并切换",
+            danger: true,
+          }
+        : hasDesktop
+        ? {
+            body: "将把该账户写入本机 Claude Code 登录并启动 Claude Desktop。确定继续？",
+            confirmText: "切换",
+          }
+        : {
+            body: "将把该账户写入本机 Claude Code 登录（未检测到 Claude Desktop，跳过启动）。确定继续？",
+            confirmText: "切换",
+          }
+    );
+    if (!ok) {
+      switchModal.close();
+      return;
+    }
+    const steps = [];
+    if (running) steps.push("关闭 Claude Desktop");
+    steps.push("换取登录凭证并写入");
+    if (hasDesktop) steps.push("启动 Claude Desktop");
+    switchModal.toSteps(steps);
+    if (running) {
+      switchModal.stepStart();
+      const c = await invoke("claude_client_close");
+      if (!c.closed) {
+        switchModal.stepFail();
+        switchModal.finish(false, "未能完全关闭 Claude Desktop，请手动关闭后重试。");
+        return;
+      }
+      switchModal.stepDone();
+    }
+    switchModal.stepStart();
+    await invoke("claude_switch_local", { id });
+    switchModal.stepDone();
+    // 切换会轮换 refresh_token，同步最新账户数据
+    const view = await invoke("accounts_list");
+    applyView(view);
+    render();
+    if (hasDesktop) {
+      switchModal.stepStart();
+      const l = await invoke("claude_client_launch");
+      switchModal.stepDone();
+      switchModal.finish(
+        true,
+        l.launched ? "已切换本机 Claude Code 登录并启动 Claude Desktop。" : "已切换本机 Claude Code 登录，但自动启动失败，请手动启动 Claude Desktop。"
+      );
+    } else {
+      switchModal.finish(true, "已切换本机 Claude Code 登录。");
+    }
+  } catch (error) {
+    switchModal.stepFail();
+    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`);
+  } finally {
+    switching = false;
+    render();
+  }
+}
+
 /* ---------- 从本机导入 ---------- */
 
-// 读取本机已登录的指定类型凭据并加入托管列表（Cursor 读认证库，ChatGPT 读 auth.json）；
-// 后端保证同一账号不重复导入，导入后逐个后台验证。
+// 读取本机已登录的指定类型凭据并加入托管列表（Cursor 读认证库，ChatGPT 读 auth.json，
+// Claude 读 .credentials.json / macOS Keychain）；后端保证同一账号不重复导入，导入后逐个后台验证。
 async function onImportLocal(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" ? "codex" : "cursor";
+  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
   const label = kindDisplay(target);
   importing = true;
   setStatus("", `正在读取本机 ${label} 登录…`);
@@ -1256,7 +1388,7 @@ async function onImportLocal(kind) {
 
 async function onExport(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" ? "codex" : "cursor";
+  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
   const label = kindDisplay(target);
   importing = true;
   setStatus("", `正在导出 ${label} 账户…`);
@@ -1281,7 +1413,7 @@ async function onExport(kind) {
 
 async function onImportFile(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" ? "codex" : "cursor";
+  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
   const label = kindDisplay(target);
   importing = true;
   setStatus("", `正在导入 ${label} 账户…`);
@@ -1324,12 +1456,18 @@ async function onImportFile(kind) {
 /* ---------- 添加 / 编辑弹窗 ---------- */
 
 function setModalKind(kind) {
-  modalKind = kind === "codex" ? "codex" : "cursor";
+  modalKind = kind === "codex" || kind === "claude" ? kind : "cursor";
   for (const seg of el("#account-kind").querySelectorAll(".seg")) {
     seg.classList.toggle("active", seg.dataset.kind === modalKind);
   }
   el("#account-token").placeholder = TOKEN_PLACEHOLDERS[modalKind];
-  el("#account-refresh-field").hidden = modalKind !== "codex";
+  el("#account-refresh-field").hidden = modalKind === "cursor";
+  el("#account-refresh-token").placeholder =
+    modalKind === "claude"
+      ? "~/.claude/.credentials.json 里的 refreshToken，填写后 Token 过期可自动续期"
+      : "~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期";
+  // OAuth 授权添加仅用于新增 Claude 账户（编辑场景改凭据走手动粘贴）
+  el("#account-oauth-field").hidden = modalKind !== "claude" || editingId != null;
   el("#account-import-local").textContent = `从本机导入 ${kindDisplay(modalKind)}`;
 }
 
@@ -1339,6 +1477,7 @@ function openModal(account, presetKind) {
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
+  el("#account-oauth-code").value = "";
   setModalKind(account ? account.kind : presetKind || "cursor");
   // 编辑时不允许切换账户类型
   for (const seg of el("#account-kind").querySelectorAll(".seg")) seg.disabled = !!account;
@@ -1357,11 +1496,11 @@ function closeModal() {
 async function onSave() {
   const token = el("#account-token").value.trim();
   if (!token) {
-    setModalStatus("bad", "请填写 Token。");
+    setModalStatus("bad", modalKind === "claude" ? "请填写 Token，或使用上方 OAuth 授权添加。" : "请填写 Token。");
     return;
   }
   const note = el("#account-note").value.trim();
-  const refreshToken = modalKind === "codex" ? el("#account-refresh-token").value.trim() || null : null;
+  const refreshToken = modalKind !== "cursor" ? el("#account-refresh-token").value.trim() || null : null;
   const isEdit = editingId != null;
   const id = editingId;
   const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
@@ -1383,6 +1522,65 @@ async function onSave() {
     const msg = resetError(error);
     if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
     else setModalStatus("bad", `保存失败：${msg}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- Claude OAuth 授权添加 ---------- */
+
+// 打开浏览器授权页：后端生成 PKCE 上下文并尝试唤起系统浏览器，失败时提示手动打开。
+async function onOauthOpen() {
+  const btn = el("#account-oauth-open");
+  btn.disabled = true;
+  setModalStatus("", "正在打开浏览器授权页…");
+  try {
+    const r = await invoke("claude_oauth_begin");
+    if (r && r.opened) {
+      setModalStatus("", "已打开浏览器。登录并授权后，把页面展示的授权码粘贴到输入框，点「完成授权」。");
+    } else {
+      // 唤起失败（如无默认浏览器）：把授权地址复制到剪贴板兜底
+      try { await navigator.clipboard.writeText(r.url); } catch { /* ignore */ }
+      setModalStatus("warn", "未能自动打开浏览器，授权地址已复制到剪贴板，请手动粘贴到浏览器打开。");
+    }
+  } catch (error) {
+    setModalStatus("bad", `发起授权失败：${resetError(error)}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** OAuth 完成阶段的错误码 -> 用户可读文案。 */
+function mapOauthError(err) {
+  const code = resetError(err);
+  if (code === "oauth_not_started") return "请先点「浏览器授权」发起授权。";
+  if (code === "oauth_code_empty") return "请粘贴浏览器返回的授权码。";
+  if (code === "duplicate_account") return "该账号已存在，请勿重复添加。";
+  if (code.startsWith("oauth_exchange_denied")) {
+    return "授权码无效或已过期，请重新点「浏览器授权」再试。";
+  }
+  return code;
+}
+
+// 用授权码换取凭据并直接落库；成功后关弹窗并后台刷新新账户。
+async function onOauthFinish() {
+  const code = el("#account-oauth-code").value.trim();
+  if (!code) {
+    setModalStatus("bad", "请粘贴浏览器返回的授权码。");
+    return;
+  }
+  const btn = el("#account-oauth-finish");
+  btn.disabled = true;
+  setModalStatus("", "正在换取登录凭证…");
+  try {
+    const r = await invoke("claude_oauth_finish", { code });
+    applyView(r.view);
+    render();
+    closeModal();
+    setStatus("ok", `账户已添加：${r.label}`);
+    void refreshOne(r.id);
+  } catch (error) {
+    setModalStatus("bad", `授权失败：${mapOauthError(error)}`);
   } finally {
     btn.disabled = false;
   }
@@ -1424,14 +1622,12 @@ async function loadInitial(allowRetry = true) {
 }
 
 export function initAccounts() {
-  el("#accounts-add-cursor").addEventListener("click", () => openModal(null, "cursor"));
-  el("#accounts-add-codex").addEventListener("click", () => openModal(null, "codex"));
-  el("#accounts-refresh-cursor").addEventListener("click", () => { void refreshGroup("cursor"); });
-  el("#accounts-refresh-codex").addEventListener("click", () => { void refreshGroup("codex"); });
-  el("#accounts-import-cursor").addEventListener("click", () => { void onImportFile("cursor"); });
-  el("#accounts-import-codex").addEventListener("click", () => { void onImportFile("codex"); });
-  el("#accounts-export-cursor").addEventListener("click", () => { void onExport("cursor"); });
-  el("#accounts-export-codex").addEventListener("click", () => { void onExport("codex"); });
+  for (const kind of ["cursor", "codex", "claude"]) {
+    el(`#accounts-add-${kind}`).addEventListener("click", () => openModal(null, kind));
+    el(`#accounts-refresh-${kind}`).addEventListener("click", () => { void refreshGroup(kind); });
+    el(`#accounts-import-${kind}`).addEventListener("click", () => { void onImportFile(kind); });
+    el(`#accounts-export-${kind}`).addEventListener("click", () => { void onExport(kind); });
+  }
 
   const modal = el("#account-modal");
   for (const node of modal.querySelectorAll("[data-close]")) {
@@ -1449,6 +1645,8 @@ export function initAccounts() {
     closeModal();
     void onImportLocal(kind);
   });
+  el("#account-oauth-open").addEventListener("click", () => { void onOauthOpen(); });
+  el("#account-oauth-finish").addEventListener("click", () => { void onOauthFinish(); });
 
   // 切换流程弹窗：事件一次性绑定，按 switchModal 当前阶段分发
   el("#switch-ok").addEventListener("click", () => switchModal.onOk());
@@ -1468,12 +1666,14 @@ export function initAccounts() {
   setInterval(() => {
     if (!accounts.length) return;
     for (const account of accounts) {
-      const bodyId = account.kind === "codex" ? "#accounts-body-codex" : "#accounts-body-cursor";
-      const cell = el(bodyId).querySelector(`tr[data-id="${CSS.escape(account.id)}"] .account-time`);
+      const cell = el(bodyIdFor(account.kind)).querySelector(
+        `tr[data-id="${CSS.escape(account.id)}"] .account-time`
+      );
       if (cell) cell.textContent = relativeFromUnixSeconds(account.lastRefreshAt);
     }
     updateGroupMeta("cursor");
     updateGroupMeta("codex");
+    updateGroupMeta("claude");
   }, 30_000);
 
   render();

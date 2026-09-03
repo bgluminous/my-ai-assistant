@@ -1,5 +1,8 @@
 mod accounts;
 mod audit;
+mod claude;
+mod claude_local;
+mod claude_oauth;
 mod codex;
 mod codex_local;
 mod cursor;
@@ -96,6 +99,16 @@ pub fn run() {
             codex_local::codex_client_status,
             codex_local::codex_client_close,
             codex_local::codex_client_launch,
+            claude::claude_scan_sessions,
+            claude_local::claude_switch_local,
+            claude_local::claude_client_get,
+            claude_local::claude_client_set,
+            claude_local::claude_client_detect,
+            claude_local::claude_client_status,
+            claude_local::claude_client_close,
+            claude_local::claude_client_launch,
+            claude_oauth::claude_oauth_begin,
+            accounts::claude_oauth_finish,
             pricing::pricing_get,
             pricing::pricing_save,
             pricing::pricing_reset,

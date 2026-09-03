@@ -10,6 +10,7 @@ use tauri::AppHandle;
 
 use crate::accounts::{Account, AccountsFile};
 use crate::audit;
+use crate::claude_local::ClaudeClientConfig;
 use crate::codex_local::CodexClientConfig;
 use crate::cursor_local::CursorClientConfig;
 use crate::paths;
@@ -34,6 +35,8 @@ pub struct Settings {
     pub cursor_client: CursorClientConfig,
     #[serde(default)]
     pub codex_client: CodexClientConfig,
+    #[serde(default)]
+    pub claude_client: ClaudeClientConfig,
 }
 
 impl Settings {

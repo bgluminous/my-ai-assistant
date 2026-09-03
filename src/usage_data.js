@@ -4,6 +4,7 @@ import { invoke, emit } from "./shared.js";
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
 // Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）或 today:YYYY-MM-DD。
 // Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today:YYYY-MM-DD。
+// Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
 export const USAGE_CACHE_PREFIX = "usage-cache:v4:";
 export const USAGE_CACHE_EVENT = "usage-cache-changed";
@@ -28,6 +29,7 @@ const PEEK_SCAN_RANGES = ["7", "30", "all"];
 let ttlMs = DEFAULT_USAGE_TTL_MS;
 const memAgg = new Map();
 const memScan = new Map();
+const memClaudeScan = new Map();
 const inflight = new Map();
 
 export function setUsageCacheTtlMs(ms) {
@@ -46,6 +48,7 @@ export function isUsageCacheFresh(at) {
 export function clearUsageMemoryCache() {
   memAgg.clear();
   memScan.clear();
+  memClaudeScan.clear();
 }
 
 export function localYmd(d = new Date()) {
@@ -97,6 +100,7 @@ export function forgetUsageCacheFromEvent(key) {
   if (!key.startsWith(USAGE_CACHE_PREFIX)) return;
   const rest = key.slice(USAGE_CACHE_PREFIX.length);
   if (rest.startsWith("agg:")) memAgg.delete(rest.slice(4));
+  else if (rest.startsWith("cscan:")) memClaudeScan.delete(rest.slice(6));
   else if (rest.startsWith("scan:")) memScan.delete(rest.slice(5));
 }
 
@@ -137,6 +141,19 @@ export function getCachedScan(rangeKey, home) {
   return entry;
 }
 
+export function getCachedClaudeScan(rangeKey, home) {
+  const key = `${rangeKey}:${home || ""}`;
+  let entry = memClaudeScan.get(key) || null;
+  if (!entry) {
+    const stored = cacheLoad(`cscan:${key}`);
+    if (stored && stored.scan && stored.scan.aggregate) {
+      entry = stored;
+      memClaudeScan.set(key, entry);
+    }
+  }
+  return entry;
+}
+
 /** 优先今日键，其次 7/30/90/全部（用 daily 切片出当天）。 */
 export function peekAggForDay(accountId, ymd) {
   const todayKey = todayRangeKey(ymd);
@@ -156,6 +173,18 @@ export function peekScanForDay(ymd, home) {
   if (today) return { entry: today, rangeKey: todayKey };
   for (const rk of PEEK_SCAN_RANGES) {
     const entry = getCachedScan(rk, h);
+    if (entry && entry.scan && entry.scan.aggregate) return { entry, rangeKey: rk };
+  }
+  return null;
+}
+
+export function peekClaudeScanForDay(ymd, home) {
+  const h = home || "";
+  const todayKey = todayRangeKey(ymd);
+  const today = getCachedClaudeScan(todayKey, h);
+  if (today) return { entry: today, rangeKey: todayKey };
+  for (const rk of PEEK_SCAN_RANGES) {
+    const entry = getCachedClaudeScan(rk, h);
     if (entry && entry.scan && entry.scan.aggregate) return { entry, rangeKey: rk };
   }
   return null;
@@ -182,6 +211,18 @@ export function peekScanSeries(ymd, home) {
     }
   }
   return peekScanForDay(ymd, h);
+}
+
+export function peekClaudeScanSeries(ymd, home) {
+  const h = home || "";
+  for (const rk of ["30", "7", "all"]) {
+    const entry = getCachedClaudeScan(rk, h);
+    if (entry && entry.scan && entry.scan.aggregate && Array.isArray(entry.scan.aggregate.daily)
+      && entry.scan.aggregate.daily.length) {
+      return { entry, rangeKey: rk };
+    }
+  }
+  return peekClaudeScanForDay(ymd, h);
 }
 
 function attachUsageCache(error, cached) {
@@ -237,14 +278,18 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force } = 
   return p;
 }
 
+/** 扫描范围 -> 缓存键（今天含日期，跨零点自动失效）。 */
+function scanRangeKey(days, sinceMs) {
+  return sinceMs != null && Number.isFinite(Number(sinceMs))
+    ? todayRangeKey(localYmd(Number(sinceMs)))
+    : days == null || days === 0
+      ? "all"
+      : String(days);
+}
+
 export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
   const h = home || "";
-  const rangeKey =
-    sinceMs != null && Number.isFinite(Number(sinceMs))
-      ? todayRangeKey(localYmd(Number(sinceMs)))
-      : days == null || days === 0
-        ? "all"
-        : String(days);
+  const rangeKey = scanRangeKey(days, sinceMs);
   const key = `${rangeKey}:${h}`;
   const cached = getCachedScan(rangeKey, h);
   if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
@@ -262,6 +307,36 @@ export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
       const entry = { scan, at: Date.now() };
       memScan.set(key, entry);
       cacheStore(`scan:${key}`, entry);
+      return entry;
+    })
+    .catch((error) => {
+      throw attachUsageCache(error, cached);
+    })
+    .finally(() => inflight.delete(inflightKey));
+  inflight.set(inflightKey, p);
+  return p;
+}
+
+export function fetchClaudeScan({ days, sinceMs, home, force } = {}) {
+  const h = home || "";
+  const rangeKey = scanRangeKey(days, sinceMs);
+  const key = `${rangeKey}:${h}`;
+  const cached = getCachedClaudeScan(rangeKey, h);
+  if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
+  const inflightKey = `cscan:${key}`;
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+  const p = withTimeout(
+    invoke("claude_scan_sessions", {
+      days: days == null || days === 0 ? null : days,
+      sinceMs: sinceMs ?? null,
+      home: h || null,
+    }),
+    "claude_scan_sessions"
+  )
+    .then((scan) => {
+      const entry = { scan, at: Date.now() };
+      memClaudeScan.set(key, entry);
+      cacheStore(`cscan:${key}`, entry);
       return entry;
     })
     .catch((error) => {
