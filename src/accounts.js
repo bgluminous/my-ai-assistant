@@ -809,6 +809,17 @@ function applyView(view) {
 let syncTimer = null;
 let syncPendingView = null;
 
+/**
+ * 广播视图是否与本地状态完全一致。主窗口自己发起的写入（刷新 / 增删改）也会收到回声，
+ * 而本地早已用命令返回值更新过；一致时跳过，避免同一次变化把联动模块（用量页）通知两遍。
+ */
+function sameAsCurrent(view) {
+  const n = Number(view.intervalMinutes);
+  if (Number.isFinite(n) && n !== intervalMinutes) return false;
+  const list = Array.isArray(view.accounts) ? view.accounts : [];
+  return JSON.stringify(list) === JSON.stringify(accounts);
+}
+
 function onBackendChanged(view) {
   if (!view) return;
   syncPendingView = view;
@@ -817,6 +828,7 @@ function onBackendChanged(view) {
     syncTimer = null;
     const v = syncPendingView;
     syncPendingView = null;
+    if (sameAsCurrent(v)) return;
     // 其他入口刷新成功（刷新时间变化）的账户，本地残留的行错误已过时，清掉避免矛盾展示
     const prevAt = new Map(accounts.map((a) => [a.id, a.lastRefreshAt]));
     for (const a of Array.isArray(v.accounts) ? v.accounts : []) {
@@ -902,6 +914,8 @@ async function refreshAll() {
 // 现行定时器对应的间隔（分钟），applyView 据此判断是否需要重建
 let timerMinutes = 0;
 
+// 这是全应用唯一的定时刷新器：到点逐个刷新账户状态，每个账户刷新完成后经 notifyChange
+// 通知用量统计页按当前跨度预取该账户的用量（用量页不再自带定时器，避免两条链重复拉取）。
 function rebuildTimer() {
   timerMinutes = intervalMinutes;
   if (timerId != null) {
@@ -923,7 +937,7 @@ export function getRefreshIntervalMinutes() {
 
 /**
  * 保存定时刷新间隔并重建定时器，返回后端确认后的值；失败向上抛（由设置弹窗提示）。
- * applyView 内的 notifyChange 会通知用量统计页同步自己的自动更新定时器。
+ * applyView 内的 notifyChange 会通知用量统计页同步缓存有效期（与间隔一致）。
  */
 export async function setRefreshInterval(minutes) {
   const view = await invoke("accounts_set_interval", { intervalMinutes: minutes });

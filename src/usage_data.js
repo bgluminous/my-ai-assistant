@@ -2,8 +2,9 @@ import { invoke, emit } from "./shared.js";
 
 // 主窗口用量页与托盘总览共用的聚合缓存。
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
-// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）或 today:YYYY-MM-DD。
-// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today:YYYY-MM-DD。
+// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）、today:YYYY-MM-DD
+//   （进行中的今天，数据随时间增长）或 day:YYYY-MM-DD（已结束的完整自然日，如「昨天」）。
+// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today: / day: 同上。
 // Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
 export const USAGE_CACHE_PREFIX = "usage-cache:v4:";
@@ -62,8 +63,19 @@ export function todayStartMs(d = new Date()) {
   return new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
 }
 
+/** 相对今天偏移 offsetDays 天的本地自然日 0 点（按日历日推算，夏令时切换日也正确）。 */
+export function dayStartMs(offsetDays = 0, d = new Date()) {
+  const x = d instanceof Date ? d : new Date(d);
+  return new Date(x.getFullYear(), x.getMonth(), x.getDate() + offsetDays).getTime();
+}
+
 export function todayRangeKey(ymd = localYmd()) {
   return `today:${ymd}`;
+}
+
+/** 已结束的完整自然日的缓存键（与 today: 区分：今天的缓存是进行中的部分数据）。 */
+export function dayRangeKey(ymd) {
+  return `day:${ymd}`;
 }
 
 export function recentYmds(n, end = new Date()) {
@@ -190,6 +202,46 @@ export function peekClaudeScanForDay(ymd, home) {
   return null;
 }
 
+/**
+ * 已结束的自然日（如「昨天」）只能用完整数据：优先 day: 键；其次是在该日结束之后才拉取的
+ * 7/30/全部序列（其 daily 切片已包含整天）。当天进行中拉的 today: 键与更早拉取的序列都是
+ * 半天数据，不作回退。
+ */
+function pastDayHit(get, ymd, seriesRanges, hasData) {
+  const dayKey = dayRangeKey(ymd);
+  const day = get(dayKey);
+  if (day) return { entry: day, rangeKey: dayKey };
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  const dayEnd = new Date(y, m - 1, d + 1).getTime();
+  for (const rk of seriesRanges) {
+    const entry = get(rk);
+    if (entry && hasData(entry) && entry.at >= dayEnd) return { entry, rangeKey: rk };
+  }
+  return null;
+}
+
+export function peekAggForPastDay(accountId, ymd) {
+  return pastDayHit((rk) => getCachedAgg(accountId, rk), ymd, PEEK_DAY_RANGES, (e) => !!e.agg);
+}
+
+export function peekScanForPastDay(ymd, home) {
+  return pastDayHit(
+    (rk) => getCachedScan(rk, home || ""),
+    ymd,
+    PEEK_SCAN_RANGES,
+    (e) => !!(e.scan && e.scan.aggregate)
+  );
+}
+
+export function peekClaudeScanForPastDay(ymd, home) {
+  return pastDayHit(
+    (rk) => getCachedClaudeScan(rk, home || ""),
+    ymd,
+    PEEK_SCAN_RANGES,
+    (e) => !!(e.scan && e.scan.aggregate)
+  );
+}
+
 /** 优先 30/7/全部的按日序列，供托盘近 7 日柱图；没有再退回今日键。 */
 export function peekAggSeries(accountId, ymd) {
   for (const rk of ["30", "7", "0"]) {
@@ -278,18 +330,21 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force } = 
   return p;
 }
 
-/** 扫描范围 -> 缓存键（今天含日期，跨零点自动失效）。 */
-function scanRangeKey(days, sinceMs) {
-  return sinceMs != null && Number.isFinite(Number(sinceMs))
-    ? todayRangeKey(localYmd(Number(sinceMs)))
-    : days == null || days === 0
-      ? "all"
-      : String(days);
+/**
+ * 扫描范围 -> 缓存键：只有起点 = 进行中的今天（today:，跨零点自动失效）；
+ * 起点 + 终点 = 已结束的完整自然日（day:，按起点所在日命名）；否则为天数 / all。
+ */
+function scanRangeKey(days, sinceMs, untilMs) {
+  if (sinceMs != null && Number.isFinite(Number(sinceMs))) {
+    const ymd = localYmd(Number(sinceMs));
+    return untilMs != null ? dayRangeKey(ymd) : todayRangeKey(ymd);
+  }
+  return days == null || days === 0 ? "all" : String(days);
 }
 
-export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
+export function fetchCodexScan({ days, sinceMs, untilMs, home, force } = {}) {
   const h = home || "";
-  const rangeKey = scanRangeKey(days, sinceMs);
+  const rangeKey = scanRangeKey(days, sinceMs, untilMs);
   const key = `${rangeKey}:${h}`;
   const cached = getCachedScan(rangeKey, h);
   if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
@@ -299,6 +354,7 @@ export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
     invoke("codex_scan_sessions", {
       days: days == null || days === 0 ? null : days,
       sinceMs: sinceMs ?? null,
+      untilMs: untilMs ?? null,
       home: h || null,
     }),
     "codex_scan_sessions"
@@ -317,9 +373,9 @@ export function fetchCodexScan({ days, sinceMs, home, force } = {}) {
   return p;
 }
 
-export function fetchClaudeScan({ days, sinceMs, home, force } = {}) {
+export function fetchClaudeScan({ days, sinceMs, untilMs, home, force } = {}) {
   const h = home || "";
-  const rangeKey = scanRangeKey(days, sinceMs);
+  const rangeKey = scanRangeKey(days, sinceMs, untilMs);
   const key = `${rangeKey}:${h}`;
   const cached = getCachedClaudeScan(rangeKey, h);
   if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
@@ -329,6 +385,7 @@ export function fetchClaudeScan({ days, sinceMs, home, force } = {}) {
     invoke("claude_scan_sessions", {
       days: days == null || days === 0 ? null : days,
       sinceMs: sinceMs ?? null,
+      untilMs: untilMs ?? null,
       home: h || null,
     }),
     "claude_scan_sessions"
@@ -362,9 +419,10 @@ export function purgeAccountCache(accountId) {
   notifyUsageCache(USAGE_CACHE_PREFIX);
 }
 
+/** 从内存键 ${accountId}:${rangeKey} 取回账户 id（带日期的 today: / day: 键自身含冒号）。 */
 function aggAccountIdFromMemKey(key) {
-  const idx = key.indexOf(":today:");
-  if (idx >= 0) return key.slice(0, idx);
+  const m = /:(?:today|day):/.exec(key);
+  if (m) return key.slice(0, m.index);
   const last = key.lastIndexOf(":");
   return last >= 0 ? key.slice(0, last) : key;
 }
@@ -400,18 +458,23 @@ export function overlayDay(daily, ymd, slice) {
   return list;
 }
 
-/** 从任意范围的聚合里切出某一天的 token / 等价费用（无按日数据时，仅今日键可用合计）。 */
+/** 单日键（today: / day:）：聚合范围就是那一天，合计即当日合计。 */
+function isSingleDayKey(rangeKey) {
+  return /^(?:today|day):/.test(String(rangeKey || ""));
+}
+
+/** 从任意范围的聚合里切出某一天的 token / 等价费用（无按日数据时，仅单日键可用合计）。 */
 export function sliceDay(agg, ymd, rangeKey) {
   if (!agg) return { tokens: 0, usd: 0 };
   const day = dailyOn(agg, ymd);
   if (day) return { tokens: Number(day.tokens) || 0, usd: Number(day.equivalentUsd) || 0 };
-  if (String(rangeKey || "").startsWith("today:")) {
+  if (isSingleDayKey(rangeKey)) {
     return { tokens: Number(agg.totalTokens) || 0, usd: Number(agg.totalEquivalentUsd) || 0 };
   }
   return { tokens: 0, usd: 0 };
 }
 
-/** 当天各模型用量：优先 daily[].models，今日键则退回合计 models。 */
+/** 当天各模型用量：优先 daily[].models，单日键则退回合计 models。 */
 export function modelsOnDay(agg, ymd, rangeKey) {
   if (!agg) return [];
   const day = dailyOn(agg, ymd);
@@ -424,7 +487,7 @@ export function modelsOnDay(agg, ymd, rangeKey) {
       }))
       .filter((m) => m.tokens > 0);
   }
-  if (String(rangeKey || "").startsWith("today:") && Array.isArray(agg.models)) {
+  if (isSingleDayKey(rangeKey) && Array.isArray(agg.models)) {
     return agg.models
       .map((m) => ({
         model: m.model,

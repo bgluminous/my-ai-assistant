@@ -212,7 +212,7 @@ function renderChart(config) {
   return chart;
 }
 
-/** 按日横轴：最早数据日 → 数据时间所在日，最新在左（与用量页一致）。 */
+/** 按日横轴：最早数据日 → 数据时间所在日，从左到右由旧到新（与用量页一致）。 */
 function dailyAxisLabels(daily, endMs) {
   const endDate = Number.isFinite(endMs) && endMs > 0 ? new Date(endMs) : new Date();
   const end0 = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
@@ -227,7 +227,7 @@ function dailyAxisLabels(daily, endMs) {
     labels.push(localYmd(cur));
     cur = addDays(cur, 1);
   }
-  return labels.reverse();
+  return labels;
 }
 
 function dailyChartConfig(agg, at, t, font, w, h) {

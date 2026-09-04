@@ -7,13 +7,17 @@ import {
   setUsageCacheTtlMs,
   isUsageCacheFresh,
   localYmd,
-  todayStartMs,
+  dayStartMs,
   todayRangeKey,
+  dayRangeKey,
   peekAggForDay,
+  peekAggForPastDay,
   peekAggSeries,
   peekScanForDay,
+  peekScanForPastDay,
   peekScanSeries,
   peekClaudeScanForDay,
+  peekClaudeScanForPastDay,
   peekClaudeScanSeries,
   fetchCursorAggregate,
   fetchCodexScan,
@@ -24,8 +28,8 @@ import {
 } from "./usage_data.js";
 
 // 托盘面板：托盘图标单击弹出的简易面板，分四个 tab：
-// 总览（今日 token 用量合计）/ Cursor / ChatGPT / Claude（账户列表，查看状态额度、
-// 单账户刷新 / 一键切换、全部刷新），增删改等完整功能在主窗口。
+// 总览（今天 / 昨天的 token 用量合计，可切换）/ Cursor / ChatGPT / Claude（账户列表，
+// 查看状态额度、单账户刷新 / 一键切换、全部刷新），增删改等完整功能在主窗口。
 // 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
 
 let accounts = [];
@@ -33,6 +37,29 @@ let refreshing = false;
 let switching = false;
 let overviewLoading = false;
 const refreshingIds = new Set();
+// 总览所选统计日："today" | "yesterday"，仅内存保存（应用重启回到今天）。
+// 昨天用完整自然日键 day:YYYY-MM-DD，与主窗口用量页「昨天」跨度共用同一份缓存。
+let trayDay = "today";
+
+function dayIsPast() {
+  return trayDay === "yesterday";
+}
+/** 所选统计日的口径：本地 0 点起止（终点为次日 0 点）、YYYY-MM-DD、文案用词。 */
+function dayScope() {
+  const offset = dayIsPast() ? -1 : 0;
+  const start = dayStartMs(offset);
+  const end = dayStartMs(offset + 1);
+  const ymd = localYmd(new Date(start));
+  return {
+    past: dayIsPast(),
+    start,
+    end,
+    ymd,
+    aggKey: dayIsPast() ? dayRangeKey(ymd) : todayRangeKey(ymd),
+    word: dayIsPast() ? "昨日" : "今日",
+    tipWord: dayIsPast() ? "昨天" : "今天",
+  };
+}
 
 // 与主窗口账户表操作列同一套线性图标
 const TRAY_ICONS = {
@@ -66,7 +93,7 @@ function syncHeaderRefresh() {
   const btn = el("#tray-refresh");
   const accountBusy = refreshing || switching || refreshingIds.size > 0;
   if (trayTab === "overview") {
-    // 总览刷新 = 账户状态 + 今日用量一起刷，任一进行中都置忙
+    // 总览刷新 = 账户状态 + 所选日用量一起刷，任一进行中都置忙
     btn.disabled = overviewLoading || refreshing || switching;
     btn.classList.toggle("busy", overviewLoading || refreshing);
     return;
@@ -391,14 +418,31 @@ async function refreshAll() {
   await load();
 }
 
-/* ---------- 总览：今日 token 用量（与主窗口用量页共用 usage_data 缓存） ---------- */
+/* ---------- 总览：今天 / 昨天 token 用量（与主窗口用量页共用 usage_data 缓存） ---------- */
 
 function overviewTip(text) {
   teardownOverview();
   const tip = document.createElement("div");
   tip.className = "tray-empty";
   tip.textContent = text;
-  el("#tray-overview").replaceChildren(tip);
+  el("#tray-ov-body").replaceChildren(tip);
+}
+
+/** 头部统计日标签与切换按钮选中态跟随 trayDay。 */
+function applyDayHead() {
+  el("#tray-ov-label").textContent = `${dayScope().word}已用`;
+  for (const btn of el("#tray-day").querySelectorAll("[data-day]")) {
+    const on = btn.dataset.day === trayDay;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  }
+}
+
+function setDay(day) {
+  if ((day !== "today" && day !== "yesterday") || day === trayDay) return;
+  trayDay = day;
+  applyDayHead();
+  void loadOverview(false);
 }
 
 /* ---------- 总览图表（Chart.js 全局脚本，缺失时静默跳过） ---------- */
@@ -462,7 +506,7 @@ function chartMotion() {
   };
 }
 
-/** 图表小节：标题 + 定高画布容器，返回 { wrap, canvas, box }。 */
+/** 图表小节：标题 + 定高画布容器，返回 { wrap, label, canvas, box }。 */
 function chartSection(title, height) {
   const wrap = document.createElement("div");
   wrap.className = "tray-chart";
@@ -475,7 +519,7 @@ function chartSection(title, height) {
   const canvas = document.createElement("canvas");
   box.append(canvas);
   wrap.append(label, box);
-  return { wrap, canvas, box };
+  return { wrap, label, canvas, box };
 }
 
 function shortModel(name) {
@@ -645,7 +689,7 @@ const SOURCE_PIE_CFG = {
   afterOf: (r) => (Number.isFinite(r.usd) ? `等价 ${fmtUsd(r.usd)}` : ""),
 };
 
-/** 今日 24 小时 Token 堆叠柱：每账户一段，0:00 → 23:00 从左到右，与统计页「今天」视图一致。 */
+/** 所选日 24 小时 Token 堆叠柱：每账户一段，0:00 → 23:00 从左到右，与统计页单日视图一致。 */
 function makeHourlyStack(canvas, labels, datasets) {
   const motion = chartMotion();
   const chart = new Chart(canvas, {
@@ -666,8 +710,9 @@ function makeHourlyStack(canvas, labels, datasets) {
           callbacks: {
             title(items) {
               if (!items.length) return "";
-              const h = parseInt(items[0].chart.data.labels[items[0].dataIndex], 10);
-              return Number.isFinite(h) ? `今天 ${h}:00 – ${h + 1}:00` : "";
+              const chart = items[0].chart;
+              const h = parseInt(chart.data.labels[items[0].dataIndex], 10);
+              return Number.isFinite(h) ? `${chart.$dayWord || "今天"} ${h}:00 – ${h + 1}:00` : "";
             },
             label(ctx) {
               if (ctx.raw == null) return null;
@@ -718,10 +763,11 @@ function makeHourlyStack(canvas, labels, datasets) {
   return chart;
 }
 
-/** 今日 24 小时堆叠柱：数据取各来源聚合结果的 hourly（仅当天），0:00 → 23:00 从左到右。 */
-function syncHourlyStack(sources) {
+/** 所选日 24 小时堆叠柱：数据取各来源聚合结果的 hourly（按 date 取所选日），0:00 → 23:00 从左到右。 */
+function syncHourlyStack(sources, scope) {
   const wrap = overviewDom.bar.wrap;
-  const ymd = localYmd();
+  const ymd = scope.ymd;
+  overviewDom.bar.label.textContent = `${scope.word} Token（按小时）`;
   const hours = [];
   for (let h = 0; h <= 23; h += 1) hours.push(h);
   const labels = hours.map((h) => `${h}:00`);
@@ -758,19 +804,18 @@ function syncHourlyStack(sources) {
     hourlyStack.data.datasets = datasets;
     hourlyStack.$baseColors = baseColors;
     hourlyStack.$hoverKey = "";
+    hourlyStack.$dayWord = scope.tipWord;
     hourlyStack.update();
     return;
   }
   hourlyStack = makeHourlyStack(overviewDom.bar.canvas, labels, datasets);
   hourlyStack.$baseColors = baseColors;
+  hourlyStack.$dayWord = scope.tipWord;
 }
 
 function ensureOverviewDom() {
   if (overviewDom) return;
-  const root = el("#tray-overview");
-  const label = document.createElement("div");
-  label.className = "tray-ov-label";
-  label.textContent = "今日已用";
+  const root = el("#tray-ov-body");
   const total = document.createElement("div");
   total.className = "tray-ov-total";
   const tokens = document.createElement("span");
@@ -778,7 +823,7 @@ function ensureOverviewDom() {
   const usd = document.createElement("span");
   usd.className = "tray-ov-usd";
   total.append(tokens, usd);
-  // 图表顺序与统计页一致：24 小时柱在上，下方三个饼图三等分并排
+  // 图表顺序与统计页一致：24 小时柱在上，下方三个饼图三等分并排；柱图标题随所选日更新
   const bar = chartSection("今日 Token（按小时）", 128);
   bar.wrap.hidden = true;
   const tokenPie = chartSection("模型 Token", 104);
@@ -795,11 +840,11 @@ function ensureOverviewDom() {
   const foot = document.createElement("div");
   foot.className = "tray-ov-foot";
   foot.hidden = true;
-  root.replaceChildren(label, total, bar.wrap, pieRow, rows, foot);
+  root.replaceChildren(total, bar.wrap, pieRow, rows, foot);
   overviewDom = { tokens, usd, rows, foot, tokenPie, costPie, sourcePie, pieRow, bar };
 }
 
-function renderOverview(data, statAtMs) {
+function renderOverview(data, statAtMs, scope) {
   const hasChart = (data.hourlySources || []).some((s) => (s.hourly || []).some((r) => r && r.tokens > 0))
     || (data.modelTokenShares || []).some((m) => m && m.tokens > 0)
     || (data.modelCostShares || []).some((m) => m && m.usd > 0);
@@ -816,7 +861,7 @@ function renderOverview(data, statAtMs) {
   // 图表异常不得中断总览渲染（数字与来源明细仍要照常更新），
   // 失败时销毁实例（含孤儿注册），下轮渲染自动重建。
   try {
-    syncHourlyStack(data.hourlySources || []);
+    syncHourlyStack(data.hourlySources || [], scope);
     syncMiniPie("modelToken", overviewDom.tokenPie, data.modelTokenShares || [], TOKEN_PIE_CFG);
     syncMiniPie("modelCost", overviewDom.costPie, data.modelCostShares || [], COST_PIE_CFG);
     syncMiniPie("source", overviewDom.sourcePie, shares, SOURCE_PIE_CFG);
@@ -867,15 +912,42 @@ function renderOverview(data, statAtMs) {
   }
 }
 
-/** 优先取今日键聚合里的 hourly，缺失时退回长范围缓存（若为今天拉取，同样带当天 hourly）。 */
+/** 优先取单日键聚合里的 hourly，缺失时退回长范围缓存（后端聚合同样带今天 / 昨天的 hourly）。 */
 function pickHourly(dayAgg, seriesAgg) {
   if (dayAgg && Array.isArray(dayAgg.hourly) && dayAgg.hourly.length) return dayAgg.hourly;
   return (seriesAgg && seriesAgg.hourly) || [];
 }
 
-/** 从共享缓存拼出托盘总览：今日数字用当天切片，24 小时柱用聚合结果的 hourly。
- *  来源（各账户 + 本地分析）按今日 Token 降序排列，行序与各图表配色一一对应。 */
-function buildOverviewData(ymd) {
+/**
+ * 所选日各来源的缓存命中方式：今天可用今日键或任意长范围序列的当天切片（都是进行中的数据）；
+ * 昨天只认完整数据（day: 键，或该日结束后才拉取的序列），不用半天的旧缓存凑数。
+ */
+function dayPeekers(scope) {
+  if (scope.past) {
+    return {
+      agg: (id) => peekAggForPastDay(id, scope.ymd),
+      aggSeries: () => null,
+      scan: (home) => peekScanForPastDay(scope.ymd, home),
+      scanSeries: () => null,
+      claude: (home) => peekClaudeScanForPastDay(scope.ymd, home),
+      claudeSeries: () => null,
+    };
+  }
+  return {
+    agg: (id) => peekAggForDay(id, scope.ymd),
+    aggSeries: (id) => peekAggSeries(id, scope.ymd),
+    scan: (home) => peekScanForDay(scope.ymd, home),
+    scanSeries: (home) => peekScanSeries(scope.ymd, home),
+    claude: (home) => peekClaudeScanForDay(scope.ymd, home),
+    claudeSeries: (home) => peekClaudeScanSeries(scope.ymd, home),
+  };
+}
+
+/** 从共享缓存拼出托盘总览：所选日数字用当天切片，24 小时柱用聚合结果的 hourly。
+ *  来源（各账户 + 本地分析）按当日 Token 降序排列，行序与各图表配色一一对应。 */
+function buildOverviewData(scope) {
+  const ymd = scope.ymd;
+  const peek = dayPeekers(scope);
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const entries = []; // { row, hourlySource, modelSource }
   const ats = [];
@@ -884,8 +956,8 @@ function buildOverviewData(ymd) {
 
   for (const a of cursorAccounts) {
     const label = trayAccountLabel(a);
-    const dayHit = peekAggForDay(a.id, ymd);
-    const seriesHit = peekAggSeries(a.id, ymd);
+    const dayHit = peek.agg(a.id);
+    const seriesHit = peek.aggSeries(a.id);
     if (!dayHit && !seriesHit) continue;
     const hit = dayHit || seriesHit;
     if (Number.isFinite(hit.entry.at)) ats.push(hit.entry.at);
@@ -928,8 +1000,8 @@ function buildOverviewData(ymd) {
       });
     }
   };
-  pushScanEntry("local", "本地 ChatGPT", peekScanForDay(ymd, ""), peekScanSeries(ymd, ""));
-  pushScanEntry("local-claude", "本地 Claude", peekClaudeScanForDay(ymd, ""), peekClaudeScanSeries(ymd, ""));
+  pushScanEntry("local", "本地 ChatGPT", peek.scan(""), peek.scanSeries(""));
+  pushScanEntry("local-claude", "本地 Claude", peek.claude(""), peek.claudeSeries(""));
 
   entries.sort((a, b) => b.row.tokens - a.row.tokens);
   const modelTotals = mergeModelTotals(entries.map((e) => e.modelSource.models));
@@ -968,7 +1040,7 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
   return data;
 }
 
-function needsTodayFetch(peeked, force) {
+function needsDayFetch(peeked, force) {
   return force || !peeked || !isUsageCacheFresh(peeked.entry.at);
 }
 
@@ -980,52 +1052,65 @@ function loadOverview(force) {
   return overviewTail;
 }
 
-/** 统计今日用量：先读主窗口写入的 7/30/全部缓存，缺的再拉今日并写回同一套 localStorage。 */
+/**
+ * 统计所选日用量：先用共享缓存立即渲染，缺的 / 过期的再拉取并写回同一套 localStorage
+ * （今天写 today: 键、昨天写 day: 键，与主窗口用量页互通）。加载期间用户切了统计日，
+ * 本轮结果不再渲染，交给随后排队的新一轮。
+ */
 async function loadOverviewInner(force) {
-  const ymd = localYmd();
-  const dayStart = todayStartMs();
-  const todayKey = todayRangeKey(ymd);
+  const scope = dayScope();
+  const stillCurrent = () => trayDay === (scope.past ? "yesterday" : "today");
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
+  const peek = dayPeekers(scope);
 
-  const cached = buildOverviewData(ymd);
+  const cached = buildOverviewData(scope);
+
+  // 今天拉到当前时刻；昨天拉完整自然日 [0 点, 次日 0 点)，终点退 1ms 与主窗口口径一致
+  const aggRange = scope.past
+    ? { start: scope.start, end: scope.end - 1 }
+    : { start: scope.start, end: Date.now() };
+  const scanArgs = scope.past
+    ? { sinceMs: scope.start, untilMs: scope.end, force }
+    : { sinceMs: scope.start, force };
 
   const jobs = [];
   const fetchErrors = new Map();
   for (const a of cursorAccounts) {
-    if (!needsTodayFetch(peekAggForDay(a.id, ymd), force)) continue;
+    if (!needsDayFetch(peek.agg(a.id), force)) continue;
     jobs.push(
-      fetchCursorAggregate(a, todayKey, { start: dayStart, end: Date.now(), force }).catch((error) => {
+      fetchCursorAggregate(a, scope.aggKey, { ...aggRange, force }).catch((error) => {
         fetchErrors.set(a.id, resetError(error));
       })
     );
   }
-  if (needsTodayFetch(peekScanForDay(ymd, ""), force)) {
+  if (needsDayFetch(peek.scan(""), force)) {
     jobs.push(
-      fetchCodexScan({ sinceMs: dayStart, force }).catch((error) => {
+      fetchCodexScan(scanArgs).catch((error) => {
         fetchErrors.set("local", resetError(error));
       })
     );
   }
-  if (needsTodayFetch(peekClaudeScanForDay(ymd, ""), force)) {
+  if (needsDayFetch(peek.claude(""), force)) {
     jobs.push(
-      fetchClaudeScan({ sinceMs: dayStart, force }).catch((error) => {
+      fetchClaudeScan(scanArgs).catch((error) => {
         fetchErrors.set("local-claude", resetError(error));
       })
     );
   }
 
-  if (cached.data.rows.length) renderOverview(cached.data, cached.at);
+  if (cached.data.rows.length) renderOverview(cached.data, cached.at, scope);
   else if (!jobs.length) overviewTip("暂无用量数据");
 
   if (!jobs.length) return;
   overviewLoading = true;
   syncHeaderRefresh();
-  if (!cached.data.rows.length && !overviewDom) overviewTip("正在统计今日用量…");
+  if (!cached.data.rows.length && !overviewDom) overviewTip(`正在统计${scope.word}用量…`);
   try {
     await Promise.allSettled(jobs);
-    const next = buildOverviewData(ymd);
+    if (!stillCurrent()) return;
+    const next = buildOverviewData(scope);
     applyOverviewErrors(next.data, fetchErrors, cursorAccounts);
-    renderOverview(next.data, next.at || Date.now());
+    renderOverview(next.data, next.at || Date.now(), scope);
   } finally {
     overviewLoading = false;
     syncHeaderRefresh();
@@ -1337,7 +1422,13 @@ el("#tray-open").addEventListener("click", () => { void invoke("tray_open_main")
 for (const btn of document.querySelectorAll(".tray-tab")) {
   btn.addEventListener("click", () => setTab(btn.dataset.tab));
 }
+// 总览统计日切换：今天 / 昨天
+el("#tray-day").addEventListener("click", (event) => {
+  const btn = event.target instanceof Element ? event.target.closest("[data-day]") : null;
+  if (btn) setDay(btn.dataset.day);
+});
 applyTab();
+applyDayHead();
 // 面板每次被托盘点击唤起（获得焦点）时重载缓存数据；
 // 只清状态条、重绘当前 tab，不触碰切换弹窗（进行中的弹窗须保持原状）
 window.addEventListener("focus", () => {

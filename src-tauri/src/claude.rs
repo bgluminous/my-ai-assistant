@@ -499,23 +499,28 @@ impl Dedupe {
 }
 
 /// 扫描本机 Claude Code 会话日志并折算等价费用。since_ms（unix 毫秒）优先于
-/// days 滚动窗口，两者皆无则不过滤。重活丢到阻塞线程池，避免冻住 UI。
+/// days 滚动窗口，两者皆无则不过滤；until_ms（可选，开区间）为过滤终点，
+/// 与 since_ms 搭配可表达「昨天」这类完整自然日。重活丢到阻塞线程池，避免冻住 UI。
 #[tauri::command]
 pub async fn claude_scan_sessions(
     app: tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
+    until_ms: Option<i64>,
     home: Option<String>,
 ) -> Result<ClaudeScan, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_sessions_blocking(&app, days, since_ms, home))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_sessions_blocking(&app, days, since_ms, until_ms, home)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn scan_sessions_blocking(
     _app: &tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
+    until_ms: Option<i64>,
     home: Option<String>,
 ) -> Result<ClaudeScan, String> {
     let table = pricing::load();
@@ -524,6 +529,7 @@ fn scan_sessions_blocking(
         Some(ms) => DateTime::from_timestamp_millis(ms),
         None => days.map(|d| Utc::now() - Duration::days(d.max(0))),
     };
+    let until = until_ms.and_then(DateTime::from_timestamp_millis);
     let mut dedupe = Dedupe::new();
     let mut sessions: HashSet<String> = HashSet::new();
     let mut files_scanned = 0usize;
@@ -580,6 +586,11 @@ fn scan_sessions_blocking(
             for cr in file_rows {
                 if let (Some(cut), Some(ts)) = (cutoff, cr.ts) {
                     if ts < cut {
+                        continue;
+                    }
+                }
+                if let (Some(u), Some(ts)) = (until, cr.ts) {
+                    if ts >= u {
                         continue;
                     }
                 }

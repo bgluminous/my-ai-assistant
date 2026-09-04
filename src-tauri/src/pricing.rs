@@ -186,8 +186,9 @@ pub struct UsageAggregate {
     pub total_cache_write_usd: f64,
     /// 按本地自然日合计，日期升序。无时间戳的行不在此列。
     pub daily: Vec<DailyUsage>,
-    /// 聚合执行日当天的按小时合计，小时升序，仅含有数据的小时。
-    /// 无论统计范围多长都只记当天（最多 24 条），供「今天」跨度的 24h 柱图。
+    /// 聚合执行日的今天与昨天的按小时合计，按日期、小时升序，仅含有数据的小时。
+    /// 无论统计范围多长都只记这两天（最多 48 条），供「今天」/「昨天」跨度的 24h 柱图；
+    /// 前端按 date 取所需的那一天。
     pub hourly: Vec<HourlyUsage>,
 }
 
@@ -216,9 +217,15 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
     let mut map: BTreeMap<String, ModelUsage> = BTreeMap::new();
     let mut daily_map: BTreeMap<String, DailyUsage> = BTreeMap::new();
     let mut daily_models: BTreeMap<String, BTreeMap<String, DailyModelUsage>> = BTreeMap::new();
-    // 当天按小时合计：(tokens, equivalent_usd, actual_usd)
-    let today_ymd = Local::now().format("%Y-%m-%d").to_string();
-    let mut hourly_map: BTreeMap<u32, (f64, f64, f64)> = BTreeMap::new();
+    // 今天与昨天的按小时合计：(date, hour) -> (tokens, equivalent_usd, actual_usd)。
+    // 昨天用日历日回退（而非减 24 小时），夏令时切换日也不会算错日期。
+    let today = Local::now().date_naive();
+    let today_ymd = today.format("%Y-%m-%d").to_string();
+    let yesterday_ymd = today
+        .pred_opt()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    let mut hourly_map: BTreeMap<(String, u32), (f64, f64, f64)> = BTreeMap::new();
     for mut r in rows {
         // 同一模型的不同思考 / 效率等级并入一行统计（价格表精确收录的名字保持独立）
         r.model = crate::model_match::display_key(table, &r.model);
@@ -250,8 +257,10 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
             let tokens = r.input + r.output + r.cache_read + r.cache_write;
             let equivalent_usd = row_equivalent_usd(&r, table);
             let actual_usd = r.actual_cents / 100.0;
-            if date == today_ymd {
-                let slot = hourly_map.entry(hour).or_insert((0.0, 0.0, 0.0));
+            if date == today_ymd || date == yesterday_ymd {
+                let slot = hourly_map
+                    .entry((date.clone(), hour))
+                    .or_insert((0.0, 0.0, 0.0));
                 slot.0 += tokens;
                 slot.1 += equivalent_usd;
                 slot.2 += actual_usd;
@@ -366,8 +375,8 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
             .collect(),
         hourly: hourly_map
             .into_iter()
-            .map(|(hour, (tokens, equivalent_usd, actual_usd))| HourlyUsage {
-                date: today_ymd.clone(),
+            .map(|((date, hour), (tokens, equivalent_usd, actual_usd))| HourlyUsage {
+                date,
                 hour,
                 tokens,
                 equivalent_usd,
@@ -748,21 +757,40 @@ mod daily_tests {
     }
 
     #[test]
-    fn hourly_buckets_only_for_today() {
+    fn hourly_buckets_only_for_today_and_yesterday() {
         use chrono::Timelike;
         let table = defaults();
-        let now_ms = Local::now().timestamp_millis();
+        let now = Local::now();
+        let now_ms = now.timestamp_millis();
+        // 昨天同一时刻：按日历日回退，取该日中午避开夏令时切换的边界小时
+        let yesterday_noon = now
+            .date_naive()
+            .pred_opt()
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .unwrap();
+        let yesterday_ms = yesterday_noon.timestamp_millis();
         let old = ms("2026-06-15T12:00:00Z");
         let agg = aggregate_and_price(
-            vec![row("gpt-5", 100.0, Some(now_ms)), row("gpt-5", 50.0, Some(old))],
+            vec![
+                row("gpt-5", 100.0, Some(now_ms)),
+                row("gpt-5", 30.0, Some(yesterday_ms)),
+                row("gpt-5", 50.0, Some(old)),
+            ],
             &table,
         );
-        // 只有今天的行进入 hourly，旧日期不进入
-        assert_eq!(agg.hourly.len(), 1);
-        let h = &agg.hourly[0];
-        let local = DateTime::from_timestamp_millis(now_ms).unwrap().with_timezone(&Local);
-        assert_eq!(h.date, local.format("%Y-%m-%d").to_string());
-        assert_eq!(h.hour, local.hour());
+        // 今天与昨天的行进入 hourly（日期升序：昨天在前），更早的日期不进入
+        assert_eq!(agg.hourly.len(), 2);
+        let y = &agg.hourly[0];
+        assert_eq!(y.date, yesterday_noon.format("%Y-%m-%d").to_string());
+        assert_eq!(y.hour, 12);
+        assert_eq!(y.tokens, 30.0);
+        let h = &agg.hourly[1];
+        assert_eq!(h.date, now.format("%Y-%m-%d").to_string());
+        assert_eq!(h.hour, now.hour());
         assert_eq!(h.tokens, 100.0);
     }
 }

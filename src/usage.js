@@ -8,7 +8,6 @@ import {
   fetchClaudeScan,
   purgeAccountCache,
   purgeMissingAccounts,
-  clearUsageMemoryCache,
   setUsageCacheTtlMs,
   DEFAULT_USAGE_TTL_MS,
   USAGE_CACHE_PREFIX,
@@ -16,7 +15,9 @@ import {
   USAGE_CACHE_ORIGIN,
   forgetUsageCacheFromEvent,
   todayRangeKey,
+  dayRangeKey,
   todayStartMs,
+  dayStartMs,
 } from "./usage_data.js";
 import {
   getAccounts,
@@ -34,16 +35,23 @@ import { generateCursorSnapshot } from "./snapshot.js";
 // 分别由本地扫描（CODEX_HOME / CLAUDE_CONFIG_DIR）折算，在总览中作为独立来源行参与合并。
 // 视图：全部总览（各 Cursor 账户 + 本地 Codex + 本地 Claude 合并）/ 单个 Cursor 账户 /
 // 本地 Codex 用量分析 / 本地 Claude 用量分析。
-// 时间跨度为二级 TAB（今天 / 近 7 / 30 天 / 全部），默认今天；
-// 「今天」用与托盘总览相同的今日缓存键（today:YYYY-MM-DD），两边数据互通，
-// 且按日图切换为当天 0–23 时的 24 小时柱（数据来自聚合结果的 hourly 序列）。
+// 时间跨度为二级 TAB（今天 / 昨天 / 近 7 / 30 天 / 全部），默认今天；
+// 「今天」用与托盘总览相同的今日缓存键（today:YYYY-MM-DD），两边数据互通；
+// 「昨天」用完整自然日键（day:YYYY-MM-DD）。这两个单日跨度下按日图切换为该日 0–23 时的
+// 24 小时柱（数据来自聚合结果的 hourly 序列，后端只记今天与昨天两天）。
+// 所有柱图横轴统一从左到右由旧到新。
 //
 // 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v4:）。
 // 打开视图时先用缓存（含过期缓存）立即渲染，再在后台拉取最新数据原地刷新（stale-while-revalidate）。
 //
-// 统一刷新：任何入口（账户页 / 托盘 / 本页「刷新」/ 定时刷新）刷新账户状态后，
-// 本页监听账户变化检测「刚刷新过的账户」，后台强制预取其用量写入共享缓存——
-// 之后进入本页直接命中新缓存，不再重复统计；本页「刷新」也反向顺带刷新账户状态。
+// 刷新模型——只有两类入口会真正重新统计，其余一律只从缓存重绘：
+// 1. 看数据：进入本页 / 切换数据源或跨度 / 再点当前 chip。结果区展示的正是当前视图且未过期
+//    则什么都不做；否则重新加载当前视图，各来源缓存在有效期内直接命中，过期的才走网络。
+//    「刷新」与本地「扫描」按钮是强制版（忽略缓存）。
+// 2. 统一刷新：任何入口（账户页 / 托盘 / 本页「刷新」/ accounts.js 的定时刷新）刷新账户状态后，
+//    本页检测「刚刷新过的账户」，后台按当前跨度强制预取其用量写入共享缓存；预取完成或托盘
+//    写入缓存后，本页只用缓存原地重绘当前视图（rerenderFromCache），不会顺带重新统计其它来源。
+//    定时刷新只有 accounts.js 一个定时器，本页不再自带定时器（同一间隔两条链会重复拉取）。
 
 const DEFAULT_TTL_MS = DEFAULT_USAGE_TTL_MS; // 未开启定时刷新时的结果缓存有效期
 const OVERVIEW_CONCURRENCY = 2;
@@ -51,20 +59,21 @@ const OVERVIEW_CONCURRENCY = 2;
 const PREFETCH_MIN_AGE_MS = 60_000;
 
 let selection = "all"; // "all" | "local"（本地 Codex）| "local-claude" | Cursor 账户 id
-let span = "today"; // 时间跨度："today" | "7" | "30" | "0"（全部）
+let span = "today"; // 时间跨度："today" | "yesterday" | "7" | "30" | "0"（全部）
 let loadSeq = 0; // 加载序号，防止过期的异步结果覆盖新视图
 let loading = false;
 let panelVisible = false;
 let renderedFor = ""; // 结果区当前展示的 selection+range（隐藏时为空）
 let renderedAt = 0; // 结果区数据的获取时间（显示「更新于」与缓存标记）
 let lastAttemptAt = 0; // 最近一次完整加载的完成时间（新鲜度门控；失败来源不再把整页永久拖成过期）
-let usageInterval = 0; // 定时刷新间隔（分钟，0 = 关闭），与账户状态刷新共用同一设置
-let usageTimerId = null;
+let usageInterval = 0; // 定时刷新间隔（分钟，0 = 关闭），与账户状态刷新共用；本页只用它推导缓存有效期
 let accountIdsSig = "";
 const overviewResults = new Map(); // accountId -> { state, agg?, error? }
-const seenRefreshAt = new Map(); // accountId -> lastRefreshAt，检测「刚刷新过的账户」触发用量预取
+// accountId -> { at: lastRefreshAt, token }：检测「刚刷新过」（触发用量预取）与「凭据刚更换」（作废旧缓存）
+const seenAccounts = new Map();
 let seenInitialized = false; // 首批账户快照只登记不预取（启动时账户数据来自磁盘，并非刚刷新）
 let rerenderTimer = null; // 预取完成 / 对端缓存写入后的重渲染合并计时器
+let cacheDirty = false; // 页面隐藏期间共享缓存有过更新，下次显示先从缓存重绘
 
 /* ---------- 图表主题 ---------- */
 
@@ -126,21 +135,38 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-const SPAN_LABELS = { today: "今天", 7: "近 7 天", 30: "近 30 天", 0: "全部" };
+const SPAN_LABELS = { today: "今天", yesterday: "昨天", 7: "近 7 天", 30: "近 30 天", 0: "全部" };
 
 function isTodaySpan() {
   return span === "today";
 }
-/** Cursor 聚合的缓存键：今天用 today:YYYY-MM-DD（与托盘共用），其余为天数 / 0。 */
-function rangeKey() {
-  return isTodaySpan() ? todayRangeKey() : span;
+function isYesterdaySpan() {
+  return span === "yesterday";
 }
-/** 本地 Codex 扫描的缓存键：今天同上，其余为天数 / all。 */
+/** 单日跨度（今天 / 昨天）：按小时柱图、隐藏与月费对比的倍数。 */
+function isSingleDaySpan() {
+  return isTodaySpan() || isYesterdaySpan();
+}
+/** 单日跨度所展示的那一天（本地 YYYY-MM-DD）。 */
+function focusYmd() {
+  return localYmd(new Date(dayStartMs(isYesterdaySpan() ? -1 : 0)));
+}
+/** 单日跨度的缓存键：今天 today:YYYY-MM-DD（与托盘共用），昨天 day:YYYY-MM-DD（完整自然日）。 */
+function singleDayKey() {
+  return isYesterdaySpan() ? dayRangeKey(focusYmd()) : todayRangeKey();
+}
+/** Cursor 聚合的缓存键：单日跨度见 singleDayKey，其余为天数 / 0。 */
+function rangeKey() {
+  return isSingleDaySpan() ? singleDayKey() : span;
+}
+/** 本地 Codex / Claude 扫描的缓存键：单日跨度同上，其余为天数 / all。 */
 function scanKey() {
-  return isTodaySpan() ? todayRangeKey() : span === "0" ? "all" : span;
+  return isSingleDaySpan() ? singleDayKey() : span === "0" ? "all" : span;
 }
 function rangeBounds() {
   if (isTodaySpan()) return { start: todayStartMs(), end: Date.now() };
+  // 昨天：[昨日 0 点, 今日 0 点)，终点退 1ms 避免把今天第一毫秒的事件算进去
+  if (isYesterdaySpan()) return { start: dayStartMs(-1), end: dayStartMs(0) - 1 };
   const days = Number(span);
   if (days > 0) {
     const end = Date.now();
@@ -150,6 +176,12 @@ function rangeBounds() {
 }
 function rangeText() {
   return SPAN_LABELS[span] || "全部";
+}
+/** 单日跨度的说明尾巴（结果区 meta 文案）。 */
+function singleDayTail() {
+  return isYesterdaySpan()
+    ? `柱图为昨日（${focusYmd()}）0–24 时分布`
+    : "柱图为今日 0–24 时分布（当前小时高亮）";
 }
 
 function maskToken(token) {
@@ -203,34 +235,16 @@ function isRenderedFresh() {
   );
 }
 
-function rebuildUsageTimer() {
-  if (usageTimerId != null) {
-    clearInterval(usageTimerId);
-    usageTimerId = null;
-  }
-  if (usageInterval > 0) {
-    usageTimerId = setInterval(() => {
-      // 页面可见时重新统计当前视图：到点时结果恰好过期（TTL = 刷新间隔），
-      // 走缓存过期逻辑即可；期间被手动刷新过的来源仍在有效期内则自动跳过。
-      // 不可见时仅作废缓存，下次打开自动重拉。
-      if (panelVisible && !loading) {
-        loadView(false);
-      } else {
-        clearUsageMemoryCache();
-        renderedAt = 0;
-        lastAttemptAt = 0;
-      }
-    }, usageInterval * 60_000);
-  }
-}
-
-/** 与持久化的定时刷新设置同步（初次加载 / 设置弹窗修改时）。 */
+/**
+ * 与持久化的定时刷新设置同步（初次加载 / 设置弹窗修改时）：只更新缓存有效期。
+ * 定时重新统计本身由 accounts.js 的定时器驱动——账户状态刷新完成后经 prefetchUsageFor
+ * 预取用量，本页不再自带第二个定时器。
+ */
 function syncUsageInterval(minutes) {
   const n = Number(minutes);
   if (!Number.isFinite(n) || n === usageInterval) return;
   usageInterval = n;
   setUsageCacheTtlMs(usageInterval > 0 ? usageInterval * 60_000 : DEFAULT_TTL_MS);
-  rebuildUsageTimer();
 }
 
 /* ---------- 结果区渲染（卡片 / 图表 / 明细表） ---------- */
@@ -326,19 +340,19 @@ function localYmd(d) {
 function addLocalDays(d, n) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 }
-/** 按日图的横轴天数（仅非「今天」跨度使用；今天跨度走 24h 小时图）。全部 = 0（从最早日期起）。 */
+/** 按日图的横轴天数（仅多日跨度使用；今天 / 昨天走 24h 小时图）。全部 = 0（从最早日期起）。 */
 function chartRangeDays() {
   const n = Number(span);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
-/** 按日图横轴日期，最新在左（今天最左，越往右越旧）。 */
+/** 按日图横轴日期，从左到右由旧到新（今天在最右），与小时图 0:00 → 23:00 的方向一致。 */
 function dailyAxisLabels(sources) {
   const days = chartRangeDays();
   const now = new Date();
   const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   if (days > 0) {
     const labels = [];
-    for (let i = 0; i < days; i += 1) labels.push(localYmd(addLocalDays(today0, -i)));
+    for (let i = days - 1; i >= 0; i -= 1) labels.push(localYmd(addLocalDays(today0, -i)));
     return labels;
   }
   let min = null;
@@ -349,7 +363,7 @@ function dailyAxisLabels(sources) {
   }
   if (!min) {
     const labels = [];
-    for (let i = 0; i <= 6; i += 1) labels.push(localYmd(addLocalDays(today0, -i)));
+    for (let i = 6; i >= 0; i -= 1) labels.push(localYmd(addLocalDays(today0, -i)));
     return labels;
   }
   const labels = [];
@@ -361,7 +375,7 @@ function dailyAxisLabels(sources) {
     labels.push(localYmd(cur));
     cur = addLocalDays(cur, 1);
   }
-  return labels.reverse();
+  return labels;
 }
 function tickDate(ymd) {
   const p = String(ymd).split("-");
@@ -464,10 +478,11 @@ function collectDailySources() {
 function renderDailyChart(sources) {
   const t = chartTheme();
   const list = Array.isArray(sources) ? sources : [];
-  // 「今天」跨度渲染当天 24 小时柱，0:00 → 23:00 从左到右（未到时段留空），
-  // 其余跨度按日渲染；两种模式共用同一图表实例，切换时原地更新。
-  const hourlyMode = isTodaySpan();
-  el("#chart-daily-title").textContent = hourlyMode ? "按小时 Token（今天）" : "按日 Token";
+  // 单日跨度（今天 / 昨天）渲染该日 24 小时柱，0:00 → 23:00 从左到右（今天未到时段留空），
+  // 其余跨度按日渲染（同样从左到右由旧到新）；两种模式共用同一图表实例，切换时原地更新。
+  const hourlyMode = isSingleDaySpan();
+  const dayLabel = isYesterdaySpan() ? "昨天" : "今天";
+  el("#chart-daily-title").textContent = hourlyMode ? `按小时 Token（${dayLabel}）` : "按日 Token";
   let hours = null;
   let labels;
   if (hourlyMode) {
@@ -477,7 +492,7 @@ function renderDailyChart(sources) {
   } else {
     labels = dailyAxisLabels(list);
   }
-  const ymd = localYmd(new Date());
+  const ymd = focusYmd();
   const baseColors = list.map((_, i) => colorFor(i));
   const meta = [];
   const showActual = [];
@@ -515,8 +530,9 @@ function renderDailyChart(sources) {
     chart.$showActual = showActual;
     chart.$hoverKey = "";
     chart.$hourly = hourlyMode;
-    // 高亮带：小时图标记当前小时列（按日图不再高亮，今天跨度已不走按日模式）
-    chart.$todayIndex = hourlyMode && hours ? hours.indexOf(new Date().getHours()) : -1;
+    chart.$dayLabel = dayLabel;
+    // 高亮带：只有「今天」的小时图标记当前小时列（昨天已是完整的一天，按日图不高亮）
+    chart.$todayIndex = hourlyMode && isTodaySpan() && hours ? hours.indexOf(new Date().getHours()) : -1;
     chart.$todayBandColor = todayBandColor();
   };
 
@@ -564,7 +580,7 @@ function renderDailyChart(sources) {
               const label = chart.data.labels[items[0].dataIndex];
               if (chart.$hourly) {
                 const h = parseInt(label, 10);
-                return Number.isFinite(h) ? `今天 ${h}:00 – ${h + 1}:00` : String(label);
+                return Number.isFinite(h) ? `${chart.$dayLabel || "今天"} ${h}:00 – ${h + 1}:00` : String(label);
               }
               return titleDate(label);
             },
@@ -918,17 +934,22 @@ function fetchAggregate(account, force) {
   return fetchCursorAggregate(account, rangeKey(), { start, end, force });
 }
 
-/** 按当前跨度扫描本地日志：今天用 sinceMs（fetch 层会落到今日键），其余按天数。 */
+/**
+ * 当前跨度对应的本地扫描参数：今天只给起点（fetch 层落到 today: 键），
+ * 昨天给起点 + 终点（落到 day: 键），其余按天数。
+ */
+function scanParams(home, force) {
+  if (isTodaySpan()) return { sinceMs: todayStartMs(), home, force };
+  if (isYesterdaySpan()) return { sinceMs: dayStartMs(-1), untilMs: dayStartMs(0), home, force };
+  return { days: span === "0" ? null : Number(span), home, force };
+}
+
 function fetchScan(home, force) {
-  if (isTodaySpan()) return fetchCodexScan({ sinceMs: todayStartMs(), home, force });
-  const days = span === "0" ? null : Number(span);
-  return fetchCodexScan({ days, home, force });
+  return fetchCodexScan(scanParams(home, force));
 }
 
 function fetchClaudeScanCurrent(home, force) {
-  if (isTodaySpan()) return fetchClaudeScan({ sinceMs: todayStartMs(), home, force });
-  const days = span === "0" ? null : Number(span);
-  return fetchClaudeScan({ days, home, force });
+  return fetchClaudeScan(scanParams(home, force));
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -1065,13 +1086,13 @@ function renderOverviewTable() {
         stateText = "完成";
       }
       // 套餐列：套餐名 + 月费；倍数列：等价费用 ÷ 月费（月费未知或为 0 时为 —；
-      // 「今天」跨度下单日费用对比月费无意义，恒为 —）
+      // 单日跨度（今天 / 昨天）下单日费用对比月费无意义，恒为 —）
       const membership = a.status ? a.status.membershipType : null;
       const planLabel = membership ? membershipLabel(membership) : "";
       const price = planMonthlyUsd(membership);
       const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
       let ratioText = "—";
-      if (agg && price > 0 && !isTodaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
+      if (agg && price > 0 && !isSingleDaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
       if (agg && price != null) {
         totals.planUsd += price;
         totals.planEquiv += agg.totalEquivalentUsd;
@@ -1127,7 +1148,7 @@ function renderOverviewTable() {
     planTd.textContent = totals.planKnown ? `$${totals.planUsd}/月` : "—";
     // 合计倍数只按「套餐月费已知的 Cursor 账户」口径计算，与套餐列保持一致
     const totalRatio =
-      totals.planUsd > 0 && !isTodaySpan() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
+      totals.planUsd > 0 && !isSingleDaySpan() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
     tr.append(
       label,
       spacer,
@@ -1187,13 +1208,13 @@ function renderOverviewMerged() {
   if (cursorCount) sources.push(`${cursorCount} 个 Cursor 账户`);
   if (scanAgg) sources.push("本地 ChatGPT");
   if (claudeScanAgg) sources.push("本地 Claude");
-  // 「今天」跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
-  const tail = isTodaySpan()
-    ? "柱图为今日 0–24 时分布（当前小时高亮）"
+  // 单日跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
+  const tail = isSingleDaySpan()
+    ? singleDayTail()
     : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，选近 30 天时最具参考性）";
   renderAggregate(merged, {
     showActual: true,
-    plan: planKnown && !isTodaySpan() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
+    plan: planKnown && !isSingleDaySpan() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
     metaText: `全部总览 · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
     dailySources: collectDailySources(),
   });
@@ -1318,39 +1339,37 @@ async function loadOverview(force, seq) {
   }
 }
 
-async function loadCursorAccount(account, force, seq) {
-  const renderIt = (agg, at) => {
-    const price = planMonthlyUsd(account.status ? account.status.membershipType : null);
-    const tail = isTodaySpan()
-      ? "柱图为今日 0–24 时分布（当前小时高亮）"
-      : "倍数 = 等价费用 ÷ 套餐月费";
-    renderAggregate(agg, {
-      showActual: true,
-      plan:
-        price != null && !isTodaySpan()
-          ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd }
-          : null,
-      metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
-      dailySources: [
-        { label: accountLabel(account), daily: agg.daily || [], hourly: agg.hourly || [], showActual: true },
-      ],
-    });
-    markUpdated(at);
-    if (agg.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
-  };
+function renderCursorAccount(account, agg, at) {
+  const price = planMonthlyUsd(account.status ? account.status.membershipType : null);
+  const tail = isSingleDaySpan() ? singleDayTail() : "倍数 = 等价费用 ÷ 套餐月费";
+  renderAggregate(agg, {
+    showActual: true,
+    plan:
+      price != null && !isSingleDaySpan()
+        ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd }
+        : null,
+    metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
+    dailySources: [
+      { label: accountLabel(account), daily: agg.daily || [], hourly: agg.hourly || [], showActual: true },
+    ],
+  });
+  markUpdated(at);
+  if (agg.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
+}
 
+async function loadCursorAccount(account, force, seq) {
   // 先渲染缓存（含过期缓存），再后台拉取最新数据（进度不弹 toast，见骨架屏与「更新中…」）
   const cached = getCachedAgg(account);
-  if (cached) renderIt(cached.agg, cached.at);
+  if (cached) renderCursorAccount(account, cached.agg, cached.at);
   try {
     const entry = await fetchAggregate(account, force);
     if (seq !== loadSeq) return;
     clearStatus();
-    renderIt(entry.agg, entry.at);
+    renderCursorAccount(account, entry.agg, entry.at);
   } catch (error) {
     if (seq !== loadSeq) return;
     const fallback = (error && error.usageCache) || cached;
-    if (fallback && fallback.agg) renderIt(fallback.agg, fallback.at);
+    if (fallback && fallback.agg) renderCursorAccount(account, fallback.agg, fallback.at);
     setStatus("bad", fallback ? `更新失败（仍显示上次数据）：${resetError(error)}` : `统计失败：${resetError(error)}`);
   }
 }
@@ -1445,8 +1464,9 @@ async function loadCurrent(force) {
   // 结果区仍展示着当前选择且未过期时无需重载。
   // 此判断必须在递增 loadSeq 之前：否则一次「无操作」的调用（如重复点击当前 chip）
   // 会作废在途加载却不开启新加载——lanes 提前退出、loading 永远无法复位，
-  // 总览行从此冻结在「更新中…」，定时器与账户联动刷新也全部被 loading 挡住。
+  // 总览行从此冻结在「更新中…」，预取后的缓存重绘也全部被 loading 挡住。
   if (!force && isRenderedFresh()) return;
+  cacheDirty = false; // 完整加载本身就会重读缓存
   // 作废所有在途加载，避免旧结果渲染到已切换的视图上
   const seq = ++loadSeq;
   loading = true;
@@ -1499,61 +1519,149 @@ function loadView(force) {
 
 /* ---------- 统一刷新：账户刷新联动预取 / 跨窗口缓存联动 ---------- */
 
-/** 共享缓存有更新（本页预取完成 / 对端窗口写入）后，作废新鲜度并在可见时从缓存重渲染。 */
+/**
+ * 把共享缓存里比 overviewResults 更新的条目合并进来（不发起任何拉取）。
+ * 只替换获取时间变新的来源，其余（含失败态）保持原状；返回是否有变化。
+ */
+function applyCacheToOverview() {
+  let changed = false;
+  const take = (key, cached, field) => {
+    if (!cached) return;
+    const prev = overviewResults.get(key);
+    if (prev && prev.at >= cached.at) return;
+    overviewResults.set(key, { state: "ok", [field]: cached[field], at: cached.at });
+    changed = true;
+  };
+  for (const a of getAccounts().filter((x) => x.kind === "cursor")) take(a.id, getCachedAgg(a), "agg");
+  take("local", getCachedScan(null), "scan");
+  take("local-claude", getCachedClaudeScanCurrent(null), "scan");
+  return changed;
+}
+
+/**
+ * 用共享缓存里的最新条目原地重绘当前视图，不发起任何拉取——后台预取 / 托盘写入到本页的
+ * 唯一落点，其它来源不会因此被顺带重新统计。结果区未展示当前视图（隐藏中 / 跨零点后键
+ * 变化）时不动，交给随后的 loadView 走常规新鲜度判断。
+ */
+function rerenderFromCache() {
+  if (renderedFor !== selectionKey()) return;
+  if (selection === "all") {
+    const changed = applyCacheToOverview();
+    // 状态列总要落地（预取失败的来源从「更新中…」转为错误态），数据没变则不重画卡片与图表
+    renderOverviewTable();
+    if (changed) renderOverviewMerged();
+    return;
+  }
+  if (selection === "local") {
+    const cached = getCachedScan(el("#usage-codex-home").value.trim() || null);
+    if (cached && cached.at > renderedAt) renderScan(cached.scan, cached.at);
+    return;
+  }
+  if (selection === "local-claude") {
+    const cached = getCachedClaudeScanCurrent(el("#usage-claude-home").value.trim() || null);
+    if (cached && cached.at > renderedAt) renderClaudeScan(cached.scan, cached.at);
+    return;
+  }
+  const account = currentAccount();
+  const cached = account ? getCachedAgg(account) : null;
+  if (cached && cached.at > renderedAt) renderCursorAccount(account, cached.agg, cached.at);
+}
+
+/**
+ * 共享缓存有更新（本页预取完成 / 对端窗口写入）后的落点：可见时合并 250ms 从缓存重绘；
+ * 隐藏时只记脏标记，下次显示先重绘再走常规新鲜度判断。刻意不作废整页新鲜度——
+ * 否则会连带把其它未过期来源一起重新统计（表现为一个账户刷新完、所有行都变「更新中…」）。
+ */
 function scheduleRerenderFromCache() {
-  renderedAt = 0;
-  lastAttemptAt = 0;
-  if (!panelVisible) return;
+  if (!panelVisible) {
+    cacheDirty = true;
+    return;
+  }
   clearTimeout(rerenderTimer);
   rerenderTimer = setTimeout(() => {
-    if (panelVisible && !loading) loadView(false);
+    if (!panelVisible) {
+      cacheDirty = true;
+      return;
+    }
+    if (loading) return;
+    // 结果区尚未展示当前视图（首次加载全部失败 / 跨零点后今日键变化）：走常规加载，
+    // 刚写入的缓存会直接命中，其余来源按新鲜度决定
+    if (renderedFor === selectionKey()) rerenderFromCache();
+    else loadView(false);
   }, 250);
 }
 
-/** 找出「状态刚刷新过」的账户（lastRefreshAt 变化）；首批快照只登记不算刷新。 */
-function detectRefreshedAccounts(list) {
+/**
+ * 对比上次账户快照：lastRefreshAt 变化且非 0 的为「状态刚刷新过」（触发用量预取）；
+ * Cursor 账户 token 变化的为「凭据刚更换」（旧用量缓存作废；Cursor 的 token 不会自动轮换，
+ * 变化只可能来自用户编辑）。首批快照只登记（启动时账户数据来自磁盘，并非刚刷新）。
+ */
+function diffAccounts(list) {
   const ids = new Set(list.map((a) => a.id));
-  for (const id of [...seenRefreshAt.keys()]) {
-    if (!ids.has(id)) seenRefreshAt.delete(id);
+  for (const id of [...seenAccounts.keys()]) {
+    if (!ids.has(id)) seenAccounts.delete(id);
   }
   const refreshed = [];
+  const rekeyed = [];
   for (const a of list) {
     const at = Number(a.lastRefreshAt) || 0;
-    const prev = seenRefreshAt.get(a.id);
-    seenRefreshAt.set(a.id, at);
-    if (seenInitialized && at > 0 && at !== prev) refreshed.push(a);
+    const prev = seenAccounts.get(a.id);
+    seenAccounts.set(a.id, { at, token: a.token });
+    if (!seenInitialized) continue;
+    if (at > 0 && at !== (prev && prev.at)) refreshed.push(a);
+    if (prev && a.kind === "cursor" && a.token !== prev.token) rekeyed.push(a);
   }
   seenInitialized = true;
-  return refreshed;
+  return { refreshed, rekeyed };
 }
 
 /**
  * 统一刷新的用量侧：不论从哪个入口刷新账户状态（账户页 / 托盘 / 定时 / 本页「刷新」），
- * 都后台按当前跨度强制预取对应来源的用量写入共享缓存，之后进本页直接命中不再重新统计。
- * Cursor 按账户预取；Codex / Claude 账户的账单来自本地日志，任一同类账户刷新
- * 预取一次对应的本地扫描。缓存足够新（刚被本页或托盘拉过）时跳过，避免重复走网络；
- * 并发去重由 usage_data 的 in-flight 表保证（与本页正在进行的统计撞车时复用同一请求）。
+ * 都后台按当前跨度强制预取对应来源的用量写入共享缓存，完成后本页只从缓存重绘
+ * （rerenderFromCache）——这是定时刷新抵达本页的唯一路径。
+ * Cursor 按账户预取；本地 Codex / Claude 扫描：同类账户刷新过则重扫，否则仅在缓存临近 /
+ * 已过期时顺带重扫（只有 Cursor 账户时本地来源也能随定时刷新更新）。
+ * 缓存足够新（刚被本页或托盘拉过）时跳过；并发去重由 usage_data 的 in-flight 表保证
+ * （与本页「刷新」正在进行的强制统计撞车时复用同一请求）。
+ * 总览可见且不在加载中时，把预取中的来源标成「更新中…」，失败则显示错误并保留旧数据。
  */
 function prefetchUsageFor(accounts) {
   const jobs = [];
+  let marked = false;
+  const canMark = panelVisible && !loading && selection === "all" && renderedFor === selectionKey();
+  const enqueue = (key, fetchPromise) => {
+    const prev = canMark ? overviewResults.get(key) : null;
+    if (prev) {
+      overviewResults.set(key, { ...prev, state: "pending" });
+      marked = true;
+    }
+    jobs.push(
+      fetchPromise.catch((error) => {
+        const cur = overviewResults.get(key);
+        if (cur && cur.state === "pending") {
+          overviewResults.set(key, { ...cur, state: "error", error: resetError(error) });
+        }
+      })
+    );
+  };
   for (const a of accounts) {
     if (a.kind !== "cursor") continue;
     const cached = cacheGetAgg(a.id, rangeKey());
     if (cached && Date.now() - cached.at < PREFETCH_MIN_AGE_MS) continue;
-    jobs.push(fetchAggregate(a, true).catch(() => {}));
+    enqueue(a.id, fetchAggregate(a, true));
   }
-  if (accounts.some((a) => a.kind === "codex")) {
-    const cached = cacheGetScan(scanKey(), "");
-    if (!cached || Date.now() - cached.at >= PREFETCH_MIN_AGE_MS) {
-      jobs.push(fetchScan(null, true).catch(() => {}));
-    }
-  }
-  if (accounts.some((a) => a.kind === "claude")) {
-    const cached = cacheGetClaudeScan(scanKey(), "");
-    if (!cached || Date.now() - cached.at >= PREFETCH_MIN_AGE_MS) {
-      jobs.push(fetchClaudeScanCurrent(null, true).catch(() => {}));
-    }
-  }
+  // 本地扫描：同类账户刷新过视同该来源刚被刷新，60s 内扫过才跳过；否则只在缓存临近 / 已过期
+  // 时顺带重扫（阈值取 TTL 提前 60s，避免与定时刷新节拍差几秒而整轮错过）。
+  const scanJob = (key, kind, cached, fetch) => {
+    const minAge = accounts.some((a) => a.kind === kind)
+      ? PREFETCH_MIN_AGE_MS
+      : Math.max(effectiveTtlMs() - PREFETCH_MIN_AGE_MS, PREFETCH_MIN_AGE_MS);
+    if (cached && Date.now() - cached.at < minAge) return;
+    enqueue(key, fetch());
+  };
+  scanJob("local", "codex", cacheGetScan(scanKey(), ""), () => fetchScan(null, true));
+  scanJob("local-claude", "claude", cacheGetClaudeScan(scanKey(), ""), () => fetchClaudeScanCurrent(null, true));
+  if (marked) renderOverviewTable();
   if (!jobs.length) return;
   void Promise.allSettled(jobs).then(() => scheduleRerenderFromCache());
 }
@@ -1636,19 +1744,25 @@ export function initUsage() {
   onAccountsChanged((list) => {
     syncUsageInterval(getRefreshIntervalMinutes());
     const sig = list.map((a) => a.id).join(",");
-    if (sig !== accountIdsSig) {
+    const idsChanged = sig !== accountIdsSig;
+    if (idsChanged) {
       accountIdsSig = sig;
-      renderedAt = 0; // 账户增删后结果区视为过期
-      lastAttemptAt = 0;
       // 清理已删除账户的聚合缓存（内存 + localStorage）
       purgeMissingAccounts(list);
     }
-    for (const a of list) {
-      // 刚更换过凭据（status 与刷新时间都被清空）的账户旧缓存作废
-      if (!a.status && !a.lastRefreshAt) purgeAccountCache(a.id);
+    const { refreshed, rekeyed } = diffAccounts(list);
+    // 刚更换过凭据的账户：旧 token 统计出的用量缓存与总览内存结果一并作废
+    // （只在变化那一次做，不反复广播），重新加载时不再拿旧数据垫底
+    for (const a of rekeyed) {
+      purgeAccountCache(a.id);
+      overviewResults.delete(a.id);
+    }
+    // 账户增删 / 换凭据是结构性变化，结果区视为过期
+    if (idsChanged || rekeyed.length) {
+      renderedAt = 0;
+      lastAttemptAt = 0;
     }
     // 统一刷新：状态刚刷新过的账户（任意入口触发）后台预取其用量
-    const refreshed = detectRefreshedAccounts(list);
     if (refreshed.length) prefetchUsageFor(refreshed);
     const stillExists =
       selection === "all" ||
@@ -1661,18 +1775,24 @@ export function initUsage() {
       if (panelVisible) loadView(false);
       return;
     }
-    // 账户状态更新（如定时刷新）时，同步总览表中的额度 / 套餐信息；
-    // 若结果区数据已过期，顺带重新统计当前视图（loadCurrent 内部有新鲜度与
-    // loading 守卫：数据未过期直接跳过，在途加载进行中也不会重复触发）。
     if (!panelVisible || loading) return;
+    // 账户状态更新时同步总览表中的套餐信息
     if (selection === "all") renderOverviewTable();
-    loadView(false);
+    // 只有结构性变化才重新加载当前视图。状态刷新一律不走这里——否则页面恰好过期时，
+    // 一个账户刷新完会把所有未过期来源一起重新统计（表现为所有行同时变「更新中…」）；
+    // 刷新带来的数据更新由 prefetchUsageFor → rerenderFromCache 逐行落地。
+    if (idsChanged || rekeyed.length) loadView(false);
   });
 
   window.addEventListener("panelshown", (event) => {
-    const shown = !!(event.detail && event.detail.id === "usage-panel");
-    panelVisible = shown;
-    if (shown && !loading) loadView(false);
+    panelVisible = !!(event.detail && event.detail.id === "usage-panel");
+    if (!panelVisible || loading) return;
+    // 隐藏期间后台预取 / 托盘写过缓存：先静默换上新数据，再按常规新鲜度决定是否重新加载
+    if (cacheDirty) {
+      cacheDirty = false;
+      rerenderFromCache();
+    }
+    loadView(false);
   });
 
   // 数字单位切换后，用现有数据即时重绘结果区与总览表
