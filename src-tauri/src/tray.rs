@@ -6,21 +6,14 @@ use tauri::{
     AppHandle, Manager,
 };
 
+use crate::main_window;
+
 /// 单击延迟：等过这段时间仍无第二次点击才弹出面板，避免双击第一下先闪小窗。
 const SINGLE_CLICK_DELAY_MS: u64 = 320;
 /// 两次单击间隔小于此值视为双击（macOS 不发 DoubleClick，靠两次 Click 配对）。
 const DOUBLE_CLICK_MS: i64 = 320;
 /// Windows 在 DoubleClick 之后还会再发一次 Click Up，这段时间内忽略残余点击。
 const DOUBLE_CLICK_LEFTOVER_MS: i64 = 400;
-
-/// 显示并聚焦主窗口（从托盘 / 最小化状态恢复）。
-pub fn show_main_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
-}
 
 /// 托盘面板最近一次因失焦隐藏的毫秒时间戳。
 /// 面板打开时点击托盘图标：焦点丢失会先隐藏面板，紧随其后的 Click 事件若不加
@@ -76,7 +69,7 @@ fn hide_panel_and_show_main(app: &AppHandle) {
     if let Some(panel) = app.get_webview_window("tray") {
         let _ = panel.hide();
     }
-    show_main_window(app);
+    main_window::show(app);
 }
 
 /// 双击托盘：作废待处理单击，隐藏面板并唤起主窗口。
@@ -127,7 +120,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .tooltip("AI 助手 · 用量与费用")
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
+            "show" => main_window::show(app),
             "quit" => app.exit(0),
             _ => {}
         })

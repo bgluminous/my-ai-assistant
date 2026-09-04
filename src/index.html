@@ -179,6 +179,11 @@
 
       <!-- ============ 用量统计 ============ -->
       <section id="usage-panel" class="panel" role="tabpanel" hidden>
+        <!-- 统计进行中提示：窗口顶部居中悬浮（fixed，不占布局、不挡点击），随本面板一起隐藏；
+             文案由 usage.js 按有无已渲染数据切换「统计中… / 更新中…」 -->
+        <div id="usage-loading" class="loading-float" role="status" hidden>
+          <span class="spinner" aria-hidden="true"></span><span id="usage-loading-text">统计中…</span>
+        </div>
         <!-- 筛选工具栏：统计对象 / 时间跨度两组，右侧刷新与数据更新时间 -->
         <div class="surface usage-toolbar">
           <div class="toolbar-group">
@@ -197,7 +202,6 @@
             </div>
             <div class="toolbar-side">
               <span id="usage-updated" class="muted small"></span>
-              <span id="usage-loading" class="muted small updating-hint" hidden>更新中…</span>
               <button id="usage-snapshot" class="icon-action" type="button" title="生成该账户的全量用量快照图片（账户失效后使用本地存档数据）" aria-label="生成用量快照" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
               </button>

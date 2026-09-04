@@ -812,6 +812,9 @@ async function doDelete(id) {
 
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
 
+/** 切换成功的结果弹窗停留秒数，到点自动关闭（按钮上倒计时，期间可手动关闭）。 */
+const SWITCH_RESULT_AUTO_CLOSE_SECONDS = 3;
+
 /**
  * 账户操作弹窗（#switch-modal）：删除确认，以及切换账户的确认 → 分步进度 → 结果。
  * busy 阶段（openBusy / toSteps 之后、finish 之前）忽略 Esc 与关闭按钮，防止流程中途被关；
@@ -821,9 +824,11 @@ const switchModal = {
   phase: "hidden", // hidden | busy | confirm | steps | done
   stepIndex: -1,
   confirmResolve: null,
+  autoCloseTimer: null,
 
   /** 打开弹窗并显示忙碌文案（如「正在检测本地 Cursor…」），期间不可关闭。 */
   openBusy(title, text) {
+    this.stopAutoClose();
     el("#switch-modal-title").textContent = title;
     const body = el("#switch-modal-body");
     body.hidden = false;
@@ -843,6 +848,7 @@ const switchModal = {
   /** 切到确认阶段：显示正文与取消 / 确认按钮，返回用户选择（Esc / 关闭 / 取消 = false）。 */
   toConfirm({ title, body, confirmText, danger }) {
     return new Promise((resolve) => {
+      this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
       const text = el("#switch-modal-body");
       text.hidden = false;
@@ -903,7 +909,10 @@ const switchModal = {
     this.settleStep("fail");
   },
 
-  /** 展示最终结果，底部变单个「关闭」按钮，此后允许 Esc / 关闭。 */
+  /**
+   * 展示最终结果，底部变单个「关闭」按钮，此后允许 Esc / 关闭。
+   * 成功结果几秒后自动关闭（按钮上倒计时）；失败结果保留，等用户看完手动关闭。
+   */
   finish(ok, message) {
     el("#switch-modal-body").hidden = true;
     const status = el("#switch-modal-status");
@@ -918,10 +927,36 @@ const switchModal = {
     btn.classList.remove("danger");
     this.phase = "done";
     btn.focus();
+    if (ok) this.startAutoClose();
+  },
+
+  /** 结果阶段倒计时：按钮显示「关闭（3s）」逐秒递减，归零自动 close。 */
+  startAutoClose() {
+    this.stopAutoClose();
+    const btn = el("#switch-ok");
+    let remain = SWITCH_RESULT_AUTO_CLOSE_SECONDS;
+    const tick = () => {
+      if (remain <= 0) {
+        this.close();
+        return;
+      }
+      btn.textContent = `关闭（${remain}s）`;
+      remain -= 1;
+      this.autoCloseTimer = setTimeout(tick, 1000);
+    };
+    tick();
+  },
+
+  stopAutoClose() {
+    if (this.autoCloseTimer) {
+      clearTimeout(this.autoCloseTimer);
+      this.autoCloseTimer = null;
+    }
   },
 
   /** 隐藏弹窗并复位。 */
   close() {
+    this.stopAutoClose();
     if (this.confirmResolve) {
       const resolve = this.confirmResolve;
       this.confirmResolve = null;

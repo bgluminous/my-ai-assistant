@@ -914,8 +914,55 @@ td.account-actions { white-space: nowrap; }
 .usage-toolbar .toolbar-group + .toolbar-group { border-top: 1px solid var(--border); padding-top: 12px; }
 .toolbar-label { flex: none; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); }
 .toolbar-side { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
-.updating-hint { animation: hint-pulse 1.2s ease-in-out infinite; }
-@keyframes hint-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* 统计进行中：顶部悬浮提示 + 表格状态格，共用环形旋转指示 */
+.spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  animation: icon-spin 0.8s linear infinite;
+}
+/* 窗口顶部居中悬浮的胶囊：不透明 surface 底 + 阴影，任何内容上都可读；
+   不参与布局、不拦截点击；层级低于弹窗（.modal 为 100） */
+.loading-float {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 16px 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--text-strong);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  transform: translateX(-50%);
+  animation: float-in 0.22s ease-out;
+}
+.loading-float .spinner { width: 14px; height: 14px; }
+@keyframes float-in {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.cell-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  color: var(--accent);
+  font-weight: 600;
+}
 
 /* 加载骨架：模拟结果区布局（卡片行 / 宽图 / 双图 / 表格行），微光扫过 */
 .usage-skeleton { display: flex; flex-direction: column; gap: 14px; }
@@ -942,7 +989,7 @@ td.account-actions { white-space: nowrap; }
 .skeleton-lines .skeleton-block:nth-child(3) { width: 84%; }
 @keyframes skeleton-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-block, .updating-hint { animation: none; }
+  .skeleton-block, .spinner, .loading-float { animation: none; }
 }
 
 /* 时间跨度二级 TAB：胶囊分段容器，内部复用 .seg 按钮样式 */

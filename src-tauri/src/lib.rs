@@ -11,6 +11,7 @@ mod cursor_local;
 mod http;
 mod launch;
 mod local_client;
+mod main_window;
 mod model_match;
 mod paths;
 mod pricing;
@@ -46,11 +47,7 @@ pub fn run() {
         // 单实例：重复启动不再新开进程（多实例会并发读写 settings.json，
         // 撞上写入瞬间的实例会以空数据运行），改为唤出并聚焦已有主窗口。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.unminimize();
-                let _ = win.set_focus();
-            }
+            main_window::show(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -65,7 +62,7 @@ pub fn run() {
             tray::setup(app.handle())?;
             // 最小窗口尺寸运行时兜底（与 tauri.conf.json 的 minWidth/minHeight 一致），
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
-            if let Some(win) = app.get_webview_window("main") {
+            if let Some(win) = app.get_webview_window(main_window::LABEL) {
                 let _ = win.set_min_size(Some(tauri::LogicalSize::new(1180.0, 640.0)));
                 // 主窗口以隐藏状态创建（消除启动白闪），正常由前端首帧渲染后调用 show()；
                 // 若前端初始化异常没能显示，这里兜底拉起，避免窗口永远不可见。
@@ -94,6 +91,8 @@ pub fn run() {
                     let _ = window.hide();
                     tray::note_panel_hidden();
                 }
+                // 主窗口：记录首次显示位置，从任务栏还原时复位
+                _ if window.label() == main_window::LABEL => main_window::on_event(window, event),
                 _ => {}
             }
         })

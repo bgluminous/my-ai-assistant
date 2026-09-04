@@ -42,6 +42,7 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保�
   Claude 切号写入本机 Claude Code 凭据（Windows 为 `~/.claude/.credentials.json`，
   macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。
   客户端路径可手动指定，也可自动搜索常见安装位置。
+  切换成功的结果弹窗 3 秒后自动关闭（按钮上倒计时，可手动关闭）；失败结果保留到手动关闭。
 - ChatGPT / Claude 账户可保存 `refresh_token`。access token 临近过期，或请求返回 401 / 403
   时自动续期，并写回本机凭据（ChatGPT）/ 账户（Claude）。
 
@@ -75,6 +76,7 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保�
   页面可按类型筛选或清空。
 - **系统托盘**：关闭主窗口时转入托盘，定时刷新继续运行。左键单击打开账户面板，双击打开主窗口；
   面板失焦或再次单击后隐藏。托盘菜单提供显示主窗口与退出；只有「退出」结束进程。
+  主窗口隐藏或最小化后再打开，回到本次启动首次显示的位置。
 - **开机启动**：设置中可开启开机自启动（Windows 注册表 Run 项 / macOS LaunchAgent），
   可选「静默启动」——开机拉起时不弹主窗口，仅托盘运行。
 - **数据备份**：设置中可把全部数据（所有设置、账号含 Token、界面偏好）导出为单个 JSON 文件，

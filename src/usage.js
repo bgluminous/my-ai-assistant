@@ -1009,7 +1009,8 @@ function renderOverviewTable() {
   // 一行一个来源：各 Cursor 账户 + 本地 Codex 分析，按总 Token 降序；
   // showActual=false 的来源实扣列恒为 —。统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
   // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
-  const sourceRow = ({ kind, label, stateText, stateBad, at, agg, showActual, planText, ratioText }) => {
+  // 统计中 / 更新中的来源状态格带旋转指示并用强调色，避免与「完成」等静态文案混在一起看不出来。
+  const sourceRow = ({ kind, label, stateText, stateBad, statePending, at, agg, showActual, planText, ratioText }) => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     const ident = document.createElement("div");
@@ -1024,10 +1025,20 @@ function renderOverviewTable() {
     nameTd.append(ident);
 
     const stateTd = document.createElement("td");
-    stateTd.textContent = stateText;
-    if (stateBad) {
-      stateTd.className = "cell-bad";
-      stateTd.title = stateText;
+    if (statePending) {
+      const pending = document.createElement("span");
+      pending.className = "cell-pending";
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      pending.append(spinner, stateText);
+      stateTd.append(pending);
+    } else {
+      stateTd.textContent = stateText;
+      if (stateBad) {
+        stateTd.className = "cell-bad";
+        stateTd.title = stateText;
+      }
     }
 
     const timeTd = document.createElement("td");
@@ -1072,7 +1083,8 @@ function renderOverviewTable() {
       const agg = result && result.agg ? result.agg : null;
       let stateText = "—";
       let stateBad = false;
-      if (result && result.state === "pending") {
+      const statePending = !!result && result.state === "pending";
+      if (statePending) {
         stateText = agg ? "更新中…" : "统计中…";
       } else if (result && result.state === "error") {
         stateText = agg ? `更新失败：${result.error}` : result.error;
@@ -1098,6 +1110,7 @@ function renderOverviewTable() {
         label: a.note || maskToken(a.token),
         stateText,
         stateBad,
+        statePending,
         at: result ? result.at : null,
         agg,
         showActual: true,
@@ -1110,7 +1123,8 @@ function renderOverviewTable() {
       const localAgg = local && local.scan ? local.scan.aggregate : null;
       let localState = "—";
       let localBad = false;
-      if (local && local.state === "pending") {
+      const localPending = !!local && local.state === "pending";
+      if (localPending) {
         localState = localAgg ? "更新中…" : "统计中…";
       } else if (local && local.state === "error") {
         localState = localAgg ? `更新失败：${local.error}` : local.error;
@@ -1123,6 +1137,7 @@ function renderOverviewTable() {
         label: LOCAL_SOURCES[src.kind].label,
         stateText: localState,
         stateBad: localBad,
+        statePending: localPending,
         at: local ? local.at : null,
         agg: localAgg,
         showActual: false,
@@ -1417,7 +1432,7 @@ async function loadCurrent(force) {
   // 作废所有在途加载，避免旧结果渲染到已切换的视图上
   const seq = ++loadSeq;
   loading = true;
-  el("#usage-loading").hidden = false;
+  setLoadingHint(true);
   try {
     if (selection === "all") {
       await loadOverview(force, seq);
@@ -1442,7 +1457,7 @@ async function loadCurrent(force) {
   } finally {
     if (seq === loadSeq) {
       loading = false;
-      el("#usage-loading").hidden = true;
+      setLoadingHint(false);
       // 全部失败等场景什么都没渲染出来，不能让骨架屏永远转下去
       if (el("#usage-results").hidden) el("#usage-skeleton").hidden = true;
       // 记录本轮加载完成时间：失败来源不再把整页拖成永久过期（见 isRenderedFresh）
@@ -1451,15 +1466,23 @@ async function loadCurrent(force) {
   }
 }
 
+/** 统计进行中的界面提示：窗口顶部悬浮胶囊（旋转指示 + 文案）显隐，刷新按钮图标同步旋转。 */
+function setLoadingHint(on) {
+  el("#usage-loading").hidden = !on;
+  el("#usage-refresh").classList.toggle("busy", on);
+}
+
 /**
- * 统一加载入口：发起加载后按同步段结果决定骨架屏——
+ * 统一加载入口：发起加载后按同步段结果决定骨架屏与提示文案——
  * loadCurrent 的同步段会用缓存种子立即渲染（stale-while-revalidate），
- * 走完后结果区仍隐藏说明新视图 / 新跨度无任何缓存，露出骨架占位；
- * 首个结果渲染（renderAggregate）时骨架自动隐藏。
+ * 走完后结果区仍隐藏说明新视图 / 新跨度无任何缓存，露出骨架占位并提示「统计中…」；
+ * 已有旧数据在展示则提示「更新中…」。首个结果渲染（renderAggregate）时骨架自动隐藏。
  */
 function loadView(force) {
   void loadCurrent(!!force);
-  el("#usage-skeleton").hidden = !el("#usage-results").hidden;
+  const nothingShown = el("#usage-results").hidden;
+  el("#usage-skeleton").hidden = !nothingShown;
+  el("#usage-loading-text").textContent = nothingShown ? "统计中…" : "更新中…";
 }
 
 /* ---------- 统一刷新：账户刷新联动预取 / 跨窗口缓存联动 ---------- */
