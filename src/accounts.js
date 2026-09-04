@@ -1,8 +1,21 @@
-import { el, invoke, listen, fmtDateMs, resetError, toast, dismissToast, fillStatus } from "./shared.js";
+import { el, invoke, listen, fmtDateMs, resetError, toast, dismissToast, fillStatus, kindLabel } from "./shared.js";
+import {
+  maskToken,
+  relativeFromMs,
+  relativeFromUnixSeconds,
+  membershipLabel,
+  codexPlanLabel,
+  claudePlanLabel,
+  remainInfo,
+  centsText,
+  usdText,
+  parseCreditsUsd,
+} from "./account_format.js";
 
 // 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
 // 刷新失败时保留旧数据，仅在对应行展示错误。
+// 套餐名 / 月费、Token 打码、相对时间等纯格式化助手见 account_format.js（托盘面板共用）。
 
 // 额度进度条分档颜色（按剩余百分比）：>50% 绿、15%~50% 橙、≤15% 红。
 const QUOTA_WARN_REMAIN_PERCENT = 50;
@@ -13,52 +26,6 @@ const TOKEN_PLACEHOLDERS = {
   codex: "~/.codex/auth.json 里的 tokens.access_token",
   claude: "sk-ant-oat01-…（~/.claude/.credentials.json 里的 accessToken）",
 };
-
-const MEMBERSHIP_LABELS = {
-  free: "Free",
-  pro: "Pro",
-  pro_plus: "Pro+",
-  ultra: "Ultra",
-  enterprise: "Enterprise",
-  business: "Business",
-  team: "Team",
-};
-
-// Codex 套餐名映射（chatgpt_plan_type -> 展示名），未知值原样显示
-const CODEX_PLAN_LABELS = {
-  plus: "Plus",
-  pro: "Pro",
-  team: "Team",
-  enterprise: "Enterprise",
-  business: "Business",
-  free: "Free",
-  edu: "Edu",
-};
-
-// Claude 订阅类型映射（subscription_type -> 展示名），未知值原样显示
-const CLAUDE_PLAN_LABELS = {
-  free: "Free",
-  pro: "Pro",
-  max: "Max",
-  team: "Team",
-  enterprise: "Enterprise",
-};
-
-// Cursor 套餐月费（美元 / 月），用量统计页用于对比等价 API 费用；未收录的套餐（如企业定制）视为未知
-const CURSOR_PLAN_USD = {
-  free: 0,
-  pro: 20,
-  pro_plus: 60,
-  ultra: 200,
-  business: 40,
-  team: 40,
-};
-
-/** Cursor 套餐月费（USD/月）；未知套餐返回 null。 */
-export function planMonthlyUsd(membershipType) {
-  const key = String(membershipType ?? "").trim().toLowerCase();
-  return Object.prototype.hasOwnProperty.call(CURSOR_PLAN_USD, key) ? CURSOR_PLAN_USD[key] : null;
-}
 
 let accounts = [];
 let intervalMinutes = 0;
@@ -96,52 +63,10 @@ export function onAccountsChanged(fn) {
 
 /* ---------- 格式化 ---------- */
 
-export function maskToken(token) {
-  const t = String(token || "").trim();
-  if (!t) return "—";
-  if (t.length > 20) return `${t.slice(0, 12)}…${t.slice(-4)}`;
-  return `${t.slice(0, 4)}…`;
-}
-
 function fmtNum(value) {
   const n = Number(value);
   if (value == null || !Number.isFinite(n)) return "—";
   return Number.isInteger(n) ? n.toLocaleString("zh-CN") : n.toFixed(2);
-}
-
-function relativeFromMs(ms) {
-  const diff = Date.now() - ms;
-  if (diff < 60_000) return "刚刚";
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return new Date(ms).toLocaleDateString("zh-CN");
-}
-
-/** 账户上次刷新时间的相对文案（如 5 分钟前），托盘面板也在用。 */
-export function relativeFromUnixSeconds(seconds) {
-  const n = Number(seconds);
-  if (seconds == null || !Number.isFinite(n) || n <= 0) return "—";
-  return relativeFromMs(n * 1000);
-}
-
-export function membershipLabel(value) {
-  const key = String(value ?? "").toLowerCase();
-  if (!key) return "";
-  return MEMBERSHIP_LABELS[key] || String(value);
-}
-
-export function codexPlanLabel(value) {
-  const key = String(value ?? "").trim().toLowerCase();
-  if (!key) return "";
-  return CODEX_PLAN_LABELS[key] || String(value);
-}
-
-export function claudePlanLabel(value) {
-  const key = String(value ?? "").trim().toLowerCase();
-  if (!key) return "";
-  return CLAUDE_PLAN_LABELS[key] || String(value);
 }
 
 /* ---------- 状态提示 ---------- */
@@ -218,15 +143,6 @@ function fillStateCell(cell, account) {
     e.title = String(error);
     cell.append(e);
   }
-}
-
-/** 到期剩余时长的紧凑文本（Nd / Nh / <1h）；已过期返回 expired=true。托盘面板也在用。 */
-export function remainInfo(endMs) {
-  const remainMs = endMs - Date.now();
-  if (remainMs <= 0) return { text: "已到期", expired: true };
-  const days = Math.floor(remainMs / 86_400_000);
-  const hours = Math.floor(remainMs / 3_600_000);
-  return { text: days >= 1 ? `${days}d` : hours >= 1 ? `${hours}h` : "<1h", expired: false };
 }
 
 /** 到期倒计时节点（已过期标红「已到期」），详情由调用方放 title。 */
@@ -389,20 +305,6 @@ function cursorSummaryNodes(status) {
   return { bars, meta };
 }
 
-/** 美分 -> 美元文本（千分位 + 两位小数），无效值返回 —。 */
-function centsText(cents) {
-  const n = Number(cents);
-  if (!Number.isFinite(n)) return "—";
-  return usdText(n / 100);
-}
-
-/** 美元金额文本（千分位 + 两位小数）。 */
-function usdText(usd) {
-  const n = Number(usd);
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 /** 超额列（Cursor）：超出套餐的按需消费金额 + 可选的上限小字；未开启或无数据为 —。 */
 function fillOnDemandCell(cell, account) {
   const status = account.status || null;
@@ -422,69 +324,6 @@ function fillOnDemandCell(cell, account) {
     limit.textContent = `上限 ${centsText(limitCents)}`;
     cell.append(limit);
   }
-}
-
-/**
- * ChatGPT extra usage：wham/usage 的 credits.balance 是 credit 点数（可带小数），
- * 不是美元。官网余额 = floor(点数) × $0.04（本机实测 2838.51523 → $113.52）。
- */
-const CODEX_CREDIT_USD = 0.04;
-
-function creditsNumber(value) {
-  if (typeof value === "number" || typeof value === "string") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-/**
- * 从 credits 取出点数与美元余额。结构为
- * `{ has_credits, unlimited, balance }`；兼容 available / remaining 别名。
- */
-function parseCreditsUsd(credits) {
-  if (credits == null) return { unlimited: false, units: null, usd: null };
-  let raw = creditsNumber(credits);
-  let unlimited = false;
-  if (raw == null && typeof credits === "object") {
-    unlimited = credits.unlimited === true;
-    for (const key of ["balance", "available", "remaining"]) {
-      raw = creditsNumber(credits[key]);
-      if (raw != null) break;
-    }
-  }
-  if (raw == null) return { unlimited, units: null, usd: null };
-  const units = Math.floor(raw);
-  return { unlimited, units, usd: units * CODEX_CREDIT_USD };
-}
-
-/**
- * 托盘第二行：Cursor 超额紧凑文案。未开启或账户无效返回 null。
- * 有上限时 title 为「上限 $x.xx」，供悬停展示。
- */
-export function onDemandBrief(status) {
-  const onDemand = status && status.alive !== false ? status.onDemand || null : null;
-  if (!onDemand || !onDemand.enabled) return null;
-  const limitCents = Number(onDemand.limit);
-  return {
-    text: `超额 ${centsText(onDemand.used)}`,
-    title: Number.isFinite(limitCents) && limitCents > 0 ? `上限 ${centsText(limitCents)}` : "",
-  };
-}
-
-/**
- * 托盘第二行：Codex Credits 余额紧凑文案。解析不出返回 null。
- * 无限显示「余额 无限」；点数放进 title。
- */
-export function creditsBrief(status) {
-  const credits = status && status.alive !== false ? status.credits : null;
-  if (credits == null) return null;
-  const { unlimited, units, usd } = parseCreditsUsd(credits);
-  if (!unlimited && usd == null) return null;
-  return {
-    text: unlimited ? "余额 无限" : `余额 ${usdText(usd)}`,
-    title: units != null ? `${units.toLocaleString("en-US")} 点` : "",
-  };
 }
 
 /**
@@ -722,10 +561,6 @@ function updateGroupMeta(kind) {
   }
   const text = ts ? `共 ${rows.length} 个 · 上次刷新：${relativeFromMs(ts)}` : `共 ${rows.length} 个`;
   el(`#accounts-count-${kind}`).textContent = rows.length ? text : "";
-}
-
-function kindDisplay(kind) {
-  return kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
 }
 
 /** 卡片标题栏的刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
@@ -1174,7 +1009,7 @@ async function onSwitchAccount(id) {
   render();
   switchModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
   try {
-    const st = await invoke("cursor_client_status", { id });
+    const st = await invoke("cursor_client_status");
     if (!st.exeConfigured) {
       switchModal.finish(false, "未找到 Cursor 可执行文件，请点右上角「设置」配置 Cursor 路径后重试。");
       return;
@@ -1235,7 +1070,7 @@ async function onSwitchCodexAccount(id) {
   render();
   switchModal.openBusy("切换本机 ChatGPT 登录", "正在检测本地 ChatGPT…");
   try {
-    const st = await invoke("codex_client_status", { id });
+    const st = await invoke("codex_client_status");
     if (!st.exeConfigured) {
       switchModal.finish(false, "未找到 ChatGPT，请点右上角「设置」配置路径后重试。");
       return;
@@ -1298,7 +1133,7 @@ async function onSwitchClaudeAccount(id) {
   render();
   switchModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
   try {
-    const st = await invoke("claude_client_status", { id });
+    const st = await invoke("claude_client_status");
     const running = !!st.running;
     const hasDesktop = !!st.exeConfigured;
     const ok = await switchModal.toConfirm(
@@ -1371,7 +1206,7 @@ async function onSwitchClaudeAccount(id) {
 async function onImportLocal(kind) {
   if (importing || switching || refreshAllRunning) return;
   const target = kind === "codex" || kind === "claude" ? kind : "cursor";
-  const label = kindDisplay(target);
+  const label = kindLabel(target);
   importing = true;
   setStatus("", `正在读取本机 ${label} 登录…`);
   render();
@@ -1409,7 +1244,7 @@ async function onImportLocal(kind) {
 async function onExport(kind) {
   if (importing || switching || refreshAllRunning) return;
   const target = kind === "codex" || kind === "claude" ? kind : "cursor";
-  const label = kindDisplay(target);
+  const label = kindLabel(target);
   importing = true;
   setStatus("", `正在导出 ${label} 账户…`);
   render();
@@ -1434,7 +1269,7 @@ async function onExport(kind) {
 async function onImportFile(kind) {
   if (importing || switching || refreshAllRunning) return;
   const target = kind === "codex" || kind === "claude" ? kind : "cursor";
-  const label = kindDisplay(target);
+  const label = kindLabel(target);
   importing = true;
   setStatus("", `正在导入 ${label} 账户…`);
   render();
@@ -1488,7 +1323,7 @@ function setModalKind(kind) {
       : "~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期";
   // OAuth 授权添加仅用于新增 Claude 账户（编辑场景改凭据走手动粘贴）
   el("#account-oauth-field").hidden = modalKind !== "claude" || editingId != null;
-  el("#account-import-local").textContent = `从本机导入 ${kindDisplay(modalKind)}`;
+  el("#account-import-local").textContent = `从本机导入 ${kindLabel(modalKind)}`;
 }
 
 function openModal(account, presetKind) {
@@ -1611,10 +1446,10 @@ async function onOauthFinish() {
 /** 账户数据加载错误码 -> 用户可读文案，未知错误原样显示。 */
 function mapLoadError(err) {
   const msg = resetError(err);
-  if (msg.includes("settings_parse_failed") || msg.includes("accounts_parse_failed")) {
+  if (msg.includes("settings_parse_failed")) {
     return "设置文件损坏，原文件已备份为 settings.json.bad，未被覆盖；请检查后重启应用。";
   }
-  if (msg.includes("settings_read_failed") || msg.includes("accounts_read_failed")) {
+  if (msg.includes("settings_read_failed")) {
     return "设置文件暂时无法读取（可能被安全软件短暂占用），请稍后重试或重启应用。";
   }
   return msg;

@@ -148,7 +148,6 @@ pub async fn usage_snapshot_save(
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let shown = path.to_string_lossy().to_string();
     audit::log(
-        &app,
         "usage_snapshot",
         format!("保存用量快照：{shown}"),
         Some(json!({ "path": shown, "bytes": bytes.len() })),

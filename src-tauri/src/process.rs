@@ -120,7 +120,6 @@ fn windows_toolhelp() -> Vec<ProcessInfo> {
     }
 }
 
-#[allow(dead_code)]
 fn list_macos() -> Vec<ProcessInfo> {
     if !cfg!(target_os = "macos") {
         return Vec::new();

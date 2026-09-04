@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::AppHandle;
 
+use crate::local_client::{
+    kill_pids, launch_detached_windows, path_starts_with_ci, run_hidden, wait_exit, ClientStatus,
+    CloseResult, DetectResult, LaunchResult, SwitchResult,
+};
 use crate::{accounts, audit, http, paths, process, settings};
 
 // ---------------------------------------------------------------------------
@@ -28,14 +32,6 @@ pub struct CodexClientConfig {
 
 fn current() -> CodexClientConfig {
     settings::read(|s| s.codex_client.clone()).unwrap_or_default()
-}
-
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,12 +137,7 @@ pub fn read_local_login() -> accounts::LocalLoginRead {
 /// 账户续期成功后，best-effort 把新凭据回同步进本机 auth.json——仅当本机登录与
 /// 续期账户是同一账号（account_id 均非空且一致）时写入，否则静默跳过。
 /// 任何失败只记审计日志，绝不向调用方报错，不影响刷新主流程。
-pub fn sync_auth_json(
-    app: &AppHandle,
-    access_token: &str,
-    refresh_token: &Option<String>,
-    id_token: Option<&str>,
-) {
+pub fn sync_auth_json(access_token: &str, refresh_token: &Option<String>, id_token: Option<&str>) {
     let Some(path) = auth_json_path() else { return };
     if !path.exists() {
         return;
@@ -158,7 +149,6 @@ pub fn sync_auth_json(
         Ok(v) => v,
         Err(e) => {
             audit::log(
-                app,
                 "codex_sync_failed",
                 format!("同步本机 ChatGPT 登录失败：auth.json 读取/解析失败（{e}）"),
                 None,
@@ -190,14 +180,13 @@ pub fn sync_auth_json(
     }
     if let Err(e) = write_auth_json(&path, &value) {
         audit::log(
-            app,
             "codex_sync_failed",
             format!("同步本机 ChatGPT 登录失败：{e}"),
             None,
         );
         return;
     }
-    audit::log(app, "codex_sync", "已同步本机 ChatGPT 登录凭据".to_string(), None);
+    audit::log("codex_sync", "已同步本机 ChatGPT 登录凭据".to_string(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,15 +195,15 @@ pub fn sync_auth_json(
 
 const CODEX_BUNDLE_ID: &str = "com.openai.codex";
 
-#[cfg(windows)]
+/// Windows：静默执行一段 PowerShell 并返回去空白的 stdout；失败 / 空输出 / 非 Windows 为 None。
 fn powershell_trim(script: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let output = run_hidden(
+        Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", script]),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -224,11 +213,6 @@ fn powershell_trim(script: &str) -> Option<String> {
     } else {
         Some(s)
     }
-}
-
-#[cfg(not(windows))]
-fn powershell_trim(_script: &str) -> Option<String> {
-    None
 }
 
 /// Windows Store 包的 AppID（`OpenAI.Codex_*!App`），用于 shell:AppsFolder 启动。
@@ -270,16 +254,6 @@ fn macos_bundle_id(app: &Path) -> Option<String> {
     }
 }
 
-fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool {
-    let a = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
-    let b = prefix
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase();
-    let b = b.trim_end_matches('\\');
-    a == b || a.starts_with(&format!("{b}\\"))
-}
-
 /// 常见安装位置候选（按优先级，不检查存在性；macOS 的 ChatGPT.app 仅在 bundle id 匹配时加入）。
 fn detect_candidates() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -289,12 +263,12 @@ fn detect_candidates() -> Vec<PathBuf> {
             out.push(app.join("ChatGPT.exe"));
             out.push(app.join("Codex.exe"));
         }
-        if let Some(local) = env_path("LOCALAPPDATA").or_else(paths::data_local_dir) {
+        if let Some(local) = paths::env_nonempty("LOCALAPPDATA").or_else(paths::data_local_dir) {
             let programs = local.join("Programs").join("OpenAI").join("Codex");
             out.push(programs.join("ChatGPT.exe"));
             out.push(programs.join("Codex.exe"));
         }
-        if let Some(pf) = env_path("ProgramFiles") {
+        if let Some(pf) = paths::env_nonempty("ProgramFiles") {
             out.push(pf.join("OpenAI").join("Codex").join("ChatGPT.exe"));
             out.push(pf.join("OpenAI").join("Codex").join("Codex.exe"));
         }
@@ -444,73 +418,28 @@ fn is_windowsapps_path(path: &Path) -> bool {
         .contains(r"\windowsapps\")
 }
 
-#[cfg(windows)]
-fn run_hidden(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW).output()
-}
-
-#[cfg(not(windows))]
-fn run_hidden(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    cmd.output()
-}
-
-fn wait_exit(matcher: &DesktopMatcher, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !matcher.is_running() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-fn kill_pids(pids: &[u32], force: bool) {
-    if cfg!(target_os = "windows") {
-        for pid in pids {
-            let pid_s = pid.to_string();
-            let mut cmd = Command::new("taskkill");
-            cmd.args(["/PID", &pid_s]);
-            if force {
-                cmd.args(["/F", "/T"]);
-            }
-            let _ = run_hidden(&mut cmd);
-        }
-    } else if cfg!(target_os = "macos") {
-        let sig = if force { "-9" } else { "-TERM" };
-        for pid in pids {
-            let _ = Command::new("kill")
-                .args([sig, &pid.to_string()])
-                .output();
-        }
-    }
-}
-
 /// 关闭本地 ChatGPT / Codex Desktop：先优雅退出，约 8 秒超时后强制结束，再等约 3 秒确认。
 fn close_desktop() -> bool {
     let matcher = DesktopMatcher::new();
     if !matcher.is_running() {
         return true;
     }
+    let running = || matcher.is_running();
     if cfg!(target_os = "windows") {
         let pids = matcher.pids();
         kill_pids(&pids, false);
-        if !wait_exit(&matcher, Duration::from_secs(8)) {
+        if !wait_exit(running, Duration::from_secs(8)) {
             kill_pids(&matcher.pids(), true);
-            let _ = wait_exit(&matcher, Duration::from_secs(3));
+            let _ = wait_exit(running, Duration::from_secs(3));
         }
     } else if cfg!(target_os = "macos") {
         // bundle id 在 Codex / ChatGPT 品牌包上相同，避免误关经典 ChatGPT（com.openai.chat）。
         let _ = Command::new("osascript")
             .args(["-e", &format!("tell application id \"{CODEX_BUNDLE_ID}\" to quit")])
             .output();
-        if !wait_exit(&matcher, Duration::from_secs(8)) {
+        if !wait_exit(running, Duration::from_secs(8)) {
             kill_pids(&matcher.pids(), true);
-            let _ = wait_exit(&matcher, Duration::from_secs(3));
+            let _ = wait_exit(running, Duration::from_secs(3));
         }
     }
     !matcher.is_running()
@@ -521,22 +450,6 @@ fn launch_store_app(app_id: &str) -> bool {
         .arg(format!("shell:AppsFolder\\{app_id}"))
         .spawn()
         .is_ok()
-}
-
-/// Windows：脱离本进程 Job 启动，避免本应用退出时把客户端一并杀掉。
-#[cfg(windows)]
-fn launch_detached_windows(exe: &Path) -> bool {
-    use std::os::windows::process::CommandExt;
-    const DETACH_FLAGS: u32 = 0x0100_0000 | 0x0000_0200 | 0x0000_0008;
-    if Command::new(exe).creation_flags(DETACH_FLAGS).spawn().is_ok() {
-        return true;
-    }
-    Command::new("explorer.exe").arg(exe).spawn().is_ok()
-}
-
-#[cfg(not(windows))]
-fn launch_detached_windows(_exe: &Path) -> bool {
-    false
 }
 
 fn launch_path(exe: &Path) -> bool {
@@ -609,13 +522,13 @@ fn view(cfg: &CodexClientConfig) -> CodexClientView {
 }
 
 #[tauri::command]
-pub fn codex_client_get(_app: AppHandle) -> Result<CodexClientView, String> {
+pub fn codex_client_get() -> Result<CodexClientView, String> {
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
-pub fn codex_client_set(_app: AppHandle, exe_path: String) -> Result<CodexClientView, String> {
+pub fn codex_client_set(exe_path: String) -> Result<CodexClientView, String> {
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("codex_exe_invalid".into());
@@ -628,12 +541,6 @@ pub fn codex_client_set(_app: AppHandle, exe_path: String) -> Result<CodexClient
     Ok(view(&cfg))
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DetectResult {
-    pub exe_path: Option<String>,
-}
-
 /// 探测常见安装位置（含 Windows Store 包），不写配置。
 #[tauri::command]
 pub fn codex_client_detect() -> DetectResult {
@@ -644,17 +551,8 @@ pub fn codex_client_detect() -> DetectResult {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClientStatus {
-    pub running: bool,
-    pub exe_configured: bool,
-    pub exe_path: Option<String>,
-}
-
 #[tauri::command]
-pub async fn codex_client_status(id: String) -> Result<ClientStatus, String> {
-    let _ = id;
+pub async fn codex_client_status() -> Result<ClientStatus, String> {
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -665,12 +563,6 @@ pub async fn codex_client_status(id: String) -> Result<ClientStatus, String> {
     })
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseResult {
-    pub closed: bool,
-}
-
 #[tauri::command]
 pub async fn codex_client_close() -> Result<CloseResult, String> {
     let closed = tauri::async_runtime::spawn_blocking(close_desktop)
@@ -679,35 +571,11 @@ pub async fn codex_client_close() -> Result<CloseResult, String> {
     Ok(CloseResult { closed })
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LaunchResult {
-    pub launched: bool,
-}
-
 #[tauri::command]
 pub fn codex_client_launch() -> Result<LaunchResult, String> {
     Ok(LaunchResult {
         launched: launch_desktop(),
     })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SwitchResult {
-    pub switched: bool,
-    pub message: String,
-}
-
-/// 审计显示名：有备注用备注，否则用 token 前 8 字符打码。绝不落全量 token。
-fn display_name(acc: &accounts::Account) -> String {
-    let note = acc.note.trim();
-    if !note.is_empty() {
-        note.to_string()
-    } else {
-        let head: String = acc.token.trim().chars().take(8).collect();
-        format!("{head}…")
-    }
 }
 
 /// 切换本机 ChatGPT 登录：用账户的 refresh_token 换取全新凭据组后写入 auth.json。
@@ -740,11 +608,10 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         None => return Err("codex_no_refresh_token".into()),
     };
 
-    let name = display_name(&acc);
+    let name = accounts::short_display_name(&acc);
     let (token, new_rt, id_token) = match accounts::request_codex_refresh(&rt).await? {
         accounts::RefreshOutcome::Denied { body } => {
             audit::log(
-                &app,
                 "codex_renew_failed",
                 format!("ChatGPT 续期被拒绝：{name}（{body}）"),
                 Some(json!({ "id": id })),
@@ -801,7 +668,6 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
     write_auth_json(&path, &value)?;
 
     audit::log(
-        &app,
         "codex_switch_local",
         format!("切换本机 ChatGPT 登录：{name}"),
         Some(json!({ "id": id })),

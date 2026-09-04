@@ -1,14 +1,13 @@
+//! 审计日志：追加写入 {home}/xilore/myaiassistant/audit.jsonl，每行一条 JSON。
+//! 记录账户增删改、导入导出、状态变化、刷新失败、凭据续期与切号、设置变更等事件。
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tauri::AppHandle;
 
 use crate::paths;
-
-/// 审计日志：追加写入 {home}/xilore/myaiassistant/audit.jsonl，每行一条 JSON。
-/// 记录账户增删改、状态变化、刷新失败、Codex 续期、间隔设置等事件。
 
 /// 文件超过该大小时触发轮转。
 const ROTATE_BYTES: u64 = 2_000_000;
@@ -23,9 +22,8 @@ const MAX_LIMIT: usize = 2000;
 pub struct AuditEntry {
     /// unix 毫秒。
     pub ts: i64,
-    /// 事件类型（account_add / account_update / account_delete / account_import /
-    /// account_import_file / account_export / account_state_changed /
-    /// account_refresh_failed / codex_renewed / codex_renew_failed / interval_set）。
+    /// 事件类型标识（snake_case）。前端 audit.js 的 EVENT_META 按此映射展示标签与筛选分组，
+    /// 新增事件时需同步登记，否则界面显示原始标识且无法按类型筛选。
     pub event: String,
     /// 人类可读描述（中文，敏感信息仅保留打码后的片段）。
     pub message: String,
@@ -39,7 +37,7 @@ fn file_path() -> Result<PathBuf, String> {
 }
 
 /// 追加一条审计记录。写入失败静默忽略，绝不阻断业务流程。
-pub fn log(_app: &AppHandle, event: &str, message: String, detail: Option<Value>) {
+pub fn log(event: &str, message: String, detail: Option<Value>) {
     let entry = AuditEntry {
         ts: Utc::now().timestamp_millis(),
         event: event.to_string(),
@@ -83,7 +81,7 @@ pub struct AuditView {
 }
 
 #[tauri::command]
-pub fn audit_list(_app: AppHandle, limit: Option<usize>) -> Result<AuditView, String> {
+pub fn audit_list(limit: Option<usize>) -> Result<AuditView, String> {
     let path = file_path()?;
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -102,7 +100,7 @@ pub fn audit_list(_app: AppHandle, limit: Option<usize>) -> Result<AuditView, St
 }
 
 #[tauri::command]
-pub fn audit_clear(_app: AppHandle) -> Result<(), String> {
+pub fn audit_clear() -> Result<(), String> {
     let path = file_path()?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;

@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
+use crate::local_client::{
+    launch_detached_windows, wait_exit, ClientStatus, CloseResult, LaunchResult, SwitchResult,
+};
 use crate::{accounts, audit, cursor, http, paths, process, settings};
 
 // ---------------------------------------------------------------------------
@@ -50,29 +53,20 @@ fn auth_db_path() -> Result<PathBuf, String> {
         .join("state.vscdb"))
 }
 
-/// 读环境变量为非空路径。
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-}
-
 /// 常见安装位置候选（按优先级排列，不检查存在性）。
 fn detect_candidates() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if cfg!(target_os = "windows") {
         // 每用户安装（官方默认）：%LOCALAPPDATA%\Programs\cursor\Cursor.exe
-        if let Some(local) = env_path("LOCALAPPDATA").or_else(paths::data_local_dir) {
+        if let Some(local) = paths::env_nonempty("LOCALAPPDATA").or_else(paths::data_local_dir) {
             out.push(local.join("Programs").join("cursor").join("Cursor.exe"));
         }
         // 全机安装：Program Files（目录大小写变体）与 Program Files (x86)
-        if let Some(pf) = env_path("ProgramFiles") {
+        if let Some(pf) = paths::env_nonempty("ProgramFiles") {
             out.push(pf.join("cursor").join("Cursor.exe"));
             out.push(pf.join("Cursor").join("Cursor.exe"));
         }
-        if let Some(pf86) = env_path("ProgramFiles(x86)") {
+        if let Some(pf86) = paths::env_nonempty("ProgramFiles(x86)") {
             out.push(pf86.join("cursor").join("Cursor.exe"));
         }
     } else if cfg!(target_os = "macos") {
@@ -124,20 +118,6 @@ fn is_cursor_running() -> bool {
     process::list_processes().iter().any(is_cursor_process)
 }
 
-/// 轮询等待 Cursor 完全退出：每 300ms 检查一次，直到退出或超时。返回是否已退出。
-fn wait_cursor_exit(timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !is_cursor_running() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
 /// 关闭所有 Cursor 进程：先请求整体优雅退出（给主进程有序收尾的机会，避免下次启动
 /// 弹"意外终止"崩溃提示），约 8 秒超时后强制结束兜底，再等约 3 秒确认。
 /// 命令退出码一律忽略，以进程是否消失为准。返回最终是否已完全关闭。
@@ -148,24 +128,24 @@ fn close_cursor() -> bool {
     if cfg!(target_os = "windows") {
         // 不带 /F：发送正常关闭请求（等价于点窗口关闭按钮），由主进程带子进程有序退出。
         let _ = Command::new("taskkill").args(["/IM", "Cursor.exe"]).output();
-        if !wait_cursor_exit(Duration::from_secs(8)) {
+        if !wait_exit(is_cursor_running, Duration::from_secs(8)) {
             // 兜底：/F /T 强制结束整棵进程树。
             let _ = Command::new("taskkill")
                 .args(["/F", "/T", "/IM", "Cursor.exe"])
                 .output();
-            let _ = wait_cursor_exit(Duration::from_secs(3));
+            let _ = wait_exit(is_cursor_running, Duration::from_secs(3));
         }
     } else if cfg!(target_os = "macos") {
         // AppleScript quit：等价于 Cmd+Q 的正常退出。
         let _ = Command::new("osascript")
             .args(["-e", "tell application \"Cursor\" to quit"])
             .output();
-        if !wait_cursor_exit(Duration::from_secs(8)) {
+        if !wait_exit(is_cursor_running, Duration::from_secs(8)) {
             // 兜底：按可执行路径匹配强杀所有 Cursor.app 相关进程。
             let _ = Command::new("pkill")
                 .args(["-9", "-f", "/Cursor.app/"])
                 .output();
-            let _ = wait_cursor_exit(Duration::from_secs(3));
+            let _ = wait_exit(is_cursor_running, Duration::from_secs(3));
         }
     }
     !is_cursor_running()
@@ -193,28 +173,6 @@ fn launch_cursor() -> bool {
     } else {
         false
     }
-}
-
-/// Windows：以脱离本进程 Job / 进程组的方式启动 Cursor。
-/// dev 及部分启动环境会把本应用连同子进程圈进 kill-on-close 的 Job Object，
-/// 普通 spawn 出的 Cursor 会在本应用退出时被连带结束。
-/// 先带 CREATE_BREAKAWAY_FROM_JOB 启动脱离 Job；Job 禁止 breakaway 时该调用直接失败，
-/// 回退用 explorer.exe 代理启动（新进程父为 explorer，同样不在本应用 Job 内）。
-#[cfg(windows)]
-fn launch_detached_windows(exe: &Path) -> bool {
-    use std::os::windows::process::CommandExt;
-    // CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
-    const DETACH_FLAGS: u32 = 0x0100_0000 | 0x0000_0200 | 0x0000_0008;
-    if Command::new(exe).creation_flags(DETACH_FLAGS).spawn().is_ok() {
-        return true;
-    }
-    Command::new("explorer.exe").arg(exe).spawn().is_ok()
-}
-
-/// 非 Windows 目标不编译上面的 Windows 专用 API；运行时分支也不会走到这里。
-#[cfg(not(windows))]
-fn launch_detached_windows(_exe: &Path) -> bool {
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -356,14 +314,14 @@ fn view(cfg: &CursorClientConfig) -> CursorClientView {
 }
 
 #[tauri::command]
-pub fn cursor_client_get(_app: AppHandle) -> Result<CursorClientView, String> {
+pub fn cursor_client_get() -> Result<CursorClientView, String> {
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 /// 保存手动指定的 Cursor 可执行文件路径；空串 = 清除配置（回到自动搜索）。
 #[tauri::command]
-pub fn cursor_client_set(_app: AppHandle, exe_path: String) -> Result<CursorClientView, String> {
+pub fn cursor_client_set(exe_path: String) -> Result<CursorClientView, String> {
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("cursor_exe_invalid".into());
@@ -624,18 +582,9 @@ pub fn cursor_client_scan_cancel() {
     scan_cancel_flag().store(true, Ordering::SeqCst);
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClientStatus {
-    pub running: bool,
-    pub exe_configured: bool,
-    pub exe_path: Option<String>,
-}
-
-/// 查询本地 Cursor 客户端状态。id 仅为前端契约保留，不校验账户（不因账户问题报错）。
+/// 查询本地 Cursor 客户端状态（不涉及账户，不因账户问题报错）。
 #[tauri::command]
-pub async fn cursor_client_status(id: String) -> Result<ClientStatus, String> {
-    let _ = id;
+pub async fn cursor_client_status() -> Result<ClientStatus, String> {
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -644,12 +593,6 @@ pub async fn cursor_client_status(id: String) -> Result<ClientStatus, String> {
         exe_configured: exe_path.is_some(),
         exe_path,
     })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseResult {
-    pub closed: bool,
 }
 
 /// 关闭本地 Cursor（优雅退出 + 强制兜底 + 轮询确认），最长约 11 秒。
@@ -662,36 +605,12 @@ pub async fn cursor_client_close() -> Result<CloseResult, String> {
     Ok(CloseResult { closed })
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LaunchResult {
-    pub launched: bool,
-}
-
 /// 启动本地 Cursor。找不到可执行文件时 launched=false（不报错）。
 #[tauri::command]
 pub fn cursor_client_launch() -> Result<LaunchResult, String> {
     Ok(LaunchResult {
         launched: launch_cursor(),
     })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SwitchResult {
-    pub switched: bool,
-    pub message: String,
-}
-
-/// 审计显示名：有备注用备注，否则用 token 前 8 字符打码。绝不落全量 token。
-fn display_name(acc: &accounts::Account) -> String {
-    let note = acc.note.trim();
-    if !note.is_empty() {
-        note.to_string()
-    } else {
-        let head: String = acc.token.trim().chars().take(8).collect();
-        format!("{head}…")
-    }
 }
 
 /// 从账户解析邮箱：优先 status.email（字符串），否则若 note 形似邮箱（含 '@'）用 note。
@@ -716,10 +635,7 @@ fn resolve_email(acc: &accounts::Account) -> Option<String> {
 /// 切换本地 Cursor 客户端登录账户：把账户 token 写入本地认证库。
 /// 写库要求 Cursor 已关闭（关闭动作由 cursor_client_close 单独负责）。
 #[tauri::command]
-pub async fn cursor_switch_local(
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<SwitchResult, String> {
+pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
     // 1) 仅支持 Windows / macOS。
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
@@ -762,9 +678,8 @@ pub async fn cursor_switch_local(
 
     // 8) 审计（绝不写入完整 token）。
     audit::log(
-        &app,
         "cursor_switch_local",
-        format!("切换本地 Cursor 登录：{}", display_name(&acc)),
+        format!("切换本地 Cursor 登录：{}", accounts::short_display_name(&acc)),
         Some(json!({ "id": id })),
     );
 

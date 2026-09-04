@@ -1,4 +1,25 @@
-import { el, listen, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, hexAlpha, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, resetError, toast, dismissToast } from "./shared.js";
+import {
+  el,
+  listen,
+  fmtInt,
+  fmtTokens,
+  fmtUsd,
+  compactTokens,
+  fmtShare,
+  colorFor,
+  hexAlpha,
+  chartAnimMs,
+  setChartHoverHit,
+  bindChartHoverLeave,
+  pieSliceLabelsPlugin,
+  resetError,
+  toast,
+  dismissToast,
+  escapeHtml,
+  kindLabel,
+  tickDate,
+  topSlices,
+} from "./shared.js";
 import {
   getCachedAgg as cacheGetAgg,
   getCachedScan as cacheGetScan,
@@ -18,16 +39,12 @@ import {
   dayRangeKey,
   todayStartMs,
   dayStartMs,
+  localYmd,
+  addLocalDays,
+  parseYmd,
 } from "./usage_data.js";
-import {
-  getAccounts,
-  onAccountsChanged,
-  refreshAccounts,
-  membershipLabel,
-  planMonthlyUsd,
-  getRefreshIntervalMinutes,
-  relativeFromUnixSeconds,
-} from "./accounts.js";
+import { getAccounts, onAccountsChanged, refreshAccounts, getRefreshIntervalMinutes } from "./accounts.js";
+import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
@@ -131,11 +148,47 @@ function clearStatus() {
   dismissToast("usage");
 }
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
 const SPAN_LABELS = { today: "今天", yesterday: "昨天", 7: "近 7 天", 30: "近 30 天", 0: "全部" };
+
+// 两个本地扫描来源（本地 Codex / Claude Code 会话日志）的全部差异点：总览行、图例、
+// 类型标签、单来源视图的表单元素与缓存 / 拉取入口，其余逻辑按此配置驱动一份实现。
+const LOCAL_SOURCES = {
+  local: {
+    tag: "codex",
+    label: "本地 ChatGPT 分析",
+    title: "本地 ChatGPT 用量分析",
+    mergedName: "本地 ChatGPT",
+    emptyText: "未在本地会话日志中找到用量。",
+    form: "#usage-local-form",
+    homeInput: "#usage-codex-home",
+    scanBtn: "#usage-codex-scan",
+    cachePrefix: "scan:",
+    getCached: cacheGetScan,
+    fetch: fetchCodexScan,
+  },
+  "local-claude": {
+    tag: "claude",
+    label: "本地 Claude 分析",
+    title: "本地 Claude 用量分析",
+    mergedName: "本地 Claude",
+    emptyText: "未在本地 Claude Code 会话日志中找到用量。",
+    form: "#usage-claude-form",
+    homeInput: "#usage-claude-home",
+    scanBtn: "#usage-claude-scan",
+    cachePrefix: "cscan:",
+    getCached: cacheGetClaudeScan,
+    fetch: fetchClaudeScan,
+  },
+};
+const LOCAL_KEYS = Object.keys(LOCAL_SOURCES);
+
+function isLocalSelection(value = selection) {
+  return Object.prototype.hasOwnProperty.call(LOCAL_SOURCES, value);
+}
+/** 本地来源表单里填写的会话目录（已 trim，空串表示用默认目录）。 */
+function localHomeRaw(key) {
+  return el(LOCAL_SOURCES[key].homeInput).value.trim();
+}
 
 function isTodaySpan() {
   return span === "today";
@@ -190,18 +243,13 @@ function maskToken(token) {
   return t.length > 12 ? `${t.slice(0, 8)}…` : t;
 }
 function accountLabel(account) {
-  return account.note || `${account.kind === "codex" ? "ChatGPT" : "Cursor"} ${maskToken(account.token)}`;
+  return account.note || `${kindLabel(account.kind)} ${maskToken(account.token)}`;
 }
 function currentAccount() {
   return getAccounts().find((a) => a.id === selection) || null;
 }
 function selectionKey() {
-  if (selection === "local") {
-    return `local:${scanKey()}:${el("#usage-codex-home").value.trim()}`;
-  }
-  if (selection === "local-claude") {
-    return `local-claude:${scanKey()}:${el("#usage-claude-home").value.trim()}`;
-  }
+  if (isLocalSelection()) return `${selection}:${scanKey()}:${localHomeRaw(selection)}`;
   // 今天的键含日期（today:YYYY-MM-DD），跨零点后自动视为新视图
   return `${selection}:${rangeKey()}`;
 }
@@ -331,15 +379,6 @@ function renderAggregate(agg, { showActual, metaText, plan, dailySources }) {
   renderCharts(agg, sources);
 }
 
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function localYmd(d) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-function addLocalDays(d, n) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
-}
 /** 按日图的横轴天数（仅多日跨度使用；今天 / 昨天走 24h 小时图）。全部 = 0（从最早日期起）。 */
 function chartRangeDays() {
   const n = Number(span);
@@ -367,20 +406,12 @@ function dailyAxisLabels(sources) {
     return labels;
   }
   const labels = [];
-  let cur = (() => {
-    const [y, m, d] = min.split("-").map(Number);
-    return new Date(y, m - 1, d);
-  })();
+  let cur = parseYmd(min);
   while (cur.getTime() <= today0.getTime() && labels.length < 3660) {
     labels.push(localYmd(cur));
     cur = addLocalDays(cur, 1);
   }
   return labels;
-}
-function tickDate(ymd) {
-  const p = String(ymd).split("-");
-  if (p.length !== 3) return ymd;
-  return `${Number(p[1])}/${Number(p[2])}`;
 }
 function titleDate(ymd) {
   const p = String(ymd).split("-");
@@ -422,12 +453,6 @@ function todayBandColor() {
   return accent ? hexAlpha(accent, 0.12) : "rgba(110, 168, 254, 0.10)";
 }
 
-// 两个本地扫描来源的展示配置（总览行 / 图例 / 类型标签共用）
-const LOCAL_SOURCES = {
-  local: { label: "本地 ChatGPT 分析", tag: "codex" },
-  "local-claude": { label: "本地 Claude 分析", tag: "claude" },
-};
-
 /**
  * 总览各来源（Cursor 账户 + 本地 Codex / Claude 分析）的统一顺序：按当前已有数据的
  * 总 Token 降序，无数据的来源垫底（相互间保持账户原顺序）。总览表行、按日堆叠图
@@ -439,7 +464,7 @@ function overviewSourceOrder() {
     const r = overviewResults.get(a.id) || null;
     entries.push({ kind: "cursor", account: a, result: r, tokens: r && r.agg ? r.agg.totalTokens : 0 });
   }
-  for (const key of Object.keys(LOCAL_SOURCES)) {
+  for (const key of LOCAL_KEYS) {
     const local = overviewResults.get(key) || null;
     const scanAgg = local && local.scan ? local.scan.aggregate : null;
     entries.push({ kind: key, account: null, result: local, tokens: scanAgg ? scanAgg.totalTokens : 0 });
@@ -692,21 +717,6 @@ function renderCharts(agg, dailySources) {
 }
 
 // 图表实例常驻，重复渲染时原地更新数据（渐进合并时不闪烁）
-/** 按指定指标取 Top N 模型切片，其余合并为「其他」（饼图共用）。 */
-function topSlices(models, metric, n) {
-  const list = (models || [])
-    .filter((m) => m[metric] > 0)
-    .slice()
-    .sort((a, b) => b[metric] - a[metric]);
-  const top = list.slice(0, n);
-  const rest = list.slice(n);
-  const slices = top.map((m) => ({ label: m.model, value: m[metric] }));
-  if (rest.length) {
-    slices.push({ label: "其他", value: rest.reduce((sum, m) => sum + m[metric], 0) });
-  }
-  return slices;
-}
-
 function renderChartsInner(agg, dailySources) {
   renderDailyChart(dailySources);
   const t = chartTheme();
@@ -857,18 +867,12 @@ function renderChartsInner(agg, dailySources) {
 
 function rebuildChips() {
   const cursorAccounts = getAccounts().filter((a) => a.kind === "cursor");
-  if (
-    selection !== "all" &&
-    selection !== "local" &&
-    selection !== "local-claude" &&
-    !cursorAccounts.some((a) => a.id === selection)
-  ) {
+  if (selection !== "all" && !isLocalSelection() && !cursorAccounts.some((a) => a.id === selection)) {
     selection = "all";
   }
   const chips = [{ value: "all", label: "全部总览", kind: null }];
   for (const a of cursorAccounts) chips.push({ value: a.id, label: accountLabel(a), kind: a.kind });
-  chips.push({ value: "local", label: "本地用量分析", kind: "codex" });
-  chips.push({ value: "local-claude", label: "本地用量分析", kind: "claude" });
+  for (const key of LOCAL_KEYS) chips.push({ value: key, label: "本地用量分析", kind: LOCAL_SOURCES[key].tag });
 
   el("#usage-sources").replaceChildren(
     ...chips.map((c) => {
@@ -878,7 +882,7 @@ function rebuildChips() {
       if (c.kind) {
         const tag = document.createElement("span");
         tag.className = `tag kind-${c.kind}`;
-        tag.textContent = c.kind === "codex" ? "ChatGPT" : c.kind === "claude" ? "Claude" : "Cursor";
+        tag.textContent = kindLabel(c.kind);
         btn.append(tag);
       }
       const label = document.createElement("span");
@@ -891,12 +895,10 @@ function rebuildChips() {
 }
 
 function applyVisibility() {
-  el("#usage-local-form").hidden = selection !== "local";
-  el("#usage-claude-form").hidden = selection !== "local-claude";
+  for (const key of LOCAL_KEYS) el(LOCAL_SOURCES[key].form).hidden = selection !== key;
   el("#usage-overview").hidden = selection !== "all";
   // 「生成快照」仅对单个 Cursor 账户视图开放（总览 / 本地分析无对应存档口径）
-  el("#usage-snapshot").hidden =
-    selection === "all" || selection === "local" || selection === "local-claude";
+  el("#usage-snapshot").hidden = selection === "all" || isLocalSelection();
   el("#usage-results").hidden = true;
   el("#usage-skeleton").hidden = true;
   renderedFor = ""; // 结果区已被隐藏，需要重新渲染
@@ -921,12 +923,9 @@ function getCachedAgg(account) {
   return cacheGetAgg(account.id, rangeKey());
 }
 
-function getCachedScan(home) {
-  return cacheGetScan(scanKey(), home);
-}
-
-function getCachedClaudeScanCurrent(home) {
-  return cacheGetClaudeScan(scanKey(), home);
+/** 本地来源在当前跨度下的缓存条目；home 为空时用默认目录（键中为空串）。 */
+function getCachedLocal(key, home) {
+  return LOCAL_SOURCES[key].getCached(scanKey(), home);
 }
 
 function fetchAggregate(account, force) {
@@ -944,12 +943,8 @@ function scanParams(home, force) {
   return { days: span === "0" ? null : Number(span), home, force };
 }
 
-function fetchScan(home, force) {
-  return fetchCodexScan(scanParams(home, force));
-}
-
-function fetchClaudeScanCurrent(home, force) {
-  return fetchClaudeScan(scanParams(home, force));
+function fetchLocal(key, home, force) {
+  return LOCAL_SOURCES[key].fetch(scanParams(home, force));
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -1021,7 +1016,7 @@ function renderOverviewTable() {
     ident.className = "account-ident";
     const tag = document.createElement("span");
     tag.className = `tag kind-${kind}`;
-    tag.textContent = kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
+    tag.textContent = kindLabel(kind);
     const name = document.createElement("span");
     name.className = "account-note";
     name.textContent = label;
@@ -1189,25 +1184,21 @@ function renderOverviewMerged() {
       planKnown = true;
     }
   }
-  const local = overviewResults.get("local");
-  const scanAgg = local && local.scan ? local.scan.aggregate : null;
-  if (scanAgg) {
+  const localNames = [];
+  for (const key of LOCAL_KEYS) {
+    const local = overviewResults.get(key);
+    const scanAgg = local && local.scan ? local.scan.aggregate : null;
+    if (!scanAgg) continue;
     aggs.push(scanAgg);
+    localNames.push(LOCAL_SOURCES[key].mergedName);
     if (Number.isFinite(local.at)) ats.push(local.at);
-  }
-  const localClaude = overviewResults.get("local-claude");
-  const claudeScanAgg = localClaude && localClaude.scan ? localClaude.scan.aggregate : null;
-  if (claudeScanAgg) {
-    aggs.push(claudeScanAgg);
-    if (Number.isFinite(localClaude.at)) ats.push(localClaude.at);
   }
   if (!aggs.length) return null;
 
   const merged = mergeAggregates(aggs);
   const sources = [];
   if (cursorCount) sources.push(`${cursorCount} 个 Cursor 账户`);
-  if (scanAgg) sources.push("本地 ChatGPT");
-  if (claudeScanAgg) sources.push("本地 Claude");
+  sources.push(...localNames);
   // 单日跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
   const tail = isSingleDaySpan()
     ? singleDayTail()
@@ -1246,16 +1237,15 @@ async function loadOverview(force, seq) {
     const fresh = !force && !!cached && Date.now() - cached.at < ttl;
     overviewResults.set(a.id, { state: fresh ? "ok" : "pending", agg, at });
   }
-  // 本地扫描来源（Codex / Claude）：缓存种子 + 拉取任务的通用编排
-  const seedLocal = (key, cachedEntry) => {
+  // 本地扫描来源（Codex / Claude）：缓存种子，与 Cursor 账户同一口径
+  for (const key of LOCAL_KEYS) {
+    const cachedEntry = getCachedLocal(key, null);
     const prev = previous.get(key);
     const scan = (cachedEntry && cachedEntry.scan) || (prev && prev.scan) || null;
     const at = cachedEntry ? cachedEntry.at : prev && prev.at;
     const fresh = !force && !!cachedEntry && Date.now() - cachedEntry.at < ttl;
     overviewResults.set(key, { state: fresh ? "ok" : "pending", scan, at });
-  };
-  seedLocal("local", getCachedScan(null));
-  seedLocal("local-claude", getCachedClaudeScanCurrent(null));
+  }
   renderOverviewTable();
   renderOverviewMerged();
   // 加载进度不再弹 toast：无缓存时骨架屏占位，有缓存时顶部「更新中…」+ 状态列体现
@@ -1263,8 +1253,8 @@ async function loadOverview(force, seq) {
 
   // 2) 本地 Codex / Claude 扫描与各 Cursor 账户并行拉取，每个来源完成后立即合并重绘
   //   （有效期内的来源在 usage_data 中直接命中缓存，不会走网络）
-  const makeScanJob = (key, fetchPromise) =>
-    fetchPromise
+  const scanJobs = LOCAL_KEYS.map((key) =>
+    fetchLocal(key, null, force)
       .then((entry) => {
         overviewResults.set(key, { state: "ok", scan: entry.scan, at: entry.at });
       })
@@ -1282,9 +1272,8 @@ async function loadOverview(force, seq) {
         if (seq !== loadSeq) return;
         renderOverviewTable();
         renderOverviewMerged();
-      });
-  const scanJob = makeScanJob("local", fetchScan(null, force));
-  const claudeScanJob = makeScanJob("local-claude", fetchClaudeScanCurrent(null, force));
+      })
+  );
 
   let next = 0;
   const lane = async () => {
@@ -1311,8 +1300,7 @@ async function loadOverview(force, seq) {
   };
   await Promise.all([
     ...Array.from({ length: Math.min(OVERVIEW_CONCURRENCY, cursorAccounts.length) }, lane),
-    scanJob,
-    claudeScanJob,
+    ...scanJobs,
   ]);
   if (seq !== loadSeq) return;
 
@@ -1322,14 +1310,14 @@ async function loadOverview(force, seq) {
     const r = overviewResults.get(a.id);
     return r && r.state === "error";
   }).length;
-  const local = overviewResults.get("local");
-  const localClaude = overviewResults.get("local-claude");
 
   if (merged) {
     const warns = [];
     if (failed) warns.push(`${failed} 个 Cursor 账户统计失败`);
-    if (local && local.state === "error") warns.push("本地 ChatGPT 扫描失败");
-    if (localClaude && localClaude.state === "error") warns.push("本地 Claude 扫描失败");
+    for (const key of LOCAL_KEYS) {
+      const local = overviewResults.get(key);
+      if (local && local.state === "error") warns.push(`${LOCAL_SOURCES[key].mergedName} 扫描失败`);
+    }
     if (warns.length) setStatus("warn", `${warns.join("；")}，明细见上表；失败来源如有上次数据则继续显示。`);
     else if (merged.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
     else if (!cursorAccounts.length) setStatus("", "尚未添加 Cursor 账户，总览目前仅含本地 ChatGPT / Claude 用量。");
@@ -1374,15 +1362,17 @@ async function loadCursorAccount(account, force, seq) {
   }
 }
 
-function renderScan(scan, at) {
+/** 单个本地来源（本地 Codex / Claude 分析）视图的结果区。 */
+function renderLocalScan(key, scan, at) {
+  const src = LOCAL_SOURCES[key];
   const rootsText = scan.roots.length ? scan.roots.join("、") : "未找到会话目录";
   renderAggregate(scan.aggregate, {
     showActual: false,
     plan: null,
-    metaText: `本地 ChatGPT 用量分析 · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
+    metaText: `${src.title} · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
     dailySources: [
       {
-        label: "本地用量分析",
+        label: src.label,
         daily: scan.aggregate.daily || [],
         hourly: scan.aggregate.hourly || [],
         showActual: false,
@@ -1391,69 +1381,26 @@ function renderScan(scan, at) {
   });
   markUpdated(at);
   if (scan.aggregate.models.length === 0) {
-    setStatus("warn", `未在本地会话日志中找到用量。目录：${rootsText}`);
+    setStatus("warn", `${src.emptyText}目录：${rootsText}`);
   }
 }
 
-async function loadLocal(force, seq) {
-  const home = el("#usage-codex-home").value.trim() || null;
+async function loadLocalScan(key, force, seq) {
+  const home = localHomeRaw(key) || null;
   // 先渲染缓存（含过期缓存），再后台重新扫描（进度不弹 toast，见骨架屏与「更新中…」）
-  const cached = getCachedScan(home);
-  if (cached) renderScan(cached.scan, cached.at);
-  const btn = el("#usage-codex-scan");
+  const cached = getCachedLocal(key, home);
+  if (cached) renderLocalScan(key, cached.scan, cached.at);
+  const btn = el(LOCAL_SOURCES[key].scanBtn);
   btn.disabled = true;
   try {
-    const entry = await fetchScan(home, force);
+    const entry = await fetchLocal(key, home, force);
     if (seq !== loadSeq) return;
     clearStatus();
-    renderScan(entry.scan, entry.at);
+    renderLocalScan(key, entry.scan, entry.at);
   } catch (error) {
     if (seq !== loadSeq) return;
     const fallback = (error && error.usageCache) || cached;
-    if (fallback && fallback.scan) renderScan(fallback.scan, fallback.at);
-    setStatus("bad", fallback ? `扫描失败（仍显示上次数据）：${resetError(error)}` : `扫描失败：${resetError(error)}`);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-function renderClaudeScan(scan, at) {
-  const rootsText = scan.roots.length ? scan.roots.join("、") : "未找到会话目录";
-  renderAggregate(scan.aggregate, {
-    showActual: false,
-    plan: null,
-    metaText: `本地 Claude 用量分析 · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
-    dailySources: [
-      {
-        label: "本地 Claude 分析",
-        daily: scan.aggregate.daily || [],
-        hourly: scan.aggregate.hourly || [],
-        showActual: false,
-      },
-    ],
-  });
-  markUpdated(at);
-  if (scan.aggregate.models.length === 0) {
-    setStatus("warn", `未在本地 Claude Code 会话日志中找到用量。目录：${rootsText}`);
-  }
-}
-
-async function loadLocalClaude(force, seq) {
-  const home = el("#usage-claude-home").value.trim() || null;
-  // 先渲染缓存（含过期缓存），再后台重新扫描（与 loadLocal 同策略）
-  const cached = getCachedClaudeScanCurrent(home);
-  if (cached) renderClaudeScan(cached.scan, cached.at);
-  const btn = el("#usage-claude-scan");
-  btn.disabled = true;
-  try {
-    const entry = await fetchClaudeScanCurrent(home, force);
-    if (seq !== loadSeq) return;
-    clearStatus();
-    renderClaudeScan(entry.scan, entry.at);
-  } catch (error) {
-    if (seq !== loadSeq) return;
-    const fallback = (error && error.usageCache) || cached;
-    if (fallback && fallback.scan) renderClaudeScan(fallback.scan, fallback.at);
+    if (fallback && fallback.scan) renderLocalScan(key, fallback.scan, fallback.at);
     setStatus("bad", fallback ? `扫描失败（仍显示上次数据）：${resetError(error)}` : `扫描失败：${resetError(error)}`);
   } finally {
     btn.disabled = false;
@@ -1474,10 +1421,8 @@ async function loadCurrent(force) {
   try {
     if (selection === "all") {
       await loadOverview(force, seq);
-    } else if (selection === "local") {
-      await loadLocal(force, seq);
-    } else if (selection === "local-claude") {
-      await loadLocalClaude(force, seq);
+    } else if (isLocalSelection()) {
+      await loadLocalScan(selection, force, seq);
     } else {
       const account = currentAccount();
       if (!account) {
@@ -1533,8 +1478,7 @@ function applyCacheToOverview() {
     changed = true;
   };
   for (const a of getAccounts().filter((x) => x.kind === "cursor")) take(a.id, getCachedAgg(a), "agg");
-  take("local", getCachedScan(null), "scan");
-  take("local-claude", getCachedClaudeScanCurrent(null), "scan");
+  for (const key of LOCAL_KEYS) take(key, getCachedLocal(key, null), "scan");
   return changed;
 }
 
@@ -1552,14 +1496,9 @@ function rerenderFromCache() {
     if (changed) renderOverviewMerged();
     return;
   }
-  if (selection === "local") {
-    const cached = getCachedScan(el("#usage-codex-home").value.trim() || null);
-    if (cached && cached.at > renderedAt) renderScan(cached.scan, cached.at);
-    return;
-  }
-  if (selection === "local-claude") {
-    const cached = getCachedClaudeScanCurrent(el("#usage-claude-home").value.trim() || null);
-    if (cached && cached.at > renderedAt) renderClaudeScan(cached.scan, cached.at);
+  if (isLocalSelection()) {
+    const cached = getCachedLocal(selection, localHomeRaw(selection) || null);
+    if (cached && cached.at > renderedAt) renderLocalScan(selection, cached.scan, cached.at);
     return;
   }
   const account = currentAccount();
@@ -1652,15 +1591,14 @@ function prefetchUsageFor(accounts) {
   }
   // 本地扫描：同类账户刷新过视同该来源刚被刷新，60s 内扫过才跳过；否则只在缓存临近 / 已过期
   // 时顺带重扫（阈值取 TTL 提前 60s，避免与定时刷新节拍差几秒而整轮错过）。
-  const scanJob = (key, kind, cached, fetch) => {
-    const minAge = accounts.some((a) => a.kind === kind)
+  for (const key of LOCAL_KEYS) {
+    const minAge = accounts.some((a) => a.kind === LOCAL_SOURCES[key].tag)
       ? PREFETCH_MIN_AGE_MS
       : Math.max(effectiveTtlMs() - PREFETCH_MIN_AGE_MS, PREFETCH_MIN_AGE_MS);
-    if (cached && Date.now() - cached.at < minAge) return;
-    enqueue(key, fetch());
-  };
-  scanJob("local", "codex", cacheGetScan(scanKey(), ""), () => fetchScan(null, true));
-  scanJob("local-claude", "claude", cacheGetClaudeScan(scanKey(), ""), () => fetchClaudeScanCurrent(null, true));
+    const cached = getCachedLocal(key, "");
+    if (cached && Date.now() - cached.at < minAge) continue;
+    enqueue(key, fetchLocal(key, null, true));
+  }
   if (marked) renderOverviewTable();
   if (!jobs.length) return;
   void Promise.allSettled(jobs).then(() => scheduleRerenderFromCache());
@@ -1671,15 +1609,13 @@ function cacheKeyAffectsCurrentView(key) {
   if (!key || !key.startsWith(USAGE_CACHE_PREFIX)) return true; // 通配 / 整体清理保守处理
   const rest = key.slice(USAGE_CACHE_PREFIX.length);
   if (rest.startsWith("agg:")) {
-    return selection !== "local" && selection !== "local-claude" && rest.endsWith(`:${rangeKey()}`);
+    return !isLocalSelection() && rest.endsWith(`:${rangeKey()}`);
   }
-  if (rest.startsWith("cscan:")) {
-    if (selection !== "all" && selection !== "local-claude") return false;
-    return rest.slice(6).startsWith(`${scanKey()}:`);
-  }
-  if (rest.startsWith("scan:")) {
-    if (selection !== "all" && selection !== "local") return false;
-    return rest.slice(5).startsWith(`${scanKey()}:`);
+  for (const localKey of LOCAL_KEYS) {
+    const prefix = LOCAL_SOURCES[localKey].cachePrefix;
+    if (!rest.startsWith(prefix)) continue;
+    if (selection !== "all" && selection !== localKey) return false;
+    return rest.slice(prefix.length).startsWith(`${scanKey()}:`);
   }
   return true;
 }
@@ -1707,7 +1643,7 @@ export function initUsage() {
     const ids =
       selection === "all"
         ? getAccounts().filter((a) => a.kind === "cursor").map((a) => a.id)
-        : selection !== "local" && currentAccount()
+        : currentAccount()
         ? [selection]
         : [];
     if (ids.length) void refreshAccounts(ids);
@@ -1734,12 +1670,11 @@ export function initUsage() {
     const btn = event.target instanceof Element ? event.target.closest("[data-span]") : null;
     if (btn) setSpan(btn.dataset.span);
   });
-  el("#usage-codex-scan").addEventListener("click", () => {
-    if (selection === "local") loadView(true);
-  });
-  el("#usage-claude-scan").addEventListener("click", () => {
-    if (selection === "local-claude") loadView(true);
-  });
+  for (const key of LOCAL_KEYS) {
+    el(LOCAL_SOURCES[key].scanBtn).addEventListener("click", () => {
+      if (selection === key) loadView(true);
+    });
+  }
 
   onAccountsChanged((list) => {
     syncUsageInterval(getRefreshIntervalMinutes());
@@ -1765,10 +1700,7 @@ export function initUsage() {
     // 统一刷新：状态刚刷新过的账户（任意入口触发）后台预取其用量
     if (refreshed.length) prefetchUsageFor(refreshed);
     const stillExists =
-      selection === "all" ||
-      selection === "local" ||
-      selection === "local-claude" ||
-      list.some((a) => a.id === selection && a.kind === "cursor");
+      selection === "all" || isLocalSelection() || list.some((a) => a.id === selection && a.kind === "cursor");
     rebuildChips();
     if (!stillExists) {
       applyVisibility();

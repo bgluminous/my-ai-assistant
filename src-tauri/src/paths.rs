@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-fn env_nonempty(name: &str) -> Option<PathBuf> {
+/// 读取环境变量为非空路径（空白视为未设置）。
+pub fn env_nonempty(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(|s| s.to_string_lossy().trim().to_string())
         .filter(|s| !s.is_empty())

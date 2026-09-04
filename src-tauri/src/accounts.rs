@@ -213,15 +213,30 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
+/// token 打码：只保留前 8 个字符加省略号，审计日志与导入结果标签共用。
+fn masked_head(token: &str) -> String {
+    let head: String = token.trim().chars().take(8).collect();
+    format!("{head}…")
+}
+
 /// 审计日志里的账户显示名：优先备注，否则用打码后的 token 头部，绝不落全量 token。
 fn display_name(kind: &str, note: &str, token: &str) -> String {
     let kind_label = kind_label(kind);
     let note = note.trim();
     if note.is_empty() {
-        let head: String = token.trim().chars().take(8).collect();
-        format!("{kind_label} {head}…")
+        format!("{kind_label} {}", masked_head(token))
     } else {
         format!("{kind_label}「{note}」")
+    }
+}
+
+/// 切号审计里的账户简称（不带类型前缀）：有备注用备注，否则用打码后的 token 头部。
+pub(crate) fn short_display_name(acc: &Account) -> String {
+    let note = acc.note.trim();
+    if note.is_empty() {
+        masked_head(&acc.token)
+    } else {
+        note.to_string()
     }
 }
 
@@ -237,6 +252,7 @@ fn alive_text(v: Option<bool>) -> &'static str {
 /// - cursor：`user_xxx::<jwt>` 的前缀，否则 JWT sub 里 `provider|user_id` 的 user_id → "cursor:{user_id}"
 /// - codex：JWT 的 chatgpt_account_id → "codex:{id}"，缺失时回退邮箱 → "codex:email:{email}"
 /// - claude：access_token 为不透明值，无法本地解析 → None
+///
 /// 解析不出返回 None（调用方回退 token 全等判重）。
 pub(crate) fn account_identity(kind: &str, token: &str) -> Option<String> {
     if kind == "claude" {
@@ -290,10 +306,10 @@ pub(crate) fn is_duplicate_account(
     accounts
         .iter()
         .filter(|a| a.kind == kind)
-        .filter(|a| exclude_id.map_or(true, |id| a.id != id))
+        .filter(|a| exclude_id.is_none_or(|id| a.id != id))
         .any(|a| match &identity {
             Some(idn) => account_identity(kind, &a.token)
-                .map_or(false, |other| other.eq_ignore_ascii_case(idn)),
+                .is_some_and(|other| other.eq_ignore_ascii_case(idn)),
             None => a.token == token,
         })
 }
@@ -303,7 +319,7 @@ pub(crate) fn is_duplicate_account(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn accounts_list(_app: AppHandle) -> Result<AccountsView, String> {
+pub fn accounts_list() -> Result<AccountsView, String> {
     // 启动时载入失败（如文件被短暂占用）会在这里自愈；仍失败则明确报错，
     // 前端展示错误横幅而不是被误导成「暂无账户」。
     settings::ensure_loaded()?;
@@ -351,7 +367,6 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         Ok(())
     })?;
     audit::log(
-        &app,
         "account_add",
         format!("添加账户：{name}"),
         Some(serde_json::json!({ "id": entry_id })),
@@ -418,7 +433,6 @@ pub fn accounts_update(
         format!("更新了{}", changed.join("、"))
     };
     audit::log(
-        &app,
         "account_update",
         format!("编辑账户：{name}（{what}）"),
         Some(serde_json::json!({ "id": id })),
@@ -439,7 +453,6 @@ pub fn accounts_delete(app: AppHandle, id: String) -> Result<AccountsView, Strin
         // 全量用量存档随账户删除清理（与前端删账户时清 localStorage 缓存一致）
         crate::usage_archive::remove(&acc.id);
         audit::log(
-            &app,
             "account_delete",
             format!("删除账户：{}", display_name(&acc.kind, &acc.note, &acc.token)),
             Some(serde_json::json!({ "id": acc.id })),
@@ -460,7 +473,7 @@ pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<Ac
     } else {
         "关闭定时刷新".to_string()
     };
-    audit::log(&app, "interval_set", message, None);
+    audit::log("interval_set", message, None);
     Ok(view(&data))
 }
 
@@ -643,17 +656,15 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
                     persist_tokens(app, id, &token, &refresh_token)?;
                     refreshed = true;
                     audit::log(
-                        app,
                         "codex_renewed",
                         format!("ChatGPT access_token 已自动续期：{name}"),
                         Some(json!({ "id": id })),
                     );
                     // 本机 auth.json 若是同一账号则顺带同步新凭据（失败在函数内部消化，不影响刷新）
-                    codex_local::sync_auth_json(app, &token, &refresh_token, id_token.as_deref());
+                    codex_local::sync_auth_json(&token, &refresh_token, id_token.as_deref());
                 }
                 RefreshOutcome::Denied { body } => {
                     audit::log(
-                        app,
                         "codex_renew_failed",
                         format!("ChatGPT 续期被拒绝：{name}（{body}）"),
                         Some(json!({ "id": id })),
@@ -680,18 +691,16 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
                     }
                     persist_tokens(app, id, &token, &refresh_token)?;
                     audit::log(
-                        app,
                         "codex_renewed",
                         format!("ChatGPT access_token 已自动续期：{name}"),
                         Some(json!({ "id": id })),
                     );
                     // 本机 auth.json 若是同一账号则顺带同步新凭据（失败在函数内部消化，不影响刷新）
-                    codex_local::sync_auth_json(app, &token, &refresh_token, id_token.as_deref());
+                    codex_local::sync_auth_json(&token, &refresh_token, id_token.as_deref());
                     usage = codex::codex_usage(token.clone()).await?;
                 }
                 RefreshOutcome::Denied { body } => {
                     audit::log(
-                        app,
                         "codex_renew_failed",
                         format!("ChatGPT 续期被拒绝：{name}（{body}）"),
                         Some(json!({ "id": id })),
@@ -706,7 +715,7 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
     finish(app, id, status)
 }
 
-/// Claude 续期成功的统一收尾：写回凭据、记审计。返回新的 token 过期时刻。
+/// Claude 续期成功的统一收尾：换上新凭据（refresh_token 有新值才替换）、写回账户、记审计。
 fn apply_claude_renewal(
     app: &AppHandle,
     id: &str,
@@ -715,20 +724,18 @@ fn apply_claude_renewal(
     refresh_token: &mut Option<String>,
     access_token: String,
     new_rt: Option<String>,
-    expires_at_ms: Option<i64>,
-) -> Result<Option<i64>, String> {
+) -> Result<(), String> {
     *token = access_token;
     if new_rt.is_some() {
         *refresh_token = new_rt;
     }
     persist_tokens(app, id, token, refresh_token)?;
     audit::log(
-        app,
         "claude_renewed",
         format!("Claude access_token 已自动续期：{name}"),
         Some(json!({ "id": id })),
     );
-    Ok(expires_at_ms)
+    Ok(())
 }
 
 /// Claude 账户刷新：access_token 非 JWT，过期时刻取上次续期时记录的
@@ -757,15 +764,12 @@ async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Res
                     expires_at_ms: new_exp,
                     ..
                 } => {
-                    expires_at_ms = apply_claude_renewal(
-                        app, id, &name, &mut token, &mut refresh_token, access_token, new_rt,
-                        new_exp,
-                    )?;
+                    apply_claude_renewal(app, id, &name, &mut token, &mut refresh_token, access_token, new_rt)?;
+                    expires_at_ms = new_exp;
                     refreshed = true;
                 }
                 claude_oauth::ClaudeRefreshOutcome::Denied { body } => {
                     audit::log(
-                        app,
                         "claude_renew_failed",
                         format!("Claude 续期被拒绝：{name}（{body}）"),
                         Some(json!({ "id": id })),
@@ -787,15 +791,12 @@ async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Res
                     expires_at_ms: new_exp,
                     ..
                 } => {
-                    expires_at_ms = apply_claude_renewal(
-                        app, id, &name, &mut token, &mut refresh_token, access_token, new_rt,
-                        new_exp,
-                    )?;
+                    apply_claude_renewal(app, id, &name, &mut token, &mut refresh_token, access_token, new_rt)?;
+                    expires_at_ms = new_exp;
                     usage = claude::claude_usage(token.clone()).await?;
                 }
                 claude_oauth::ClaudeRefreshOutcome::Denied { body } => {
                     audit::log(
-                        app,
                         "claude_renew_failed",
                         format!("Claude 续期被拒绝：{name}（{body}）"),
                         Some(json!({ "id": id })),
@@ -859,7 +860,6 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, Stri
                 .and_then(Value::as_bool);
             if new_alive != prev_alive {
                 audit::log(
-                    &app,
                     "account_state_changed",
                     format!(
                         "账户状态变化：{name} {} → {}",
@@ -872,7 +872,6 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, Stri
         }
         Err(e) => {
             audit::log(
-                &app,
                 "account_refresh_failed",
                 format!("刷新账户失败：{name}（{e}）"),
                 Some(json!({ "id": id })),
@@ -938,8 +937,7 @@ pub struct ImportLocalResult {
 fn import_label(hint: &str, token: &str) -> String {
     let hint = hint.trim();
     if hint.is_empty() {
-        let head: String = token.trim().chars().take(8).collect();
-        format!("{head}…")
+        masked_head(token)
     } else {
         hint.to_string()
     }
@@ -1027,7 +1025,6 @@ pub fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocal
     if !audit_names.is_empty() {
         let ids: Vec<String> = imported.iter().map(|i| i.id.clone()).collect();
         audit::log(
-            &app,
             "account_import",
             format!("从本机导入账户：{}", audit_names.join("、")),
             Some(json!({ "ids": ids })),
@@ -1178,7 +1175,6 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
     let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     audit::log(
-        &app,
         "account_export",
         format!("导出 {count} 个{label}账户"),
         Some(json!({ "kind": kind, "count": count })),
@@ -1283,7 +1279,6 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
     if !audit_names.is_empty() {
         let ids: Vec<String> = imported.iter().map(|i| i.id.clone()).collect();
         audit::log(
-            &app,
             "account_import_file",
             format!("从文件导入{label}账户：{}", audit_names.join("、")),
             Some(json!({ "kind": kind, "ids": ids })),
@@ -1340,7 +1335,6 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
         Ok(())
     })?;
     audit::log(
-        &app,
         "account_add",
         format!("OAuth 授权添加账户：{name}"),
         Some(json!({ "id": entry_id })),

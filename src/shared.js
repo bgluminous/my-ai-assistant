@@ -35,6 +35,23 @@ export function fmtInt(n) {
   return Math.round(n).toLocaleString("zh-CN");
 }
 
+/** 拼 innerHTML 时转义用户可控文本（模型名、账户备注等）。 */
+export function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/** 账户类型 -> 界面展示名（cursor / codex / claude，其它值按 Cursor 处理）。 */
+export function kindLabel(kind) {
+  return kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
+}
+
+/** 图表横轴刻度用的短日期：YYYY-MM-DD -> M/D。 */
+export function tickDate(ymd) {
+  const p = String(ymd).split("-");
+  if (p.length !== 3) return ymd;
+  return `${Number(p[1])}/${Number(p[2])}`;
+}
+
 // ---------- 数字单位偏好（Token 数量显示） ----------
 
 const UNIT_KEY = "numberUnit"; // "full" | "en" | "zh"
@@ -252,6 +269,21 @@ export function colorFor(index) {
   return PALETTE[index % PALETTE.length];
 }
 
+/** 按指定指标取 Top N 模型切片 { label, value }，其余合并为「其他」（各处饼图共用）。 */
+export function topSlices(models, metric, n) {
+  const list = (models || [])
+    .filter((m) => m[metric] > 0)
+    .slice()
+    .sort((a, b) => b[metric] - a[metric]);
+  const top = list.slice(0, n);
+  const rest = list.slice(n);
+  const slices = top.map((m) => ({ label: m.model, value: m[metric] }));
+  if (rest.length) {
+    slices.push({ label: "其他", value: rest.reduce((sum, m) => sum + m[metric], 0) });
+  }
+  return slices;
+}
+
 /** Chart.js 动画时长：系统「减少动效」时为 0。 */
 export function chartAnimMs(ms) {
   try {
@@ -356,64 +388,11 @@ function chartFontFamily() {
 }
 
 /**
- * 横向（堆叠）柱末端常驻标注。按图配置 chart.$barEndLabels：
- * { formatter(rowTotal, rowIndex) => string|null, font?: px, color?: string }。
+ * 饼图 / 环形图扇区常驻标注。按图配置 chart.$pieSliceLabels：
+ * { formatter(value, shareText, index) => string[]|string|null, minAngle?: rad, font?: px, color?: string }。
  * 配置必须挂在 chart 实例上而不是 options.plugins：Chart.js v4 的 chart.options
  * 是解析代理，读取其中的函数会按 scriptable 选项解析——以内部 context 对象为参数
  * 调用 formatter，轻则标注失效，重则在图表构造期抛 TypeError 打断渲染。
- * 颜色缺省取 --chart-tick-strong，主题切换后的重绘自动生效。
- * 使用方应通过 layout.padding.right 预留文字空间，空间不足时文字向左夹进画布。
- */
-export const barEndLabelsPlugin = {
-  id: "barEndLabels",
-  afterDatasetsDraw(chart) {
-    const opts = chart.$barEndLabels;
-    if (!opts || typeof opts.formatter !== "function") return;
-    const labels = chart.data.labels || [];
-    if (!labels.length) return;
-    const { ctx, chartArea } = chart;
-    if (!chartArea) return;
-    const size = Number(opts.font) || 10.5;
-    const color =
-      opts.color ||
-      getComputedStyle(document.documentElement).getPropertyValue("--chart-tick-strong").trim() ||
-      "#8a93a6";
-    ctx.save();
-    ctx.font = `600 ${size}px ${chartFontFamily()}`;
-    ctx.fillStyle = color;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    for (let row = 0; row < labels.length; row += 1) {
-      let total = 0;
-      let endX = -Infinity;
-      let y = null;
-      for (let di = 0; di < chart.data.datasets.length; di += 1) {
-        const v = Number(chart.data.datasets[di].data[row]);
-        if (!Number.isFinite(v) || v <= 0) continue;
-        const meta = chart.getDatasetMeta(di);
-        if (!meta || meta.hidden) continue;
-        const bar = meta.data && meta.data[row];
-        if (!bar) continue;
-        total += v;
-        if (bar.x > endX) endX = bar.x;
-        if (y == null) y = bar.y;
-      }
-      if (!(total > 0) || y == null || !Number.isFinite(endX)) continue;
-      const text = opts.formatter(total, row);
-      if (!text) continue;
-      const width = ctx.measureText(text).width;
-      let x = endX + 6;
-      if (x + width > chart.width - 4) x = Math.max(chartArea.left + 2, chart.width - 4 - width);
-      ctx.fillText(text, x, y);
-    }
-    ctx.restore();
-  },
-};
-
-/**
- * 饼图 / 环形图扇区常驻标注。按图配置 chart.$pieSliceLabels：
- * { formatter(value, shareText, index) => string[]|string|null, minAngle?: rad, font?: px, color?: string }。
- * 配置挂在 chart 实例上而不是 options.plugins，原因同 barEndLabelsPlugin（scriptable 解析陷阱）。
  * 占比按当前可见扇区合计计算；弧度小于 minAngle（默认 0.3 ≈ 17°）的扇区跳过，避免文字重叠。
  */
 export const pieSliceLabelsPlugin = {

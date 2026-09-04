@@ -2,7 +2,6 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
-use tauri::AppHandle;
 
 use crate::audit;
 use crate::settings;
@@ -438,7 +437,7 @@ fn price_eq(a: &ModelPrice, b: &ModelPrice) -> bool {
 
 /// 读取“默认 + 在线 + 用户覆盖”的有效价格表，按键排序返回，供应用内编辑。
 #[tauri::command]
-pub fn pricing_get(_app: AppHandle) -> Result<PricingView, String> {
+pub fn pricing_get() -> Result<PricingView, String> {
     settings::ensure_loaded()?;
     let defaults = defaults();
     let base = base();
@@ -513,11 +512,7 @@ fn diff_overrides(
 /// 保存用户价格表：只把“与基础层（默认+在线）不同 / 基础层没有”的条目写入用户文件
 /// （保持精简，未改动的模型仍随默认表与在线表更新）。数值需为有限非负数。
 #[tauri::command]
-pub fn pricing_save(
-    _app: AppHandle,
-    models: Vec<PricingEntry>,
-    note: Option<String>,
-) -> Result<PricingStatus, String> {
+pub fn pricing_save(models: Vec<PricingEntry>, note: Option<String>) -> Result<PricingStatus, String> {
     settings::ensure_loaded()?;
     let overrides = diff_overrides(&base(), &models)?;
 
@@ -543,13 +538,13 @@ pub fn pricing_save(
 
 /// 清空用户价格覆盖与在线表缓存，恢复为内置默认表（不删除 settings.json）。
 #[tauri::command]
-pub fn pricing_reset(app: AppHandle) -> Result<PricingView, String> {
+pub fn pricing_reset() -> Result<PricingView, String> {
     settings::mutate(|s| {
         s.pricing = PricingTable::default();
         s.pricing_remote = PricingRemote::default();
         Ok(())
     })?;
-    pricing_get(app)
+    pricing_get()
 }
 
 // ---------- 在线更新 ----------
@@ -622,10 +617,7 @@ pub struct PricingUpdateCheck {
 
 /// 拉取远端表并与当前基础层（默认+已缓存在线表）比较，判断是否有更新。不写盘。
 #[tauri::command]
-pub async fn pricing_update_check(
-    _app: AppHandle,
-    url: Option<String>,
-) -> Result<PricingUpdateCheck, String> {
+pub async fn pricing_update_check(url: Option<String>) -> Result<PricingUpdateCheck, String> {
     settings::ensure_loaded()?;
     let (fetch_url, _) = resolve_update_url(url)?;
     let fetched = fetch_remote_table(&fetch_url).await?;
@@ -640,10 +632,7 @@ pub async fn pricing_update_check(
 
 /// 拉取远端表并写入在线缓存层（用户覆盖保持不变），返回最新视图。
 #[tauri::command]
-pub async fn pricing_update_apply(
-    app: AppHandle,
-    url: Option<String>,
-) -> Result<PricingView, String> {
+pub async fn pricing_update_apply(url: Option<String>) -> Result<PricingView, String> {
     settings::ensure_loaded()?;
     let (fetch_url, store_url) = resolve_update_url(url)?;
     let fetched = fetch_remote_table(&fetch_url).await?;
@@ -657,12 +646,11 @@ pub async fn pricing_update_apply(
         Ok(())
     })?;
     audit::log(
-        &app,
         "pricing_update",
         format!("在线价格表已更新：{count} 个模型（{fetch_url}）"),
         None,
     );
-    pricing_get(app)
+    pricing_get()
 }
 
 #[cfg(test)]

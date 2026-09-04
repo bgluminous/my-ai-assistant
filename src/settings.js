@@ -13,6 +13,24 @@ import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "
 
 const SAMPLE = 1234567890;
 
+/** 弹窗内某一区块的状态条：set(kind, text) 填充并显示，clear() 隐藏并清空。 */
+function statusBox(selector) {
+  return {
+    set: (kind, text) => fillStatus(el(selector), kind, text),
+    clear: () => {
+      const box = el(selector);
+      box.hidden = true;
+      box.textContent = "";
+    },
+  };
+}
+const intervalStatus = statusBox("#interval-status");
+const autostartStatus = statusBox("#autostart-status");
+const backupStatus = statusBox("#backup-status");
+const cursorPathStatus = statusBox("#cursor-path-status");
+const codexPathStatus = statusBox("#codex-path-status");
+const claudePathStatus = statusBox("#claude-path-status");
+
 function renderUnitSeg() {
   const current = getNumberUnit();
   for (const seg of el("#unit-mode").querySelectorAll(".seg")) {
@@ -23,39 +41,19 @@ function renderUnitSeg() {
 
 /* ---------- 定时刷新（账户状态 + 用量统计） ---------- */
 
-function setIntervalStatus(kind, text) {
-  fillStatus(el("#interval-status"), kind, text);
-}
-
-function clearIntervalStatus() {
-  const box = el("#interval-status");
-  box.hidden = true;
-  box.textContent = "";
-}
-
 async function onIntervalChange() {
   const select = el("#accounts-interval");
   const previous = getRefreshIntervalMinutes();
   try {
     const minutes = await setRefreshInterval(Number(select.value));
-    setIntervalStatus("ok", minutes > 0 ? `已开启定时刷新，每 ${minutes} 分钟自动刷新账户状态与用量统计。` : "已关闭定时刷新。");
+    intervalStatus.set("ok", minutes > 0 ? `已开启定时刷新，每 ${minutes} 分钟自动刷新账户状态与用量统计。` : "已关闭定时刷新。");
   } catch (error) {
     select.value = String(previous);
-    setIntervalStatus("bad", `设置定时刷新失败：${resetError(error)}`);
+    intervalStatus.set("bad", `设置定时刷新失败：${resetError(error)}`);
   }
 }
 
 /* ---------- 开机启动 ---------- */
-
-function setAutostartStatus(kind, text) {
-  fillStatus(el("#autostart-status"), kind, text);
-}
-
-function clearAutostartStatus() {
-  const box = el("#autostart-status");
-  box.hidden = true;
-  box.textContent = "";
-}
 
 function reflectAutostart(enabled, silent) {
   el("#autostart-enabled").checked = enabled;
@@ -79,7 +77,7 @@ async function onAutostartChange() {
   try {
     const v = await invoke("autostart_set", { enabled, silent });
     reflectAutostart(!!v.enabled, !!v.silent);
-    setAutostartStatus(
+    autostartStatus.set(
       "ok",
       v.enabled
         ? v.silent
@@ -90,7 +88,7 @@ async function onAutostartChange() {
   } catch (error) {
     // 写系统失败时回读真实状态，避免界面与系统不一致
     void loadAutostart();
-    setAutostartStatus("bad", `设置开机启动失败：${resetError(error)}`);
+    autostartStatus.set("bad", `设置开机启动失败：${resetError(error)}`);
   }
 }
 
@@ -99,16 +97,6 @@ async function onAutostartChange() {
 let backupBusy = false;
 let backupPasswordMode = null; // null | "export" | "import"
 let backupImportPath = ""; // 待解密导入的备份文件路径
-
-function setBackupStatus(kind, text) {
-  fillStatus(el("#backup-status"), kind, text);
-}
-
-function clearBackupStatus() {
-  const box = el("#backup-status");
-  box.hidden = true;
-  box.textContent = "";
-}
 
 function updateBackupButtons() {
   el("#backup-export").disabled = backupBusy;
@@ -161,16 +149,16 @@ function applyUiPrefs(prefs) {
 async function doExport(password) {
   backupBusy = true;
   updateBackupButtons();
-  setBackupStatus("", "正在导出全部数据…");
+  backupStatus.set("", "正在导出全部数据…");
   try {
     const r = await invoke("backup_export", { password: password || null, uiPrefs: collectUiPrefs() });
     if (r && r.cancelled) {
-      clearBackupStatus();
+      backupStatus.clear();
       return;
     }
-    setBackupStatus("ok", `已导出全部数据${r.encrypted ? "（已加密）" : ""}：${r.path}`);
+    backupStatus.set("ok", `已导出全部数据${r.encrypted ? "（已加密）" : ""}：${r.path}`);
   } catch (error) {
-    setBackupStatus("bad", `导出失败：${resetError(error)}`);
+    backupStatus.set("bad", `导出失败：${resetError(error)}`);
   } finally {
     backupBusy = false;
     updateBackupButtons();
@@ -180,34 +168,32 @@ async function doExport(password) {
 async function doImportApply(path, password) {
   backupBusy = true;
   updateBackupButtons();
-  setBackupStatus("", "正在导入并应用数据…");
+  backupStatus.set("", "正在导入并应用数据…");
   try {
     const r = await invoke("backup_import_apply", { path, password: password || null });
     hidePasswordRow();
     applyUiPrefs(r && r.uiPrefs);
     // 设置弹窗内的回显同步导入结果（间隔选择框由 accounts-changed 事件自动更新）
     void loadAutostart();
-    void loadCursorPath();
-    void loadCodexPath();
-    void loadClaudePath();
+    void loadClientPaths();
     const parts = [`新增 ${Number(r && r.imported) || 0} 个账号`];
     const exists = Number(r && r.skippedExists) || 0;
     const invalid = Number(r && r.skippedInvalid) || 0;
     if (exists > 0) parts.push(`跳过 ${exists} 个已存在`);
     if (invalid > 0) parts.push(`${invalid} 个无效`);
-    setBackupStatus("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
+    backupStatus.set("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
     // 新导入的账号后台排队刷新验证，与账户页导入体验一致
     const ids = Array.isArray(r && r.importedIds) ? r.importedIds : [];
     if (ids.length) void refreshAccounts(ids);
   } catch (error) {
     const msg = resetError(error);
     if (msg === "wrong_password") {
-      setBackupStatus("bad", "密码错误，请重试。");
+      backupStatus.set("bad", "密码错误，请重试。");
     } else if (msg === "invalid_format") {
       hidePasswordRow();
-      setBackupStatus("bad", "不是有效的备份文件。");
+      backupStatus.set("bad", "不是有效的备份文件。");
     } else {
-      setBackupStatus("bad", `导入失败：${msg}`);
+      backupStatus.set("bad", `导入失败：${msg}`);
     }
   } finally {
     backupBusy = false;
@@ -217,13 +203,13 @@ async function doImportApply(path, password) {
 
 function onBackupExportClick() {
   if (backupBusy) return;
-  clearBackupStatus();
+  backupStatus.clear();
   showPasswordRow("export", "");
 }
 
 async function onBackupImportClick() {
   if (backupBusy) return;
-  clearBackupStatus();
+  backupStatus.clear();
   hidePasswordRow();
   backupBusy = true;
   updateBackupButtons();
@@ -233,7 +219,7 @@ async function onBackupImportClick() {
     if (r && !r.cancelled) picked = r;
   } catch (error) {
     const msg = resetError(error);
-    setBackupStatus("bad", msg === "invalid_format" ? "不是有效的备份文件。" : `导入失败：${msg}`);
+    backupStatus.set("bad", msg === "invalid_format" ? "不是有效的备份文件。" : `导入失败：${msg}`);
   } finally {
     backupBusy = false;
     updateBackupButtons();
@@ -256,7 +242,7 @@ function onBackupPasswordOk() {
   }
   if (backupPasswordMode === "import") {
     if (!password) {
-      setBackupStatus("bad", "请输入备份密码。");
+      backupStatus.set("bad", "请输入备份密码。");
       return;
     }
     // 密码错误时保留输入行以便重试（doImportApply 仅在成功或文件无效时收起）
@@ -264,104 +250,73 @@ function onBackupPasswordOk() {
   }
 }
 
-/* ---------- Cursor 客户端路径 ---------- */
+/* ---------- 客户端路径（Cursor / ChatGPT / Claude Desktop） ---------- */
 
-function setCursorPathStatus(kind, text) {
-  fillStatus(el("#cursor-path-status"), kind, text);
-}
+// 三个客户端路径输入框与后端配置命令的对应；name / detect 仅 ChatGPT 与 Claude Desktop 有
+//（它们走一键探测，Cursor 走下面的逐个扫描）
+const CLIENT_PATHS = [
+  {
+    input: "#cursor-exe-path",
+    get: "cursor_client_get",
+    set: "cursor_client_set",
+    invalid: "cursor_exe_invalid",
+    status: cursorPathStatus,
+  },
+  {
+    input: "#codex-exe-path",
+    get: "codex_client_get",
+    set: "codex_client_set",
+    invalid: "codex_exe_invalid",
+    status: codexPathStatus,
+    name: "ChatGPT",
+    detectBtn: "#codex-detect",
+    detect: "codex_client_detect",
+  },
+  {
+    input: "#claude-exe-path",
+    get: "claude_client_get",
+    set: "claude_client_set",
+    invalid: "claude_exe_invalid",
+    status: claudePathStatus,
+    name: "Claude Desktop",
+    detectBtn: "#claude-detect",
+    detect: "claude_client_detect",
+  },
+];
 
-function clearCursorPathStatus() {
-  const box = el("#cursor-path-status");
-  box.hidden = true;
-  box.textContent = "";
-}
-
-async function loadCursorPath() {
-  try {
-    const v = await invoke("cursor_client_get");
-    el("#cursor-exe-path").value = (v && v.exePath) || "";
-  } catch {
-    // 浏览器直开等非 Tauri 环境下读取失败，静默即可（仅影响回显）
+/** 回显三个客户端已保存的路径；非 Tauri 环境读取失败静默（仅影响回显）。 */
+async function loadClientPaths() {
+  for (const c of CLIENT_PATHS) {
+    try {
+      const v = await invoke(c.get);
+      el(c.input).value = (v && v.exePath) || "";
+    } catch {
+      // 浏览器直开等非 Tauri 环境静默
+    }
   }
 }
 
-function setCodexPathStatus(kind, text) {
-  fillStatus(el("#codex-path-status"), kind, text);
-}
-
-function clearCodexPathStatus() {
-  const box = el("#codex-path-status");
-  box.hidden = true;
-  box.textContent = "";
-}
-
-async function loadCodexPath() {
-  try {
-    const v = await invoke("codex_client_get");
-    el("#codex-exe-path").value = (v && v.exePath) || "";
-  } catch {
-    // 非 Tauri 环境静默
-  }
-}
-
-async function onCodexDetect() {
-  const btn = el("#codex-detect");
+/** 一键探测常见安装位置，命中即填入输入框（保存仍需点「完成」）。 */
+async function onDetect(c) {
+  const btn = el(c.detectBtn);
   btn.disabled = true;
-  setCodexPathStatus("", "正在搜索本机 ChatGPT…");
+  c.status.set("", `正在搜索本机 ${c.name}…`);
   try {
-    const r = await invoke("codex_client_detect");
+    const r = await invoke(c.detect);
     if (r && r.exePath) {
-      el("#codex-exe-path").value = r.exePath;
-      setCodexPathStatus("ok", `已填入：${r.exePath}。点「完成」保存。`);
+      el(c.input).value = r.exePath;
+      c.status.set("ok", `已填入：${r.exePath}。点「完成」保存。`);
     } else {
-      setCodexPathStatus("warn", "未找到 ChatGPT，请手动填写完整路径。");
+      c.status.set("warn", `未找到 ${c.name}，请手动填写完整路径。`);
     }
   } catch (error) {
-    setCodexPathStatus("bad", `搜索失败：${resetError(error)}`);
+    c.status.set("bad", `搜索失败：${resetError(error)}`);
   } finally {
     btn.disabled = false;
   }
 }
 
-/* ---------- Claude Desktop 路径 ---------- */
-
-function setClaudePathStatus(kind, text) {
-  fillStatus(el("#claude-path-status"), kind, text);
-}
-
-function clearClaudePathStatus() {
-  const box = el("#claude-path-status");
-  box.hidden = true;
-  box.textContent = "";
-}
-
-async function loadClaudePath() {
-  try {
-    const v = await invoke("claude_client_get");
-    el("#claude-exe-path").value = (v && v.exePath) || "";
-  } catch {
-    // 非 Tauri 环境静默
-  }
-}
-
-async function onClaudeDetect() {
-  const btn = el("#claude-detect");
-  btn.disabled = true;
-  setClaudePathStatus("", "正在搜索本机 Claude Desktop…");
-  try {
-    const r = await invoke("claude_client_detect");
-    if (r && r.exePath) {
-      el("#claude-exe-path").value = r.exePath;
-      setClaudePathStatus("ok", `已填入：${r.exePath}。点「完成」保存。`);
-    } else {
-      setClaudePathStatus("warn", "未找到 Claude Desktop，请手动填写完整路径。");
-    }
-  } catch (error) {
-    setClaudePathStatus("bad", `搜索失败：${resetError(error)}`);
-  } finally {
-    btn.disabled = false;
-  }
-}
+/* ---------- Cursor 路径逐个扫描 ---------- */
 
 let scanning = false;
 let sessionActive = false; // 是否有可继续的扫描会话（上次命中且未扫完）
@@ -389,11 +344,7 @@ async function onStep() {
   scanning = true;
   el("#cursor-detect").disabled = true;
   el("#cursor-scan-cancel").hidden = false;
-  if (restart) {
-    setCursorPathStatus("", "正在扫描本机 Cursor…");
-  } else {
-    setCursorPathStatus("", "继续搜索下一个…");
-  }
+  cursorPathStatus.set("", restart ? "正在扫描本机 Cursor…" : "继续搜索下一个…");
   setScanProgress("扫描中…");
   try {
     // 先挂上进度监听，再触发扫描，避免漏掉早期事件。
@@ -407,21 +358,21 @@ async function onStep() {
       el("#cursor-exe-path").value = r.found;
       if (r.done) {
         sessionActive = false;
-        setCursorPathStatus("ok", `已填入（这是最后一个）：${r.found}。点「完成」保存。`);
+        cursorPathStatus.set("ok", `已填入（这是最后一个）：${r.found}。点「完成」保存。`);
       } else {
         sessionActive = true;
-        setCursorPathStatus("ok", `已填入：${r.found}。点「完成」保存，或「搜索下一个」继续。`);
+        cursorPathStatus.set("ok", `已填入：${r.found}。点「完成」保存，或「搜索下一个」继续。`);
       }
     } else if (r && r.cancelled) {
       sessionActive = false;
-      setCursorPathStatus("warn", "已取消扫描。");
+      cursorPathStatus.set("warn", "已取消扫描。");
     } else {
       sessionActive = false;
-      setCursorPathStatus("warn", restart ? "未找到 Cursor，请手动填写完整路径。" : "已无更多结果。");
+      cursorPathStatus.set("warn", restart ? "未找到 Cursor，请手动填写完整路径。" : "已无更多结果。");
     }
   } catch (error) {
     sessionActive = false;
-    setCursorPathStatus("bad", `扫描失败：${resetError(error)}`);
+    cursorPathStatus.set("bad", `扫描失败：${resetError(error)}`);
   } finally {
     if (unlistenScan) {
       try { unlistenScan(); } catch { /* ignore */ }
@@ -445,31 +396,14 @@ async function onScanCancel() {
 async function onDone() {
   const modal = el("#settings-modal");
   if (scanning) void onScanCancel();
-  const path = el("#cursor-exe-path").value.trim();
-  try {
-    await invoke("cursor_client_set", { exePath: path });
-  } catch (error) {
-    if (resetError(error) === "cursor_exe_invalid") {
-      setCursorPathStatus("bad", "路径无效或文件不存在，请修正或清空后再完成。");
-      return;
-    }
-  }
-  const codexPath = el("#codex-exe-path").value.trim();
-  try {
-    await invoke("codex_client_set", { exePath: codexPath });
-  } catch (error) {
-    if (resetError(error) === "codex_exe_invalid") {
-      setCodexPathStatus("bad", "路径无效或文件不存在，请修正或清空后再完成。");
-      return;
-    }
-  }
-  const claudePath = el("#claude-exe-path").value.trim();
-  try {
-    await invoke("claude_client_set", { exePath: claudePath });
-  } catch (error) {
-    if (resetError(error) === "claude_exe_invalid") {
-      setClaudePathStatus("bad", "路径无效或文件不存在，请修正或清空后再完成。");
-      return;
+  for (const c of CLIENT_PATHS) {
+    try {
+      await invoke(c.set, { exePath: el(c.input).value.trim() });
+    } catch (error) {
+      if (resetError(error) === c.invalid) {
+        c.status.set("bad", "路径无效或文件不存在，请修正或清空后再完成。");
+        return;
+      }
     }
   }
   modal.hidden = true;
@@ -481,24 +415,20 @@ export function initSettings() {
   const modal = el("#settings-modal");
   el("#settings-btn").addEventListener("click", () => {
     renderUnitSeg();
-    clearIntervalStatus();
+    intervalStatus.clear();
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
-    clearAutostartStatus();
-    clearBackupStatus();
+    autostartStatus.clear();
+    backupStatus.clear();
     hidePasswordRow();
     updateBackupButtons();
-    clearCursorPathStatus();
-    clearCodexPathStatus();
-    clearClaudePathStatus();
+    for (const c of CLIENT_PATHS) c.status.clear();
     setScanProgress("");
     sessionActive = false;
     updateScanButton();
     el("#cursor-scan-cancel").hidden = true;
     modal.hidden = false;
     void loadAutostart();
-    void loadCursorPath();
-    void loadCodexPath();
-    void loadClaudePath();
+    void loadClientPaths();
   });
   for (const node of modal.querySelectorAll("[data-close]")) {
     node.addEventListener("click", () => {
@@ -526,14 +456,15 @@ export function initSettings() {
   el("#backup-password-ok").addEventListener("click", onBackupPasswordOk);
   el("#backup-password-cancel").addEventListener("click", () => {
     hidePasswordRow();
-    clearBackupStatus();
+    backupStatus.clear();
   });
   el("#backup-password").addEventListener("keydown", (e) => {
     if (e.key === "Enter") onBackupPasswordOk();
   });
   el("#cursor-detect").addEventListener("click", () => { void onStep(); });
   el("#cursor-scan-cancel").addEventListener("click", () => { void onScanCancel(); });
-  el("#codex-detect").addEventListener("click", () => { void onCodexDetect(); });
-  el("#claude-detect").addEventListener("click", () => { void onClaudeDetect(); });
+  for (const c of CLIENT_PATHS) {
+    if (c.detectBtn) el(c.detectBtn).addEventListener("click", () => { void onDetect(c); });
+  }
   el("#settings-done").addEventListener("click", () => { void onDone(); });
 }

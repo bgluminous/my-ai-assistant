@@ -230,7 +230,6 @@ pub async fn backup_export(
 
     let shown = path.to_string_lossy().to_string();
     audit::log(
-        &app,
         "backup_export",
         format!(
             "导出全量备份（{} 个账号，{}）：{shown}",
@@ -382,7 +381,6 @@ pub async fn backup_import_apply(
     accounts::broadcast_changed(&app);
 
     audit::log(
-        &app,
         "backup_import",
         format!(
             "导入全量备份：新增 {} 个账号（{} 个已存在、{} 个无效已跳过），其余设置已覆盖",

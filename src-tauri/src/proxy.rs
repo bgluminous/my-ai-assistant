@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
 
 use crate::settings;
 
@@ -66,13 +65,13 @@ fn view(cfg: &ProxyConfig) -> ProxyView {
 }
 
 #[tauri::command]
-pub fn proxy_get(_app: AppHandle) -> Result<ProxyView, String> {
+pub fn proxy_get() -> Result<ProxyView, String> {
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
-pub fn proxy_set(_app: AppHandle, config: ProxyConfig) -> Result<ProxyView, String> {
+pub fn proxy_set(config: ProxyConfig) -> Result<ProxyView, String> {
     let cfg = sanitize(config);
     validate(&cfg)?;
     settings::mutate(|s| {

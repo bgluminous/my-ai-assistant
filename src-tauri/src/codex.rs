@@ -1,15 +1,14 @@
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::sync::OnceLock;
 use walkdir::WalkDir;
 
 use crate::http;
 use crate::paths;
 use crate::pricing::{self, TokenRow, UsageAggregate};
+use crate::session_scan::{self, FileCache, TimeRange};
 
 const WHAM_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// 订阅起止时间（access_token JWT 经常没有 chatgpt_subscription_active_*，以此接口为准）。
@@ -376,37 +375,22 @@ fn codex_roots(home: Option<String>) -> Vec<PathBuf> {
     roots
 }
 
-fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
-fn jf(v: &Value, key: &str) -> f64 {
-    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
-}
-
-/// 已解析的单条记录（保留时间戳，扫描时再按 days 过滤，缓存因此与时间范围无关）。
+/// 已解析的单条记录（保留时间戳，扫描时再按范围过滤，缓存因此与时间范围无关）。
 #[derive(Clone)]
 struct CachedRow {
     ts: Option<DateTime<Utc>>,
     row: TokenRow,
 }
 
-/// 会话文件解析缓存：mtime + 大小未变则复用，避免每次扫描都全量重解析。
-struct FileCache {
-    mtime: SystemTime,
-    len: u64,
-    rows: Vec<CachedRow>,
-    had_meta: bool,
+/// 每个会话文件的解析结果：token 记录 + 是否含会话元信息（用于计会话数）。
+type ParsedFile = (Vec<CachedRow>, bool);
+
+fn scan_cache() -> &'static FileCache<ParsedFile> {
+    static CACHE: OnceLock<FileCache<ParsedFile>> = OnceLock::new();
+    CACHE.get_or_init(FileCache::new)
 }
 
-fn scan_cache() -> &'static Mutex<HashMap<PathBuf, FileCache>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, FileCache>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn parse_file(path: &std::path::Path) -> (Vec<CachedRow>, bool) {
+fn parse_file(path: &std::path::Path) -> ParsedFile {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(_) => return (Vec::new(), false),
@@ -438,11 +422,14 @@ fn parse_file(path: &std::path::Path) -> (Vec<CachedRow>, bool) {
                 if payload.get("type").and_then(|x| x.as_str()) != Some("token_count") {
                     continue;
                 }
-                let ts = v.get("timestamp").and_then(|x| x.as_str()).and_then(parse_ts);
+                let ts = v
+                    .get("timestamp")
+                    .and_then(|x| x.as_str())
+                    .and_then(session_scan::parse_ts);
                 if let Some(last) = payload.pointer("/info/last_token_usage") {
-                    let input_total = jf(last, "input_tokens");
-                    let cached = jf(last, "cached_input_tokens");
-                    let output = jf(last, "output_tokens");
+                    let input_total = session_scan::json_f64(last, "input_tokens");
+                    let cached = session_scan::json_f64(last, "cached_input_tokens");
+                    let output = session_scan::json_f64(last, "output_tokens");
                     if input_total == 0.0 && output == 0.0 && cached == 0.0 {
                         continue;
                     }
@@ -472,29 +459,23 @@ fn parse_file(path: &std::path::Path) -> (Vec<CachedRow>, bool) {
     (rows, had_meta)
 }
 
-/// 扫描本地会话并折算等价费用。
-/// 过滤起点：since_ms（unix 毫秒，可表达「本地自然日 0 点」这类固定时刻）优先于
-/// days 滚动窗口，两者皆无则不过滤；until_ms（可选，开区间）为过滤终点，
-/// 与 since_ms 搭配可表达「昨天」这类完整自然日。
+/// 扫描本地会话并折算等价费用。时间范围语义见 [`TimeRange`]（since_ms 优先于 days，
+/// until_ms 为开区间终点，与 since_ms 搭配可表达「昨天」这类完整自然日）。
 /// 同步命令会在主线程执行，全量解析大量 jsonl 时会把 UI 冻住，
 /// 因此这里声明为 async 并把重活丢到阻塞线程池。
 #[tauri::command]
 pub async fn codex_scan_sessions(
-    app: tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
     until_ms: Option<i64>,
     home: Option<String>,
 ) -> Result<CodexScan, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        scan_sessions_blocking(&app, days, since_ms, until_ms, home)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || scan_sessions_blocking(days, since_ms, until_ms, home))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn scan_sessions_blocking(
-    _app: &tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
     until_ms: Option<i64>,
@@ -502,12 +483,7 @@ fn scan_sessions_blocking(
 ) -> Result<CodexScan, String> {
     let table = pricing::load();
     let roots = codex_roots(home);
-    // since_ms（固定起点）优先于 days 滚动窗口
-    let cutoff = match since_ms {
-        Some(ms) => DateTime::from_timestamp_millis(ms),
-        None => days.map(|d| Utc::now() - Duration::days(d.max(0))),
-    };
-    let until = until_ms.and_then(DateTime::from_timestamp_millis);
+    let range = TimeRange::new(days, since_ms, until_ms);
     let mut rows: Vec<TokenRow> = Vec::new();
     let mut files_scanned = 0usize;
     let mut sessions = 0usize;
@@ -522,65 +498,15 @@ fn scan_sessions_blocking(
             }
             root_used = true;
             for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let is_jsonl = entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("jsonl"))
-                    .unwrap_or(false);
-                if !is_jsonl {
+                if !session_scan::is_jsonl_file(&entry) {
                     continue;
                 }
                 files_scanned += 1;
-                let path = entry.path().to_path_buf();
-                let (mtime, len) = entry
-                    .metadata()
-                    .ok()
-                    .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
-                    .unwrap_or((SystemTime::UNIX_EPOCH, 0));
-                // 命中缓存（mtime + 大小一致）则跳过解析
-                let cached = scan_cache().lock().ok().and_then(|c| {
-                    c.get(&path)
-                        .filter(|f| f.mtime == mtime && f.len == len)
-                        .map(|f| (f.rows.clone(), f.had_meta))
-                });
-                let (file_rows, had_meta) = match cached {
-                    Some(hit) => hit,
-                    None => {
-                        let (parsed_rows, meta) = parse_file(&path);
-                        if let Ok(mut c) = scan_cache().lock() {
-                            c.insert(
-                                path,
-                                FileCache {
-                                    mtime,
-                                    len,
-                                    rows: parsed_rows.clone(),
-                                    had_meta: meta,
-                                },
-                            );
-                        }
-                        (parsed_rows, meta)
-                    }
-                };
+                let (file_rows, had_meta) = scan_cache().get_or_parse(&entry, parse_file);
                 if had_meta {
                     sessions += 1;
                 }
-                for cr in file_rows {
-                    if let (Some(cut), Some(ts)) = (cutoff, cr.ts) {
-                        if ts < cut {
-                            continue;
-                        }
-                    }
-                    if let (Some(u), Some(ts)) = (until, cr.ts) {
-                        if ts >= u {
-                            continue;
-                        }
-                    }
-                    rows.push(cr.row);
-                }
+                rows.extend(file_rows.into_iter().filter(|cr| range.contains(cr.ts)).map(|cr| cr.row));
             }
         }
         if root_used {

@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::AppHandle;
 
+use crate::local_client::{
+    kill_pids, launch_detached_windows, path_starts_with_ci, wait_exit, ClientStatus, CloseResult,
+    DetectResult, LaunchResult, SwitchResult,
+};
 use crate::{accounts, audit, claude_oauth, paths, process, settings};
 
 // ---------------------------------------------------------------------------
@@ -50,18 +54,6 @@ fn credentials_path() -> Option<PathBuf> {
         })
         .or_else(|| paths::home_dir().map(|h| h.join(".claude")))?;
     Some(dir.join(".credentials.json"))
-}
-
-#[cfg(windows)]
-fn run_hidden(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW).output()
-}
-
-#[cfg(not(windows))]
-fn run_hidden(cmd: &mut Command) -> std::io::Result<std::process::Output> {
-    cmd.output()
 }
 
 /// macOS：从 Keychain 读取凭据 JSON。先按当前用户账户名查，再退回任意账户。
@@ -257,14 +249,6 @@ fn write_local_credentials(
 
 const CLAUDE_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
 
-fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-}
-
 /// Windows：AnthropicClaude 安装目录下最新的 app-x.y.z 版本目录。
 fn windows_latest_app_dir(base: &Path) -> Option<PathBuf> {
     let mut best: Option<(String, PathBuf)> = None;
@@ -285,7 +269,7 @@ fn windows_latest_app_dir(base: &Path) -> Option<PathBuf> {
 fn detect_candidates() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if cfg!(target_os = "windows") {
-        if let Some(local) = env_path("LOCALAPPDATA").or_else(paths::data_local_dir) {
+        if let Some(local) = paths::env_nonempty("LOCALAPPDATA").or_else(paths::data_local_dir) {
             let base = local.join("AnthropicClaude");
             out.push(base.join("claude.exe"));
             if let Some(app) = windows_latest_app_dir(&base) {
@@ -314,16 +298,6 @@ fn resolve_exe_path() -> Result<PathBuf, String> {
         .into_iter()
         .find(|p| p.exists())
         .ok_or_else(|| "claude_exe_not_found".to_string())
-}
-
-fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool {
-    let a = path.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
-    let b = prefix
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase();
-    let b = b.trim_end_matches('\\');
-    a == *b || a.starts_with(&format!("{b}\\"))
 }
 
 fn matches_desktop(p: &process::ProcessInfo) -> bool {
@@ -371,38 +345,6 @@ fn is_desktop_running() -> bool {
     !desktop_pids().is_empty()
 }
 
-fn wait_exit(timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !is_desktop_running() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-fn kill_pids(pids: &[u32], force: bool) {
-    if cfg!(target_os = "windows") {
-        for pid in pids {
-            let pid_s = pid.to_string();
-            let mut cmd = Command::new("taskkill");
-            cmd.args(["/PID", &pid_s]);
-            if force {
-                cmd.args(["/F", "/T"]);
-            }
-            let _ = run_hidden(&mut cmd);
-        }
-    } else if cfg!(target_os = "macos") {
-        let sig = if force { "-9" } else { "-TERM" };
-        for pid in pids {
-            let _ = Command::new("kill").args([sig, &pid.to_string()]).output();
-        }
-    }
-}
-
 /// 关闭 Claude Desktop：先优雅退出，约 8 秒超时后强制结束，再等约 3 秒确认。
 fn close_desktop() -> bool {
     if !is_desktop_running() {
@@ -410,36 +352,20 @@ fn close_desktop() -> bool {
     }
     if cfg!(target_os = "windows") {
         kill_pids(&desktop_pids(), false);
-        if !wait_exit(Duration::from_secs(8)) {
+        if !wait_exit(is_desktop_running, Duration::from_secs(8)) {
             kill_pids(&desktop_pids(), true);
-            let _ = wait_exit(Duration::from_secs(3));
+            let _ = wait_exit(is_desktop_running, Duration::from_secs(3));
         }
     } else if cfg!(target_os = "macos") {
         let _ = Command::new("osascript")
             .args(["-e", &format!("tell application id \"{CLAUDE_BUNDLE_ID}\" to quit")])
             .output();
-        if !wait_exit(Duration::from_secs(8)) {
+        if !wait_exit(is_desktop_running, Duration::from_secs(8)) {
             kill_pids(&desktop_pids(), true);
-            let _ = wait_exit(Duration::from_secs(3));
+            let _ = wait_exit(is_desktop_running, Duration::from_secs(3));
         }
     }
     !is_desktop_running()
-}
-
-/// Windows：脱离本进程 Job 启动，避免本应用退出时把客户端一并杀掉。
-#[cfg(windows)]
-fn launch_detached_windows(exe: &Path) -> bool {
-    use std::os::windows::process::CommandExt;
-    const DETACH_FLAGS: u32 = 0x0100_0000 | 0x0000_0200 | 0x0000_0008;
-    if Command::new(exe).creation_flags(DETACH_FLAGS).spawn().is_ok() {
-        return true;
-    }
-    Command::new("explorer.exe").arg(exe).spawn().is_ok()
-}
-
-#[cfg(not(windows))]
-fn launch_detached_windows(_exe: &Path) -> bool {
-    false
 }
 
 fn launch_desktop() -> bool {
@@ -474,13 +400,13 @@ fn view(cfg: &ClaudeClientConfig) -> ClaudeClientView {
 }
 
 #[tauri::command]
-pub fn claude_client_get(_app: AppHandle) -> Result<ClaudeClientView, String> {
+pub fn claude_client_get() -> Result<ClaudeClientView, String> {
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
-pub fn claude_client_set(_app: AppHandle, exe_path: String) -> Result<ClaudeClientView, String> {
+pub fn claude_client_set(exe_path: String) -> Result<ClaudeClientView, String> {
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("claude_exe_invalid".into());
@@ -493,12 +419,6 @@ pub fn claude_client_set(_app: AppHandle, exe_path: String) -> Result<ClaudeClie
     Ok(view(&cfg))
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DetectResult {
-    pub exe_path: Option<String>,
-}
-
 /// 探测常见安装位置，不写配置。
 #[tauri::command]
 pub fn claude_client_detect() -> DetectResult {
@@ -509,17 +429,8 @@ pub fn claude_client_detect() -> DetectResult {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClientStatus {
-    pub running: bool,
-    pub exe_configured: bool,
-    pub exe_path: Option<String>,
-}
-
 #[tauri::command]
-pub async fn claude_client_status(id: String) -> Result<ClientStatus, String> {
-    let _ = id;
+pub async fn claude_client_status() -> Result<ClientStatus, String> {
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -530,12 +441,6 @@ pub async fn claude_client_status(id: String) -> Result<ClientStatus, String> {
     })
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseResult {
-    pub closed: bool,
-}
-
 #[tauri::command]
 pub async fn claude_client_close() -> Result<CloseResult, String> {
     let closed = tauri::async_runtime::spawn_blocking(close_desktop)
@@ -544,35 +449,11 @@ pub async fn claude_client_close() -> Result<CloseResult, String> {
     Ok(CloseResult { closed })
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LaunchResult {
-    pub launched: bool,
-}
-
 #[tauri::command]
 pub fn claude_client_launch() -> Result<LaunchResult, String> {
     Ok(LaunchResult {
         launched: launch_desktop(),
     })
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SwitchResult {
-    pub switched: bool,
-    pub message: String,
-}
-
-/// 审计显示名：有备注用备注，否则用 token 前 8 字符打码。绝不落全量 token。
-fn display_name(acc: &accounts::Account) -> String {
-    let note = acc.note.trim();
-    if !note.is_empty() {
-        note.to_string()
-    } else {
-        let head: String = acc.token.trim().chars().take(8).collect();
-        format!("{head}…")
-    }
 }
 
 /// 切换本机 Claude Code 登录：用账户 refresh_token 换取全新凭据组后写入本机
@@ -606,7 +487,7 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
         None => return Err("claude_no_refresh_token".into()),
     };
 
-    let name = display_name(&acc);
+    let name = accounts::short_display_name(&acc);
     let subscription = acc
         .status
         .as_ref()
@@ -617,7 +498,6 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
     let (token, new_rt, expires_at_ms) = match claude_oauth::request_claude_refresh(&rt).await? {
         claude_oauth::ClaudeRefreshOutcome::Denied { body } => {
             audit::log(
-                &app,
                 "claude_renew_failed",
                 format!("Claude 续期被拒绝：{name}（{body}）"),
                 Some(json!({ "id": id })),
@@ -643,7 +523,6 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
     write_local_credentials(&token, &refresh_token, expires_at_ms, subscription.as_deref())?;
 
     audit::log(
-        &app,
         "claude_switch_local",
         format!("切换本机 Claude Code 登录：{name}"),
         Some(json!({ "id": id })),

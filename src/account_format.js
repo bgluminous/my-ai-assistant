@@ -1,0 +1,178 @@
+// 账户数据的纯格式化助手：套餐名 / 月费、Token 打码、相对时间、到期倒计时、
+// 超额与 Credits 文案。无状态、不触碰 DOM，主窗口账户页、用量页、快照与托盘面板共用；
+// 托盘面板因此无需引入整个账户管理模块。
+
+const MEMBERSHIP_LABELS = {
+  free: "Free",
+  pro: "Pro",
+  pro_plus: "Pro+",
+  ultra: "Ultra",
+  enterprise: "Enterprise",
+  business: "Business",
+  team: "Team",
+};
+
+// Codex 套餐名映射（chatgpt_plan_type -> 展示名），未知值原样显示
+const CODEX_PLAN_LABELS = {
+  plus: "Plus",
+  pro: "Pro",
+  team: "Team",
+  enterprise: "Enterprise",
+  business: "Business",
+  free: "Free",
+  edu: "Edu",
+};
+
+// Claude 订阅类型映射（subscription_type -> 展示名），未知值原样显示
+const CLAUDE_PLAN_LABELS = {
+  free: "Free",
+  pro: "Pro",
+  max: "Max",
+  team: "Team",
+  enterprise: "Enterprise",
+};
+
+// Cursor 套餐月费（美元 / 月），用量统计页用于对比等价 API 费用；未收录的套餐（如企业定制）视为未知
+const CURSOR_PLAN_USD = {
+  free: 0,
+  pro: 20,
+  pro_plus: 60,
+  ultra: 200,
+  business: 40,
+  team: 40,
+};
+
+/** Cursor 套餐月费（USD/月）；未知套餐返回 null。 */
+export function planMonthlyUsd(membershipType) {
+  const key = String(membershipType ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(CURSOR_PLAN_USD, key) ? CURSOR_PLAN_USD[key] : null;
+}
+
+export function membershipLabel(value) {
+  const key = String(value ?? "").toLowerCase();
+  if (!key) return "";
+  return MEMBERSHIP_LABELS[key] || String(value);
+}
+
+export function codexPlanLabel(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return "";
+  return CODEX_PLAN_LABELS[key] || String(value);
+}
+
+export function claudePlanLabel(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (!key) return "";
+  return CLAUDE_PLAN_LABELS[key] || String(value);
+}
+
+/** 保留两端、中间省略的打码 token（列表与托盘展示用）。 */
+export function maskToken(token) {
+  const t = String(token || "").trim();
+  if (!t) return "—";
+  if (t.length > 20) return `${t.slice(0, 12)}…${t.slice(-4)}`;
+  return `${t.slice(0, 4)}…`;
+}
+
+export function relativeFromMs(ms) {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "刚刚";
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return new Date(ms).toLocaleDateString("zh-CN");
+}
+
+/** 账户上次刷新时间的相对文案（如 5 分钟前）。 */
+export function relativeFromUnixSeconds(seconds) {
+  const n = Number(seconds);
+  if (seconds == null || !Number.isFinite(n) || n <= 0) return "—";
+  return relativeFromMs(n * 1000);
+}
+
+/** 到期剩余时长的紧凑文本（Nd / Nh / <1h）；已过期返回 expired=true。 */
+export function remainInfo(endMs) {
+  const remainMs = endMs - Date.now();
+  if (remainMs <= 0) return { text: "已到期", expired: true };
+  const days = Math.floor(remainMs / 86_400_000);
+  const hours = Math.floor(remainMs / 3_600_000);
+  return { text: days >= 1 ? `${days}d` : hours >= 1 ? `${hours}h` : "<1h", expired: false };
+}
+
+/** 美元金额文本（千分位 + 两位小数），无效值返回 —。 */
+export function usdText(usd) {
+  const n = Number(usd);
+  if (!Number.isFinite(n)) return "—";
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** 美分 -> 美元文本（千分位 + 两位小数），无效值返回 —。 */
+export function centsText(cents) {
+  const n = Number(cents);
+  if (!Number.isFinite(n)) return "—";
+  return usdText(n / 100);
+}
+
+/**
+ * ChatGPT extra usage：wham/usage 的 credits.balance 是 credit 点数（可带小数），
+ * 不是美元。官网余额 = floor(点数) × $0.04（本机实测 2838.51523 → $113.52）。
+ */
+const CODEX_CREDIT_USD = 0.04;
+
+function creditsNumber(value) {
+  if (typeof value === "number" || typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * 从 credits 取出点数与美元余额。结构为
+ * `{ has_credits, unlimited, balance }`；兼容 available / remaining 别名。
+ */
+export function parseCreditsUsd(credits) {
+  if (credits == null) return { unlimited: false, units: null, usd: null };
+  let raw = creditsNumber(credits);
+  let unlimited = false;
+  if (raw == null && typeof credits === "object") {
+    unlimited = credits.unlimited === true;
+    for (const key of ["balance", "available", "remaining"]) {
+      raw = creditsNumber(credits[key]);
+      if (raw != null) break;
+    }
+  }
+  if (raw == null) return { unlimited, units: null, usd: null };
+  const units = Math.floor(raw);
+  return { unlimited, units, usd: units * CODEX_CREDIT_USD };
+}
+
+/**
+ * 托盘第二行：Cursor 超额紧凑文案。未开启或账户无效返回 null。
+ * 有上限时 title 为「上限 $x.xx」，供悬停展示。
+ */
+export function onDemandBrief(status) {
+  const onDemand = status && status.alive !== false ? status.onDemand || null : null;
+  if (!onDemand || !onDemand.enabled) return null;
+  const limitCents = Number(onDemand.limit);
+  return {
+    text: `超额 ${centsText(onDemand.used)}`,
+    title: Number.isFinite(limitCents) && limitCents > 0 ? `上限 ${centsText(limitCents)}` : "",
+  };
+}
+
+/**
+ * 托盘第二行：Codex Credits 余额紧凑文案。解析不出返回 null。
+ * 无限显示「余额 无限」；点数放进 title。
+ */
+export function creditsBrief(status) {
+  const credits = status && status.alive !== false ? status.credits : null;
+  if (credits == null) return null;
+  const { unlimited, units, usd } = parseCreditsUsd(credits);
+  if (!unlimited && usd == null) return null;
+  return {
+    text: unlimited ? "余额 无限" : `余额 ${usdText(usd)}`,
+    title: units != null ? `${units.toLocaleString("en-US")} 点` : "",
+  };
+}

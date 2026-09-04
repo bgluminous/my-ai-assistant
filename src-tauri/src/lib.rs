@@ -10,11 +10,13 @@ mod cursor;
 mod cursor_local;
 mod http;
 mod launch;
+mod local_client;
 mod model_match;
 mod paths;
 mod pricing;
 mod process;
 mod proxy;
+mod session_scan;
 mod settings;
 mod tray;
 mod usage_archive;
@@ -56,7 +58,7 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .setup(move |app| {
-            settings::load(app.handle());
+            settings::load();
             // 静默启动 = 开机自启动拉起 + 设置勾选静默；需在设置载入后判定
             let silent = autostart_launch && settings::read(|s| s.autostart_silent).unwrap_or(false);
             launch::set_silent_launch(silent);

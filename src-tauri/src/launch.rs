@@ -75,7 +75,7 @@ pub fn autostart_set(app: AppHandle, enabled: bool, silent: bool) -> Result<Auto
         } else {
             "关闭开机自启动".to_string()
         };
-        audit::log(&app, "autostart_set", message, None);
+        audit::log("autostart_set", message, None);
     }
     current_view(&app)
 }

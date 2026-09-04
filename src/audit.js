@@ -16,6 +16,8 @@ const EVENT_META = {
   account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },
   codex_renewed: { label: "自动续期", cls: "ok", group: "renew" },
   codex_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
+  codex_sync: { label: "同步本机登录", cls: "ok", group: "renew" },
+  codex_sync_failed: { label: "同步本机失败", cls: "bad", group: "renew" },
   claude_renewed: { label: "自动续期", cls: "ok", group: "renew" },
   claude_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
   cursor_switch_local: { label: "切换登录", cls: "accent", group: "account" },
@@ -23,8 +25,8 @@ const EVENT_META = {
   claude_switch_local: { label: "切换登录", cls: "accent", group: "account" },
   settings_load_failed: { label: "设置载入失败", cls: "bad", group: "settings" },
   interval_set: { label: "定时设置", cls: "accent", group: "settings" },
-  usage_interval_set: { label: "统计设置", cls: "accent", group: "settings" },
   autostart_set: { label: "开机启动", cls: "accent", group: "settings" },
+  pricing_update: { label: "价格表更新", cls: "accent", group: "settings" },
   backup_export: { label: "导出备份", cls: "accent", group: "settings" },
   backup_import: { label: "导入备份", cls: "ok", group: "settings" },
 };

@@ -322,7 +322,6 @@ async fn fetch_events_page(
 
 #[tauri::command]
 pub async fn cursor_aggregate(
-    _app: tauri::AppHandle,
     session_token: String,
     start: Option<i64>,
     end: Option<i64>,

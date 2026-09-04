@@ -1,4 +1,4 @@
-import { el, invoke, copyText, resetError, fillStatus, fmtDateMs } from "./shared.js";
+import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml } from "./shared.js";
 
 // 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
 // 覆盖写入用户目录 xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
@@ -15,10 +15,6 @@ const state = {
 let chip = null;
 
 const SOURCE_LABEL = { default: "默认", remote: "在线", custom: "自定义" };
-
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
 
 function numToStr(v) {
   return v === null || v === undefined || !Number.isFinite(v) ? "0" : String(v);

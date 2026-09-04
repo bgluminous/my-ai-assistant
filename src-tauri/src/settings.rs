@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
-use tauri::AppHandle;
 
 use crate::accounts::{Account, AccountsFile};
 use crate::audit;
@@ -126,7 +125,7 @@ pub fn ensure_loaded() -> Result<(), String> {
 
 /// 应用启动时从配置文件载入全部设置到全局；短暂读取失败时小退避重试。
 /// 最终失败只记审计日志，不让应用崩溃——后续命令会通过 ensure_loaded 自愈。
-pub fn load(app: &AppHandle) {
+pub fn load() {
     let mut last_err = String::new();
     for _ in 0..3 {
         match attempt_load() {
@@ -136,7 +135,6 @@ pub fn load(app: &AppHandle) {
         std::thread::sleep(Duration::from_millis(80));
     }
     audit::log(
-        app,
         "settings_load_failed",
         format!("启动时读取设置失败：{last_err}（不会覆盖原文件，首次访问时自动重试）"),
         None,

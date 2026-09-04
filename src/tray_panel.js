@@ -1,5 +1,5 @@
-import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./accounts.js";
+import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./account_format.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -351,8 +351,7 @@ function render() {
     if (!subset.length) {
       const empty = document.createElement("div");
       empty.className = "tray-empty";
-      const label = kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
-      empty.textContent = `暂无 ${label} 账户，请到主窗口添加。`;
+      empty.textContent = `暂无 ${kindLabel(kind)} 账户，请到主窗口添加。`;
       list.append(empty);
     } else {
       for (const account of subset) list.append(accountRow(account));
@@ -1278,7 +1277,7 @@ async function doSwitch(id) {
   try {
     if (account && account.kind === "codex") {
       trayModal.openBusy("切换本机 ChatGPT 登录", "正在检测本地 ChatGPT…");
-      const st = await invoke("codex_client_status", { id });
+      const st = await invoke("codex_client_status");
       if (!st.exeConfigured) {
         trayModal.finish(false, "未找到 ChatGPT，请到主窗口设置。");
         return;
@@ -1316,7 +1315,7 @@ async function doSwitch(id) {
     if (account && account.kind === "claude") {
       // 写入的是 Claude Code 凭据；Claude Desktop 仅联动关闭 / 启动，未安装也可切
       trayModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
-      const st = await invoke("claude_client_status", { id });
+      const st = await invoke("claude_client_status");
       const hasDesktop = !!st.exeConfigured;
       const agreed = await trayModal.toConfirm(st.running
         ? { body: "Claude Desktop 正在运行，切换将先关闭它，未保存内容可能丢失。确定继续？", confirmText: "关闭并切换", danger: true }
@@ -1357,7 +1356,7 @@ async function doSwitch(id) {
       return;
     }
     trayModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
-    const st = await invoke("cursor_client_status", { id });
+    const st = await invoke("cursor_client_status");
     if (!st.exeConfigured) {
       trayModal.finish(false, "未找到 Cursor 可执行文件，请到主窗口设置。");
       return;

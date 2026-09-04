@@ -29,8 +29,6 @@ const PEEK_SCAN_RANGES = ["7", "30", "all"];
 
 let ttlMs = DEFAULT_USAGE_TTL_MS;
 const memAgg = new Map();
-const memScan = new Map();
-const memClaudeScan = new Map();
 const inflight = new Map();
 
 export function setUsageCacheTtlMs(ms) {
@@ -38,18 +36,13 @@ export function setUsageCacheTtlMs(ms) {
   ttlMs = Number.isFinite(n) && n > 0 ? n : DEFAULT_USAGE_TTL_MS;
 }
 
-export function usageCacheTtlMs() {
-  return ttlMs;
-}
-
 export function isUsageCacheFresh(at) {
   return Number.isFinite(at) && at > 0 && Date.now() - at < ttlMs;
 }
 
-export function clearUsageMemoryCache() {
+function clearUsageMemoryCache() {
   memAgg.clear();
-  memScan.clear();
-  memClaudeScan.clear();
+  for (const src of SCAN_SOURCES) src.mem.clear();
 }
 
 export function localYmd(d = new Date()) {
@@ -69,6 +62,17 @@ export function dayStartMs(offsetDays = 0, d = new Date()) {
   return new Date(x.getFullYear(), x.getMonth(), x.getDate() + offsetDays).getTime();
 }
 
+/** 本地日历日加减：返回 d 所在日往后 n 天的本地 0 点（Date）。 */
+export function addLocalDays(d, n) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+}
+
+/** YYYY-MM-DD -> 该本地日 0 点的 Date。 */
+export function parseYmd(ymd) {
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
 export function todayRangeKey(ymd = localYmd()) {
   return `today:${ymd}`;
 }
@@ -78,17 +82,7 @@ export function dayRangeKey(ymd) {
   return `day:${ymd}`;
 }
 
-export function recentYmds(n, end = new Date()) {
-  const end0 = new Date(end.getFullYear(), end.getMonth(), end.getDate());
-  const labels = [];
-  for (let i = n - 1; i >= 0; i -= 1) {
-    const d = new Date(end0.getFullYear(), end0.getMonth(), end0.getDate() - i);
-    labels.push(localYmd(d));
-  }
-  return labels;
-}
-
-export function dailyOn(agg, ymd) {
+function dailyOn(agg, ymd) {
   const list = agg && Array.isArray(agg.daily) ? agg.daily : [];
   return list.find((d) => d && d.date === ymd) || null;
 }
@@ -111,9 +105,16 @@ export function forgetUsageCacheFromEvent(key) {
   }
   if (!key.startsWith(USAGE_CACHE_PREFIX)) return;
   const rest = key.slice(USAGE_CACHE_PREFIX.length);
-  if (rest.startsWith("agg:")) memAgg.delete(rest.slice(4));
-  else if (rest.startsWith("cscan:")) memClaudeScan.delete(rest.slice(6));
-  else if (rest.startsWith("scan:")) memScan.delete(rest.slice(5));
+  if (rest.startsWith("agg:")) {
+    memAgg.delete(rest.slice(4));
+    return;
+  }
+  for (const src of SCAN_SOURCES) {
+    if (rest.startsWith(src.prefix)) {
+      src.mem.delete(rest.slice(src.prefix.length));
+      return;
+    }
+  }
 }
 
 function cacheLoad(key) {
@@ -140,33 +141,7 @@ export function getCachedAgg(accountId, rangeKey) {
   return entry;
 }
 
-export function getCachedScan(rangeKey, home) {
-  const key = `${rangeKey}:${home || ""}`;
-  let entry = memScan.get(key) || null;
-  if (!entry) {
-    const stored = cacheLoad(`scan:${key}`);
-    if (stored && stored.scan && stored.scan.aggregate) {
-      entry = stored;
-      memScan.set(key, entry);
-    }
-  }
-  return entry;
-}
-
-export function getCachedClaudeScan(rangeKey, home) {
-  const key = `${rangeKey}:${home || ""}`;
-  let entry = memClaudeScan.get(key) || null;
-  if (!entry) {
-    const stored = cacheLoad(`cscan:${key}`);
-    if (stored && stored.scan && stored.scan.aggregate) {
-      entry = stored;
-      memClaudeScan.set(key, entry);
-    }
-  }
-  return entry;
-}
-
-/** 优先今日键，其次 7/30/90/全部（用 daily 切片出当天）。 */
+/** 优先今日键，其次 7/30/全部（用 daily 切片出当天）。 */
 export function peekAggForDay(accountId, ymd) {
   const todayKey = todayRangeKey(ymd);
   const today = getCachedAgg(accountId, todayKey);
@@ -174,30 +149,6 @@ export function peekAggForDay(accountId, ymd) {
   for (const rk of PEEK_DAY_RANGES) {
     const entry = getCachedAgg(accountId, rk);
     if (entry && entry.agg) return { entry, rangeKey: rk };
-  }
-  return null;
-}
-
-export function peekScanForDay(ymd, home) {
-  const h = home || "";
-  const todayKey = todayRangeKey(ymd);
-  const today = getCachedScan(todayKey, h);
-  if (today) return { entry: today, rangeKey: todayKey };
-  for (const rk of PEEK_SCAN_RANGES) {
-    const entry = getCachedScan(rk, h);
-    if (entry && entry.scan && entry.scan.aggregate) return { entry, rangeKey: rk };
-  }
-  return null;
-}
-
-export function peekClaudeScanForDay(ymd, home) {
-  const h = home || "";
-  const todayKey = todayRangeKey(ymd);
-  const today = getCachedClaudeScan(todayKey, h);
-  if (today) return { entry: today, rangeKey: todayKey };
-  for (const rk of PEEK_SCAN_RANGES) {
-    const entry = getCachedClaudeScan(rk, h);
-    if (entry && entry.scan && entry.scan.aggregate) return { entry, rangeKey: rk };
   }
   return null;
 }
@@ -211,8 +162,7 @@ function pastDayHit(get, ymd, seriesRanges, hasData) {
   const dayKey = dayRangeKey(ymd);
   const day = get(dayKey);
   if (day) return { entry: day, rangeKey: dayKey };
-  const [y, m, d] = String(ymd).split("-").map(Number);
-  const dayEnd = new Date(y, m - 1, d + 1).getTime();
+  const dayEnd = addLocalDays(parseYmd(ymd), 1).getTime();
   for (const rk of seriesRanges) {
     const entry = get(rk);
     if (entry && hasData(entry) && entry.at >= dayEnd) return { entry, rangeKey: rk };
@@ -224,24 +174,6 @@ export function peekAggForPastDay(accountId, ymd) {
   return pastDayHit((rk) => getCachedAgg(accountId, rk), ymd, PEEK_DAY_RANGES, (e) => !!e.agg);
 }
 
-export function peekScanForPastDay(ymd, home) {
-  return pastDayHit(
-    (rk) => getCachedScan(rk, home || ""),
-    ymd,
-    PEEK_SCAN_RANGES,
-    (e) => !!(e.scan && e.scan.aggregate)
-  );
-}
-
-export function peekClaudeScanForPastDay(ymd, home) {
-  return pastDayHit(
-    (rk) => getCachedClaudeScan(rk, home || ""),
-    ymd,
-    PEEK_SCAN_RANGES,
-    (e) => !!(e.scan && e.scan.aggregate)
-  );
-}
-
 /** 优先 30/7/全部的按日序列，供托盘近 7 日柱图；没有再退回今日键。 */
 export function peekAggSeries(accountId, ymd) {
   for (const rk of ["30", "7", "0"]) {
@@ -251,30 +183,6 @@ export function peekAggSeries(accountId, ymd) {
     }
   }
   return peekAggForDay(accountId, ymd);
-}
-
-export function peekScanSeries(ymd, home) {
-  const h = home || "";
-  for (const rk of ["30", "7", "all"]) {
-    const entry = getCachedScan(rk, h);
-    if (entry && entry.scan && entry.scan.aggregate && Array.isArray(entry.scan.aggregate.daily)
-      && entry.scan.aggregate.daily.length) {
-      return { entry, rangeKey: rk };
-    }
-  }
-  return peekScanForDay(ymd, h);
-}
-
-export function peekClaudeScanSeries(ymd, home) {
-  const h = home || "";
-  for (const rk of ["30", "7", "all"]) {
-    const entry = getCachedClaudeScan(rk, h);
-    if (entry && entry.scan && entry.scan.aggregate && Array.isArray(entry.scan.aggregate.daily)
-      && entry.scan.aggregate.daily.length) {
-      return { entry, rangeKey: rk };
-    }
-  }
-  return peekClaudeScanForDay(ymd, h);
 }
 
 function attachUsageCache(error, cached) {
@@ -342,67 +250,104 @@ function scanRangeKey(days, sinceMs, untilMs) {
   return days == null || days === 0 ? "all" : String(days);
 }
 
-export function fetchCodexScan({ days, sinceMs, untilMs, home, force } = {}) {
-  const h = home || "";
-  const rangeKey = scanRangeKey(days, sinceMs, untilMs);
-  const key = `${rangeKey}:${h}`;
-  const cached = getCachedScan(rangeKey, h);
-  if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
-  const inflightKey = `scan:${key}`;
-  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
-  const p = withTimeout(
-    invoke("codex_scan_sessions", {
-      days: days == null || days === 0 ? null : days,
-      sinceMs: sinceMs ?? null,
-      untilMs: untilMs ?? null,
-      home: h || null,
-    }),
-    "codex_scan_sessions"
-  )
-    .then((scan) => {
-      const entry = { scan, at: Date.now() };
-      memScan.set(key, entry);
-      cacheStore(`scan:${key}`, entry);
-      return entry;
-    })
-    .catch((error) => {
-      throw attachUsageCache(error, cached);
-    })
-    .finally(() => inflight.delete(inflightKey));
-  inflight.set(inflightKey, p);
-  return p;
+/**
+ * 本地会话扫描来源（本地 Codex / Claude Code）的缓存读取、按日探查与拉取。两者只差内存表、
+ * 存储键前缀（scan: / cscan:）与后端命令名，其余逻辑完全一致，由此工厂各生成一组函数。
+ */
+function makeScanSource({ prefix, command }) {
+  const mem = new Map();
+  const hasData = (entry) => !!(entry.scan && entry.scan.aggregate);
+
+  const getCached = (rangeKey, home) => {
+    const key = `${rangeKey}:${home || ""}`;
+    let entry = mem.get(key) || null;
+    if (!entry) {
+      const stored = cacheLoad(`${prefix}${key}`);
+      if (stored && hasData(stored)) {
+        entry = stored;
+        mem.set(key, entry);
+      }
+    }
+    return entry;
+  };
+
+  /** 优先今日键，其次 7/30/全部（用 daily 切片出当天）。 */
+  const peekForDay = (ymd, home) => {
+    const h = home || "";
+    const todayKey = todayRangeKey(ymd);
+    const today = getCached(todayKey, h);
+    if (today) return { entry: today, rangeKey: todayKey };
+    for (const rk of PEEK_SCAN_RANGES) {
+      const entry = getCached(rk, h);
+      if (entry && hasData(entry)) return { entry, rangeKey: rk };
+    }
+    return null;
+  };
+
+  const peekForPastDay = (ymd, home) =>
+    pastDayHit((rk) => getCached(rk, home || ""), ymd, PEEK_SCAN_RANGES, hasData);
+
+  /** 优先 30/7/全部的按日序列，供托盘近 7 日柱图；没有再退回今日键。 */
+  const peekSeries = (ymd, home) => {
+    const h = home || "";
+    for (const rk of ["30", "7", "all"]) {
+      const entry = getCached(rk, h);
+      if (entry && hasData(entry) && Array.isArray(entry.scan.aggregate.daily) && entry.scan.aggregate.daily.length) {
+        return { entry, rangeKey: rk };
+      }
+    }
+    return peekForDay(ymd, h);
+  };
+
+  const fetch = ({ days, sinceMs, untilMs, home, force } = {}) => {
+    const h = home || "";
+    const rangeKey = scanRangeKey(days, sinceMs, untilMs);
+    const key = `${rangeKey}:${h}`;
+    const cached = getCached(rangeKey, h);
+    if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
+    const inflightKey = `${prefix}${key}`;
+    if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+    const p = withTimeout(
+      invoke(command, {
+        days: days == null || days === 0 ? null : days,
+        sinceMs: sinceMs ?? null,
+        untilMs: untilMs ?? null,
+        home: h || null,
+      }),
+      command
+    )
+      .then((scan) => {
+        const entry = { scan, at: Date.now() };
+        mem.set(key, entry);
+        cacheStore(`${prefix}${key}`, entry);
+        return entry;
+      })
+      .catch((error) => {
+        throw attachUsageCache(error, cached);
+      })
+      .finally(() => inflight.delete(inflightKey));
+    inflight.set(inflightKey, p);
+    return p;
+  };
+
+  return { mem, prefix, getCached, peekForDay, peekForPastDay, peekSeries, fetch };
 }
 
-export function fetchClaudeScan({ days, sinceMs, untilMs, home, force } = {}) {
-  const h = home || "";
-  const rangeKey = scanRangeKey(days, sinceMs, untilMs);
-  const key = `${rangeKey}:${h}`;
-  const cached = getCachedClaudeScan(rangeKey, h);
-  if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
-  const inflightKey = `cscan:${key}`;
-  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
-  const p = withTimeout(
-    invoke("claude_scan_sessions", {
-      days: days == null || days === 0 ? null : days,
-      sinceMs: sinceMs ?? null,
-      untilMs: untilMs ?? null,
-      home: h || null,
-    }),
-    "claude_scan_sessions"
-  )
-    .then((scan) => {
-      const entry = { scan, at: Date.now() };
-      memClaudeScan.set(key, entry);
-      cacheStore(`cscan:${key}`, entry);
-      return entry;
-    })
-    .catch((error) => {
-      throw attachUsageCache(error, cached);
-    })
-    .finally(() => inflight.delete(inflightKey));
-  inflight.set(inflightKey, p);
-  return p;
-}
+const codexScan = makeScanSource({ prefix: "scan:", command: "codex_scan_sessions" });
+const claudeScan = makeScanSource({ prefix: "cscan:", command: "claude_scan_sessions" });
+const SCAN_SOURCES = [codexScan, claudeScan];
+
+export const getCachedScan = codexScan.getCached;
+export const peekScanForDay = codexScan.peekForDay;
+export const peekScanForPastDay = codexScan.peekForPastDay;
+export const peekScanSeries = codexScan.peekSeries;
+export const fetchCodexScan = codexScan.fetch;
+
+export const getCachedClaudeScan = claudeScan.getCached;
+export const peekClaudeScanForDay = claudeScan.peekForDay;
+export const peekClaudeScanForPastDay = claudeScan.peekForPastDay;
+export const peekClaudeScanSeries = claudeScan.peekSeries;
+export const fetchClaudeScan = claudeScan.fetch;
 
 export function purgeAccountCache(accountId) {
   const memPrefix = `${accountId}:`;
@@ -442,20 +387,6 @@ export function purgeMissingAccounts(list) {
     }
   } catch { /* ignore */ }
   notifyUsageCache(USAGE_CACHE_PREFIX);
-}
-
-/** 把某一天的切片写回 daily[]，避免今日数字与近 7 日柱的当日列不一致。 */
-export function overlayDay(daily, ymd, slice) {
-  const list = Array.isArray(daily) ? daily.map((d) => ({ ...d })) : [];
-  const tokens = Number(slice && slice.tokens) || 0;
-  const usd = Number(slice && slice.usd) || 0;
-  const i = list.findIndex((d) => d && d.date === ymd);
-  if (i >= 0) {
-    list[i] = { ...list[i], tokens, equivalentUsd: usd };
-    return list;
-  }
-  if (tokens > 0) list.push({ date: ymd, tokens, equivalentUsd: usd, actualUsd: usd });
-  return list;
 }
 
 /** 单日键（today: / day:）：聚合范围就是那一天，合计即当日合计。 */

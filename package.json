@@ -8,6 +8,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1",
+    "check:js": "node scripts/check-js.mjs",
     "icons": "tauri icon app-icon.png"
   },
   "devDependencies": {

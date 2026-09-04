@@ -8,9 +8,11 @@ import {
   colorFor,
   resetError,
   pieSliceLabelsPlugin,
+  tickDate,
+  topSlices,
 } from "./shared.js";
-import { fetchCursorAggregate, getCachedAgg } from "./usage_data.js";
-import { membershipLabel, planMonthlyUsd } from "./accounts.js";
+import { fetchCursorAggregate, getCachedAgg, localYmd, parseYmd, addLocalDays } from "./usage_data.js";
+import { membershipLabel, planMonthlyUsd } from "./account_format.js";
 
 // Cursor 账户全量用量快照：把「全部」跨度的聚合结果渲染成一张 PNG 图片保存到本地。
 //
@@ -113,25 +115,10 @@ async function acquireData(account) {
   }
 }
 
-/* ---------- 日期与文件名 ---------- */
+/* ---------- 文件名 ---------- */
 
 function pad2(n) {
   return String(n).padStart(2, "0");
-}
-function localYmd(d) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-function parseYmd(ymd) {
-  const [y, m, d] = String(ymd).split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-function addDays(d, n) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
-}
-function tickDate(ymd) {
-  const p = String(ymd).split("-");
-  if (p.length !== 3) return ymd;
-  return `${Number(p[1])}/${Number(p[2])}`;
 }
 
 function sanitizeFileName(s) {
@@ -225,7 +212,7 @@ function dailyAxisLabels(daily, endMs) {
   let cur = parseYmd(min);
   while (cur.getTime() <= end0.getTime() && labels.length < 3660) {
     labels.push(localYmd(cur));
-    cur = addDays(cur, 1);
+    cur = addLocalDays(cur, 1);
   }
   return labels;
 }
@@ -283,21 +270,6 @@ function dailyChartConfig(agg, at, t, font, w, h) {
   };
 }
 
-/** 按指定指标取 Top N 模型切片，其余合并为「其他」（与用量页一致）。 */
-function topSlices(models, metric, n) {
-  const list = (models || [])
-    .filter((m) => m[metric] > 0)
-    .slice()
-    .sort((a, b) => b[metric] - a[metric]);
-  const top = list.slice(0, n);
-  const rest = list.slice(n);
-  const slices = top.map((m) => ({ label: m.model, value: m[metric] }));
-  if (rest.length) {
-    slices.push({ label: "其他", value: rest.reduce((sum, m) => sum + m[metric], 0) });
-  }
-  return slices;
-}
-
 function pieConfig(labels, data, colors, t, font, w, h, sliceFormatter) {
   return {
     $w: w,
@@ -333,7 +305,7 @@ function pieConfig(labels, data, colors, t, font, w, h, sliceFormatter) {
 /** 模型行超过上限时合并尾部为「其他」，保持总量不变。 */
 function tableRows(agg) {
   const models = agg.models || [];
-  if (models.length <= TABLE_MAX_ROWS) return { rows: models, mergedCount: 0 };
+  if (models.length <= TABLE_MAX_ROWS) return models;
   const head = models.slice(0, TABLE_MAX_ROWS - 1);
   const rest = models.slice(TABLE_MAX_ROWS - 1);
   const merged = {
@@ -366,7 +338,7 @@ function tableRows(agg) {
     merged.cacheReadUsd += m.cacheReadUsd;
     merged.cacheWriteUsd += m.cacheWriteUsd;
   }
-  return { rows: [...head, merged], mergedCount: rest.length };
+  return [...head, merged];
 }
 
 /* ---------- 主绘制 ---------- */
@@ -392,7 +364,7 @@ function renderSnapshot(account, data, appInfo) {
   const planLabel = membership ? membershipLabel(membership) : "";
   const price = planMonthlyUsd(membership);
 
-  const { rows } = tableRows(agg);
+  const rows = tableRows(agg);
   const hasModels = rows.length > 0;
   const events = (agg.models || []).reduce((s, m) => s + (m.events || 0), 0);
 

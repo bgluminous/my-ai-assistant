@@ -1,13 +1,12 @@
 //! Claude 集成：账户额度窗口查询（Anthropic 非公开 OAuth 接口）
 //! 与本机 Claude Code 会话日志扫描（token 用量按官方 API 价折算）。
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::sync::OnceLock;
 use walkdir::WalkDir;
 
 use crate::claude_oauth;
@@ -15,6 +14,7 @@ use crate::codex::UsageWindow;
 use crate::http;
 use crate::paths;
 use crate::pricing::{self, TokenRow, UsageAggregate};
+use crate::session_scan::{self, FileCache, TimeRange};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
@@ -127,8 +127,8 @@ fn find_plan(v: &Value) -> Option<String> {
         None
     };
     pick(v)
-        .or_else(|| v.get("account").and_then(|a| pick(a)))
-        .or_else(|| v.get("organization").and_then(|o| pick(o)))
+        .or_else(|| v.get("account").and_then(&pick))
+        .or_else(|| v.get("organization").and_then(pick))
 }
 
 struct ProfileInfo {
@@ -293,16 +293,6 @@ fn claude_roots(home: Option<String>) -> Vec<PathBuf> {
     roots
 }
 
-fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
-fn jf(v: &Value, key: &str) -> f64 {
-    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
-}
-
 fn js<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("")
 }
@@ -354,16 +344,9 @@ fn row_total(r: &TokenRow) -> f64 {
     r.input + r.output + r.cache_read + r.cache_write
 }
 
-/// 会话文件解析缓存：mtime + 大小未变则复用（与 codex 扫描同策略）。
-struct FileCache {
-    mtime: SystemTime,
-    len: u64,
-    rows: Vec<ClaudeRow>,
-}
-
-fn scan_cache() -> &'static Mutex<HashMap<PathBuf, FileCache>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, FileCache>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn scan_cache() -> &'static FileCache<Vec<ClaudeRow>> {
+    static CACHE: OnceLock<FileCache<Vec<ClaudeRow>>> = OnceLock::new();
+    CACHE.get_or_init(FileCache::new)
 }
 
 fn parse_file(path: &Path) -> Vec<ClaudeRow> {
@@ -394,14 +377,17 @@ fn parse_file(path: &Path) -> Vec<ClaudeRow> {
         if model == "<synthetic>" {
             continue;
         }
-        let input = jf(usage, "input_tokens");
-        let output = jf(usage, "output_tokens");
-        let cache_write = jf(usage, "cache_creation_input_tokens");
-        let cache_read = jf(usage, "cache_read_input_tokens");
+        let input = session_scan::json_f64(usage, "input_tokens");
+        let output = session_scan::json_f64(usage, "output_tokens");
+        let cache_write = session_scan::json_f64(usage, "cache_creation_input_tokens");
+        let cache_read = session_scan::json_f64(usage, "cache_read_input_tokens");
         if input == 0.0 && output == 0.0 && cache_write == 0.0 && cache_read == 0.0 {
             continue;
         }
-        let ts = v.get("timestamp").and_then(|x| x.as_str()).and_then(parse_ts);
+        let ts = v
+            .get("timestamp")
+            .and_then(|x| x.as_str())
+            .and_then(session_scan::parse_ts);
         let session = {
             let s = js(&v, "sessionId").trim();
             if s.is_empty() {
@@ -438,6 +424,7 @@ fn parse_file(path: &Path) -> Vec<ClaudeRow> {
 /// sidechain 重放也会重复计数。口径对齐 ccusage：
 /// - 主键 (session, message_id, request_id)：重复时保留 token 总量大的（非 sidechain 优先）；
 /// - 重放键 (session, message_id, timestamp)：任一方是 sidechain 即视为同一条。
+///
 /// 无 message_id 的行不去重。
 struct Dedupe {
     rows: Vec<TokenRow>,
@@ -498,26 +485,22 @@ impl Dedupe {
     }
 }
 
-/// 扫描本机 Claude Code 会话日志并折算等价费用。since_ms（unix 毫秒）优先于
-/// days 滚动窗口，两者皆无则不过滤；until_ms（可选，开区间）为过滤终点，
-/// 与 since_ms 搭配可表达「昨天」这类完整自然日。重活丢到阻塞线程池，避免冻住 UI。
+/// 扫描本机 Claude Code 会话日志并折算等价费用。时间范围语义见 [`TimeRange`]
+/// （since_ms 优先于 days，until_ms 为开区间终点，与 since_ms 搭配可表达「昨天」）。
+/// 重活丢到阻塞线程池，避免冻住 UI。
 #[tauri::command]
 pub async fn claude_scan_sessions(
-    app: tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
     until_ms: Option<i64>,
     home: Option<String>,
 ) -> Result<ClaudeScan, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        scan_sessions_blocking(&app, days, since_ms, until_ms, home)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || scan_sessions_blocking(days, since_ms, until_ms, home))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn scan_sessions_blocking(
-    _app: &tauri::AppHandle,
     days: Option<i64>,
     since_ms: Option<i64>,
     until_ms: Option<i64>,
@@ -525,11 +508,7 @@ fn scan_sessions_blocking(
 ) -> Result<ClaudeScan, String> {
     let table = pricing::load();
     let roots = claude_roots(home);
-    let cutoff = match since_ms {
-        Some(ms) => DateTime::from_timestamp_millis(ms),
-        None => days.map(|d| Utc::now() - Duration::days(d.max(0))),
-    };
-    let until = until_ms.and_then(DateTime::from_timestamp_millis);
+    let range = TimeRange::new(days, since_ms, until_ms);
     let mut dedupe = Dedupe::new();
     let mut sessions: HashSet<String> = HashSet::new();
     let mut files_scanned = 0usize;
@@ -542,58 +521,12 @@ fn scan_sessions_blocking(
         }
         scanned_roots.push(root.to_string_lossy().to_string());
         for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let is_jsonl = entry
-                .path()
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("jsonl"))
-                .unwrap_or(false);
-            if !is_jsonl {
+            if !session_scan::is_jsonl_file(&entry) {
                 continue;
             }
             files_scanned += 1;
-            let path = entry.path().to_path_buf();
-            let (mtime, len) = entry
-                .metadata()
-                .ok()
-                .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
-                .unwrap_or((SystemTime::UNIX_EPOCH, 0));
-            let cached = scan_cache().lock().ok().and_then(|c| {
-                c.get(&path)
-                    .filter(|f| f.mtime == mtime && f.len == len)
-                    .map(|f| f.rows.clone())
-            });
-            let file_rows = match cached {
-                Some(hit) => hit,
-                None => {
-                    let parsed = parse_file(&path);
-                    if let Ok(mut c) = scan_cache().lock() {
-                        c.insert(
-                            path,
-                            FileCache {
-                                mtime,
-                                len,
-                                rows: parsed.clone(),
-                            },
-                        );
-                    }
-                    parsed
-                }
-            };
-            for cr in file_rows {
-                if let (Some(cut), Some(ts)) = (cutoff, cr.ts) {
-                    if ts < cut {
-                        continue;
-                    }
-                }
-                if let (Some(u), Some(ts)) = (until, cr.ts) {
-                    if ts >= u {
-                        continue;
-                    }
-                }
+            let file_rows = scan_cache().get_or_parse(&entry, parse_file);
+            for cr in file_rows.into_iter().filter(|cr| range.contains(cr.ts)) {
                 sessions.insert(cr.session.clone());
                 dedupe.push(cr);
             }
