@@ -42,12 +42,20 @@ function renderUnitSeg() {
 
 /* ---------- 定时刷新（账户状态 + 用量统计） ---------- */
 
+/** 刷新间隔文案：不足 1 小时按分钟，整小时按小时（60 → 1 小时，1440 → 24 小时）。 */
+function intervalText(minutes) {
+  return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
+}
+
 async function onIntervalChange() {
   const select = el("#accounts-interval");
   const previous = getRefreshIntervalMinutes();
   try {
     const minutes = await setRefreshInterval(Number(select.value));
-    intervalStatus.set("ok", minutes > 0 ? `已开启定时刷新，每 ${minutes} 分钟自动刷新账户状态与用量统计。` : "已关闭定时刷新。");
+    intervalStatus.set(
+      "ok",
+      minutes > 0 ? `已开启定时刷新，每 ${intervalText(minutes)}自动刷新账户状态与用量统计。` : "已关闭定时刷新。"
+    );
   } catch (error) {
     select.value = String(previous);
     intervalStatus.set("bad", `设置定时刷新失败：${resetError(error)}`);

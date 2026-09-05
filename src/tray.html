@@ -152,6 +152,13 @@
       .tray-overview { flex: 1; overflow-y: auto; padding: 12px 14px; }
       .tray-ov-label { font-size: 11px; color: var(--muted); }
       .tray-ov-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      /* 统计日标签 + 数据时间并排：「今日已用 · 更新于 12:34」，过期带「（缓存）」 */
+      .tray-ov-head-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
+      .tray-ov-updated { font-size: 11px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .tray-ov-updated::before { content: "·"; margin-right: 8px; }
+      /* 进行中胶囊沿用主窗口样式，但避开顶部标题栏与 tab 栏，缩小一号 */
+      .tray-panel .loading-float { top: 86px; padding: 6px 12px 6px 10px; font-size: 12px; }
+      .tray-panel .loading-float .spinner { width: 12px; height: 12px; }
       /* 今天 / 昨天：紧凑胶囊分段，复用 .seg 按钮样式 */
       .tray-day {
         display: inline-flex;
@@ -203,8 +210,6 @@
       /* 三联迷你饼图：等宽并排（模型 Token / 模型费用 / 来源），行内小节不再各自留顶距 */
       .tray-pie-row { display: flex; gap: 8px; margin-top: 14px; }
       .tray-pie-row .tray-chart { flex: 1; min-width: 0; margin-top: 0; }
-      /* 底部统计时间戳 */
-      .tray-ov-foot { margin-top: 12px; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
       /* 提示条：悬浮在面板底部（弹窗之下、列表之上），不再挤动列表 */
       .tray-status {
         position: absolute;
@@ -313,9 +318,12 @@
       </div>
       <div id="tray-list" class="tray-list"></div>
       <div id="tray-overview" class="tray-overview" hidden>
-        <!-- 头部常驻：统计日标签 + 今天 / 昨天切换；下方 body 由脚本整体重建 -->
+        <!-- 头部常驻：统计日标签 + 数据时间（更新于 HH:MM）+ 今天 / 昨天切换；下方 body 由脚本整体重建 -->
         <div class="tray-ov-head">
-          <span id="tray-ov-label" class="tray-ov-label">今日已用</span>
+          <div class="tray-ov-head-left">
+            <span id="tray-ov-label" class="tray-ov-label">今日已用</span>
+            <span id="tray-ov-updated" class="tray-ov-updated" hidden></span>
+          </div>
           <div id="tray-day" class="tray-day" role="tablist" aria-label="统计日">
             <button type="button" class="seg active" role="tab" aria-selected="true" data-day="today">今天</button>
             <button type="button" class="seg" role="tab" aria-selected="false" data-day="yesterday">昨天</button>
@@ -326,6 +334,10 @@
         </div>
       </div>
       <p id="tray-status" class="tray-status" hidden></p>
+      <!-- 总览进行中提示：与主窗口统计页同款的悬浮胶囊，位于 tab 栏下方居中，由 syncOverviewLoading 显隐 -->
+      <div id="tray-ov-loading" class="loading-float" role="status" hidden>
+        <span class="spinner" aria-hidden="true"></span><span id="tray-ov-loading-text">统计中…</span>
+      </div>
     </div>
     <!-- 切换账户弹窗：确认 / 分步进度 / 结果三个阶段复用同一张卡片 -->
     <div id="tray-modal" hidden>

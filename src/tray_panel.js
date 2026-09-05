@@ -36,7 +36,14 @@ let accounts = [];
 let refreshing = false;
 let switching = false;
 let overviewLoading = false;
-const refreshingIds = new Set();
+const refreshingIds = new Set(); // 本面板发起、进行中的单账户刷新
+// 其它窗口（主窗口、定时刷新）发起的刷新：由后端 account-refreshing 事件同步，用于行内「刷新中」与总览忙碌提示
+const remoteRefreshingIds = new Set();
+
+/** 该账户是否正在刷新（本面板或其它窗口发起）。 */
+function isRefreshing(id) {
+  return refreshingIds.has(id) || remoteRefreshingIds.has(id);
+}
 // 总览所选统计日："today" | "yesterday"，仅内存保存（应用重启回到今天）。
 // 昨天用完整自然日键 day:YYYY-MM-DD，与主窗口用量页「昨天」跨度共用同一份缓存。
 let trayDay = "today";
@@ -95,15 +102,42 @@ function trayAccountLabel(account) {
 
 function syncHeaderRefresh() {
   const btn = el("#tray-refresh");
-  const accountBusy = refreshing || switching || refreshingIds.size > 0;
+  // 其它窗口正在刷新账户时同样视为忙碌：按钮转圈、不允许再排一轮
+  const remoteBusy = remoteRefreshingIds.size > 0;
+  const accountBusy = refreshing || switching || refreshingIds.size > 0 || remoteBusy;
   if (trayTab === "overview") {
     // 总览刷新 = 账户状态 + 所选日用量一起刷，任一进行中都置忙
-    btn.disabled = overviewLoading || refreshing || switching;
-    btn.classList.toggle("busy", overviewLoading || refreshing);
+    btn.disabled = overviewLoading || refreshing || switching || remoteBusy;
+    btn.classList.toggle("busy", overviewLoading || refreshing || remoteBusy);
+  } else {
+    btn.disabled = accountBusy || !accounts.length;
+    btn.classList.toggle("busy", refreshing || remoteBusy);
+  }
+  syncOverviewLoading();
+}
+
+/**
+ * 总览的进行中提示：与主窗口统计页同款的顶部悬浮胶囊。所选日用量在拉取、本面板或其它窗口
+ * 在刷新账户状态时显示；已有数据在展示则文案为「更新中…」，否则「统计中…」。
+ */
+function syncOverviewLoading() {
+  const busy = trayTab === "overview" && (overviewLoading || refreshing || remoteRefreshingIds.size > 0);
+  el("#tray-ov-loading").hidden = !busy;
+  if (busy) el("#tray-ov-loading-text").textContent = overviewDom ? "更新中…" : "统计中…";
+}
+
+/** 总览头部的数据时间：「更新于 HH:MM」，超过缓存有效期加「（缓存）」；无数据时隐藏。 */
+function setOverviewUpdated(statAtMs) {
+  const node = el("#tray-ov-updated");
+  if (!Number.isFinite(statAtMs) || statAtMs <= 0) {
+    node.hidden = true;
+    node.textContent = "";
     return;
   }
-  btn.disabled = accountBusy || !accounts.length;
-  btn.classList.toggle("busy", refreshing);
+  const time = new Date(statAtMs).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+  node.textContent = `更新于 ${time}${isUsageCacheFresh(statAtMs) ? "" : "（缓存）"}`;
+  node.title = new Date(statAtMs).toLocaleString("zh-CN", { hour12: false });
+  node.hidden = false;
 }
 
 /* ---------- Tab 状态 ---------- */
@@ -325,9 +359,9 @@ function accountRow(account) {
 
   const actions = document.createElement("div");
   actions.className = "tray-actions";
-  const rowBusy = refreshing || switching || refreshingIds.has(account.id);
+  const refreshBusy = isRefreshing(account.id);
+  const rowBusy = refreshing || switching || refreshBusy;
 
-  const refreshBusy = refreshingIds.has(account.id);
   const refreshBtn = iconAction("refresh", refreshBusy ? "刷新中…" : "刷新");
   refreshBtn.classList.toggle("busy", refreshBusy);
   refreshBtn.disabled = rowBusy;
@@ -393,7 +427,7 @@ async function load() {
 }
 
 async function refreshOne(id) {
-  if (refreshing || switching || refreshingIds.has(id)) return false;
+  if (refreshing || switching || isRefreshing(id)) return false;
   if (!accounts.some((a) => a.id === id)) return false;
   refreshingIds.add(id);
   render();
@@ -445,6 +479,9 @@ function overviewTip(text) {
   tip.className = "tray-empty";
   tip.textContent = text;
   el("#tray-ov-body").replaceChildren(tip);
+  // 没有数据可展示时也没有对应的数据时间
+  setOverviewUpdated(0);
+  syncOverviewLoading();
 }
 
 /** 头部统计日标签与切换按钮选中态跟随 trayDay。 */
@@ -856,11 +893,8 @@ function ensureOverviewDom() {
   pieRow.append(tokenPie.wrap, costPie.wrap, sourcePie.wrap);
   const rows = document.createElement("div");
   rows.className = "tray-ov-rows";
-  const foot = document.createElement("div");
-  foot.className = "tray-ov-foot";
-  foot.hidden = true;
-  root.replaceChildren(total, bar.wrap, pieRow, rows, foot);
-  overviewDom = { tokens, usd, rows, foot, tokenPie, costPie, sourcePie, pieRow, bar };
+  root.replaceChildren(total, bar.wrap, pieRow, rows);
+  overviewDom = { tokens, usd, rows, tokenPie, costPie, sourcePie, pieRow, bar };
 }
 
 function renderOverview(data, statAtMs, scope) {
@@ -923,12 +957,9 @@ function renderOverview(data, statAtMs, scope) {
     overviewDom.rows.append(row);
   }
 
-  if (Number.isFinite(statAtMs) && statAtMs > 0) {
-    overviewDom.foot.hidden = false;
-    overviewDom.foot.textContent = `统计于 ${relativeFromUnixSeconds(statAtMs / 1000)}`;
-  } else {
-    overviewDom.foot.hidden = true;
-  }
+  // 数据时间放在总览头部（「今日已用 · 更新于 HH:MM」），进行中提示由 syncOverviewLoading 负责
+  setOverviewUpdated(statAtMs);
+  syncOverviewLoading();
 }
 
 /** 优先取单日键聚合里的 hourly，缺失时退回长范围缓存（后端聚合同样带今天 / 昨天的 hourly）。 */
@@ -963,13 +994,19 @@ function dayPeekers(scope) {
 }
 
 /** 从共享缓存拼出托盘总览：所选日数字用当天切片，24 小时柱用聚合结果的 hourly。
- *  来源（各账户 + 本地分析）按当日 Token 降序排列，行序与各图表配色一一对应。 */
-function buildOverviewData(scope) {
+ *  来源（各账户 + 本地分析）按当日 Token 降序排列，行序与各图表配色一一对应；
+ *  所选日没有用量的来源不列出。fetchErrors 为本轮拉取失败的来源 id → 错误，用于数据时间的取舍。 */
+function buildOverviewData(scope, fetchErrors = new Map()) {
   const ymd = scope.ymd;
   const peek = dayPeekers(scope);
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const entries = []; // { row, hourlySource, modelSource }
+  // 数据时间只统计本轮拉取成功的来源：失败 / 失效账户的缓存时间永远不再前进，
+  // 计入会把「更新于」拖回很久以前，与实际刷新不符
   const ats = [];
+  const noteAt = (id, at) => {
+    if (!fetchErrors.has(id) && Number.isFinite(at)) ats.push(at);
+  };
   let totalTokens = 0;
   let totalUsd = 0;
 
@@ -979,10 +1016,12 @@ function buildOverviewData(scope) {
     const seriesHit = peek.aggSeries(a.id);
     if (!dayHit && !seriesHit) continue;
     const hit = dayHit || seriesHit;
-    if (Number.isFinite(hit.entry.at)) ats.push(hit.entry.at);
-    const sliceAgg = (dayHit || seriesHit).entry.agg;
-    const sliceKey = (dayHit || seriesHit).rangeKey;
+    const sliceAgg = hit.entry.agg;
+    const sliceKey = hit.rangeKey;
     const slice = sliceDay(sliceAgg, ymd, sliceKey);
+    // 所选日没有用量的账户不占行（拉取失败的由 applyOverviewErrors 补一行错误提示）
+    if (!(slice.tokens > 0)) continue;
+    noteAt(a.id, hit.entry.at);
     totalTokens += slice.tokens;
     totalUsd += slice.usd;
     entries.push({
@@ -995,29 +1034,27 @@ function buildOverviewData(scope) {
     });
   }
 
-  // 本地扫描来源（Codex / Claude）共用的切片逻辑
+  // 本地扫描来源（Codex / Claude）共用的切片逻辑；与账户同一规则，所选日没有用量不占行
   const pushScanEntry = (id, name, scanDay, scanSeries) => {
     if (!scanDay && !scanSeries) return;
     const hit = scanDay || scanSeries;
-    if (Number.isFinite(hit.entry.at)) ats.push(hit.entry.at);
     const agg = hit.entry.scan.aggregate;
     const slice = sliceDay(agg, ymd, hit.rangeKey);
-    const seriesAgg = ((scanSeries || scanDay).entry.scan || {}).aggregate || agg;
-    if (slice.tokens > 0 || (seriesAgg.daily && seriesAgg.daily.length) || (agg.models && agg.models.length)) {
-      totalTokens += slice.tokens;
-      totalUsd += slice.usd;
-      entries.push({
-        row: { id, name, tokens: slice.tokens, usd: slice.usd },
-        hourlySource: {
-          label: name,
-          hourly: pickHourly(
-            scanDay && scanDay.entry.scan.aggregate,
-            scanSeries && scanSeries.entry.scan.aggregate
-          ),
-        },
-        modelSource: { id, label: name, models: modelsOnDay(agg, ymd, hit.rangeKey) },
-      });
-    }
+    if (!(slice.tokens > 0)) return;
+    noteAt(id, hit.entry.at);
+    totalTokens += slice.tokens;
+    totalUsd += slice.usd;
+    entries.push({
+      row: { id, name, tokens: slice.tokens, usd: slice.usd },
+      hourlySource: {
+        label: name,
+        hourly: pickHourly(
+          scanDay && scanDay.entry.scan.aggregate,
+          scanSeries && scanSeries.entry.scan.aggregate
+        ),
+      },
+      modelSource: { id, label: name, models: modelsOnDay(agg, ymd, hit.rangeKey) },
+    });
   };
   pushScanEntry("local", "本地 ChatGPT", peek.scan(""), peek.scanSeries(""));
   pushScanEntry("local-claude", "本地 Claude", peek.claude(""), peek.claudeSeries(""));
@@ -1127,9 +1164,10 @@ async function loadOverviewInner(force) {
   try {
     await Promise.allSettled(jobs);
     if (!stillCurrent()) return;
-    const next = buildOverviewData(scope);
+    const next = buildOverviewData(scope, fetchErrors);
     applyOverviewErrors(next.data, fetchErrors, cursorAccounts);
-    renderOverview(next.data, next.at || Date.now(), scope);
+    // 没有任何来源成功时不冒充「刚更新」，数据时间留空
+    renderOverview(next.data, next.at, scope);
   } finally {
     overviewLoading = false;
     syncHeaderRefresh();
@@ -1490,12 +1528,27 @@ window.addEventListener("focus", () => {
 listen("accounts-changed", (event) => {
   const view = event.payload;
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
+  const ids = new Set(accounts.map((a) => a.id));
+  for (const id of [...remoteRefreshingIds]) {
+    if (!ids.has(id)) remoteRefreshingIds.delete(id);
+  }
   const u = Number(view && view.intervalMinutes);
   if (Number.isFinite(u)) setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
   render();
   if (trayTab === "overview") void loadOverview(false);
 }).catch(() => {
   /* 非 Tauri 环境（浏览器直开调试）无事件桥，忽略 */
+});
+// 任何窗口发起的账户刷新开始 / 结束：同步行内「刷新中」动画、头部刷新按钮与总览进行中提示
+listen("account-refreshing", (event) => {
+  const payload = event.payload || {};
+  const id = String(payload.id || "");
+  if (!id) return;
+  if (payload.active) remoteRefreshingIds.add(id);
+  else remoteRefreshingIds.delete(id);
+  render();
+}).catch(() => {
+  /* 非 Tauri 环境无事件桥 */
 });
 let usageCacheTimer = null;
 function scheduleOverviewFromCache(key) {

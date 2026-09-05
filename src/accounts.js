@@ -35,8 +35,16 @@ let refreshAllRunning = false;
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
 let importing = false; // 本机导入 / 文件导入导出进行中（防重入，期间禁用相关按钮）
 const groupRefreshing = new Set(); // 组内整体刷新进行中的组（"cursor" / "codex" / "claude"）
-const refreshingIds = new Set();
+const refreshingIds = new Set(); // 本窗口发起、进行中的刷新
+// 其它入口（托盘面板、定时刷新以外的窗口）发起的刷新：由后端 account-refreshing 事件同步，
+// 只用于行内「刷新中」状态展示与防止重复刷新同一账户
+const remoteRefreshingIds = new Set();
 const rowErrors = new Map();
+
+/** 该账户是否正在刷新（本窗口发起或其它窗口发起）。 */
+function isRefreshing(id) {
+  return refreshingIds.has(id) || remoteRefreshingIds.has(id);
+}
 
 let modalKind = "cursor";
 let editingId = null;
@@ -460,7 +468,7 @@ function iconAction(icon, label) {
 function accountRow(account) {
   const tr = document.createElement("tr");
   tr.dataset.id = account.id;
-  const busy = refreshingIds.has(account.id);
+  const busy = isRefreshing(account.id);
 
   // 账户列：列宽固定，各行超长省略号截断，悬停看全文。
   // Cursor 为三行（主显示 / 邮箱 / 打码 token），Codex 为两行（备注 / 打码 token）。
@@ -646,6 +654,9 @@ function applyView(view) {
   for (const id of [...rowErrors.keys()]) {
     if (!ids.has(id)) rowErrors.delete(id);
   }
+  for (const id of [...remoteRefreshingIds]) {
+    if (!ids.has(id)) remoteRefreshingIds.delete(id);
+  }
   notifyChange();
 }
 
@@ -689,7 +700,8 @@ function onBackendChanged(view) {
 /* ---------- 刷新 ---------- */
 
 async function refreshOne(id) {
-  if (refreshingIds.has(id)) return null;
+  // 本窗口或其它窗口正在刷新该账户时不重复排队（后端也会串行执行，重复只是白等一次）
+  if (isRefreshing(id)) return null;
   if (!accounts.some((a) => a.id === id)) return null;
   refreshingIds.add(id);
   rowErrors.delete(id);
@@ -1674,6 +1686,17 @@ export function initAccounts() {
   // 订阅后端广播：托盘面板等其他入口改动账户数据后，本表实时同步
   listen("accounts-changed", (event) => onBackendChanged(event.payload)).catch(() => {
     /* 非 Tauri 环境（浏览器直开调试）无事件桥，忽略 */
+  });
+  // 任何窗口发起的账户刷新开始 / 结束：同步该行的「刷新中」动画（本窗口自己发起的也会收到，无副作用）
+  listen("account-refreshing", (event) => {
+    const payload = event.payload || {};
+    const id = String(payload.id || "");
+    if (!id) return;
+    if (payload.active) remoteRefreshingIds.add(id);
+    else remoteRefreshingIds.delete(id);
+    if (accounts.some((a) => a.id === id)) updateRow(id);
+  }).catch(() => {
+    /* 非 Tauri 环境无事件桥 */
   });
 
   // 「上次刷新」相对时间随时间流逝定期重算：只改时间文本与组标题小字，

@@ -533,10 +533,12 @@ pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<Ac
         d.interval_minutes = interval_minutes;
         Ok(())
     })?;
-    let message = if interval_minutes > 0 {
-        format!("定时刷新设为每 {interval_minutes} 分钟（账户状态 + 用量统计）")
-    } else {
+    let message = if interval_minutes == 0 {
         "关闭定时刷新".to_string()
+    } else if interval_minutes >= 60 && interval_minutes.is_multiple_of(60) {
+        format!("定时刷新设为每 {} 小时（账户状态 + 用量统计）", interval_minutes / 60)
+    } else {
+        format!("定时刷新设为每 {interval_minutes} 分钟（账户状态 + 用量统计）")
     };
     audit::log("interval_set", message, None);
     Ok(view(&data))
@@ -894,10 +896,19 @@ pub(crate) fn refresh_queue() -> &'static tokio::sync::Mutex<()> {
 /// 存活状态发生变化或刷新失败时写入审计日志。
 /// 所有刷新全局排队执行（每次一个）；快照在拿到队列后再取，
 /// 保证排队期间前序刷新轮换的凭据（Codex token）能被本次读到。
+/// 开始（含排队等待）与结束时广播 account-refreshing，主窗口与托盘据此同步行内「刷新中」状态，
+/// 不论刷新由哪个窗口发起。
 #[tauri::command]
 pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, String> {
+    let _ = app.emit("account-refreshing", json!({ "id": id, "active": true }));
+    let result = refresh_account_inner(&app, &id).await;
+    let _ = app.emit("account-refreshing", json!({ "id": id, "active": false }));
+    result
+}
+
+async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, String> {
     let _queued = refresh_queue().lock().await;
-    let snap = snapshot(&id)?;
+    let snap = snapshot(id)?;
     let kind = snap.kind.clone();
     let name = display_name(&snap.kind, &snap.note, &snap.token);
     let prev_alive = snap
@@ -908,11 +919,11 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, Stri
 
     let result: Result<Account, String> = match kind.as_str() {
         "cursor" => match cursor::cursor_inspect_token(snap.token).await {
-            Ok(payload) => to_status(&payload).and_then(|status| finish(&app, &id, status)),
+            Ok(payload) => to_status(&payload).and_then(|status| finish(app, id, status)),
             Err(e) => Err(e),
         },
-        "codex" => refresh_codex_account(&app, &id, snap).await,
-        "claude" => refresh_claude_account(&app, &id, snap).await,
+        "codex" => refresh_codex_account(app, id, snap).await,
+        "claude" => refresh_claude_account(app, id, snap).await,
         _ => Err("invalid_kind".into()),
     };
 
@@ -945,8 +956,8 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, Stri
     }
     // 刷新成功后，自动备注用最新身份回填，返回回填后的最新账户
     if result.is_ok() {
-        backfill_auto_note(&app, &id)?;
-        return snapshot(&id);
+        backfill_auto_note(app, id)?;
+        return snapshot(id);
     }
     result
 }
