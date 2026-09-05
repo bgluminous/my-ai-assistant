@@ -66,6 +66,20 @@ export function claudePlanLabel(value) {
   return CLAUDE_PLAN_LABELS[key] || String(value);
 }
 
+/**
+ * Cursor 账户的展示身份：primary = 手填备注 > 刷新返回的用户名 > 刷新返回的邮箱 > 自动备注；
+ * email = 刷新返回的邮箱，与主显示相同（备注为空时自动落到邮箱）则为空串，避免同一身份显示两遍。
+ * 用量页筛选 chip 与托盘账户行共用，主显示旁 / 下方以小字补充邮箱。
+ */
+export function cursorIdentity(account) {
+  const note = String((account && account.note) || "").trim();
+  const status = (account && account.status) || null;
+  const name = String((status && status.name) || "").trim();
+  const email = String((status && status.email) || "").trim();
+  const primary = (account && account.noteAuto === false ? note : "") || name || email || note || "未命名账户";
+  return { primary, email: email && email !== primary ? email : "" };
+}
+
 /** 保留两端、中间省略的打码 token（列表与托盘展示用）。 */
 export function maskToken(token) {
   const t = String(token || "").trim();

@@ -1020,6 +1020,12 @@ td.account-actions { white-space: nowrap; }
 .chip-select:hover { color: var(--text); border-color: var(--border-strong); }
 .chip-select.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .chip-select .tag { pointer-events: none; }
+/* 账户 chip：名字 + 邮箱小字上下排列（类型标签居中靠在两行左侧）；两行时收紧上下内边距，
+   同一行的其它单行 chip 由 .chip-row 默认拉伸到同高 */
+.chip-select.has-sub { padding-top: 4px; padding-bottom: 4px; }
+.chip-select .chip-ident { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.25; text-align: left; }
+.chip-select .chip-sub { font-size: 11px; color: var(--muted); }
+.chip-select.active .chip-sub { color: var(--accent); opacity: 0.75; }
 
 .cell-bad {
   color: var(--bad);

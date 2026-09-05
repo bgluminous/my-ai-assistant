@@ -44,7 +44,7 @@ import {
   parseYmd,
 } from "./usage_data.js";
 import { getAccounts, onAccountsChanged, refreshAccounts, getRefreshIntervalMinutes } from "./accounts.js";
-import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds } from "./account_format.js";
+import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
@@ -242,8 +242,9 @@ function maskToken(token) {
   if (!t) return "—";
   return t.length > 12 ? `${t.slice(0, 8)}…` : t;
 }
+/** 单个 Cursor 账户视图的名称：与筛选 chip 的主显示同一口径（手填备注 > 用户名 > 邮箱 > 自动备注）。 */
 function accountLabel(account) {
-  return account.note || `${kindLabel(account.kind)} ${maskToken(account.token)}`;
+  return cursorIdentity(account).primary;
 }
 function currentAccount() {
   return getAccounts().find((a) => a.id === selection) || null;
@@ -870,15 +871,19 @@ function rebuildChips() {
   if (selection !== "all" && !isLocalSelection() && !cursorAccounts.some((a) => a.id === selection)) {
     selection = "all";
   }
-  const chips = [{ value: "all", label: "全部总览", kind: null }];
-  for (const a of cursorAccounts) chips.push({ value: a.id, label: accountLabel(a), kind: a.kind });
-  for (const key of LOCAL_KEYS) chips.push({ value: key, label: "本地用量分析", kind: LOCAL_SOURCES[key].tag });
+  const chips = [{ value: "all", label: "全部总览", sub: "", kind: null }];
+  // 账户 chip：名字为主显示，邮箱作为小字排在下一行（与主显示相同时不重复）
+  for (const a of cursorAccounts) {
+    const { primary, email } = cursorIdentity(a);
+    chips.push({ value: a.id, label: primary, sub: email, kind: a.kind });
+  }
+  for (const key of LOCAL_KEYS) chips.push({ value: key, label: "本地用量分析", sub: "", kind: LOCAL_SOURCES[key].tag });
 
   el("#usage-sources").replaceChildren(
     ...chips.map((c) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = `chip-select${selection === c.value ? " active" : ""}`;
+      btn.className = `chip-select${c.sub ? " has-sub" : ""}${selection === c.value ? " active" : ""}`;
       if (c.kind) {
         const tag = document.createElement("span");
         tag.className = `tag kind-${c.kind}`;
@@ -887,7 +892,17 @@ function rebuildChips() {
       }
       const label = document.createElement("span");
       label.textContent = c.label;
-      btn.append(label);
+      if (c.sub) {
+        const ident = document.createElement("span");
+        ident.className = "chip-ident";
+        const sub = document.createElement("span");
+        sub.className = "chip-sub";
+        sub.textContent = c.sub;
+        ident.append(label, sub);
+        btn.append(ident);
+      } else {
+        btn.append(label);
+      }
       btn.addEventListener("click", () => selectSource(c.value));
       return btn;
     })

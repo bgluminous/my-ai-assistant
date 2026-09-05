@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken } from "./account_format.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -77,16 +77,20 @@ function iconAction(icon, label) {
   return btn;
 }
 
-/** 托盘紧凑账户名：优先可读身份；自动生成的 Cursor user_id 采用两端保留的省略格式。 */
-function trayAccountLabel(account) {
+/**
+ * 托盘紧凑账户身份：label 优先可读身份，自动生成的 Cursor user_id 采用两端保留的省略格式；
+ * email 仅 Cursor 账户有（与主显示相同时为空串），账户行把它作为主显示后的小字。
+ */
+function trayIdentity(account) {
   const note = String((account && account.note) || "").trim();
-  if (!account || account.kind !== "cursor") return note || "未命名账户";
-  const status = account.status || null;
-  const statusName = String((status && status.name) || "").trim();
-  const statusEmail = String((status && status.email) || "").trim();
-  const label = (account.noteAuto === false ? note : "") || statusName || statusEmail || note;
-  const looksLikeCredential = label.startsWith("user_") || label.includes("::") || label.split(".").length === 3;
-  return looksLikeCredential ? maskToken(label) : label || "未命名账户";
+  if (!account || account.kind !== "cursor") return { label: note || "未命名账户", email: "" };
+  const { primary, email } = cursorIdentity(account);
+  const looksLikeCredential = primary.startsWith("user_") || primary.includes("::") || primary.split(".").length === 3;
+  return { label: looksLikeCredential ? maskToken(primary) : primary, email };
+}
+
+function trayAccountLabel(account) {
+  return trayIdentity(account).label;
 }
 
 function syncHeaderRefresh() {
@@ -236,10 +240,17 @@ function accountRow(account) {
   noteLine.className = "tray-note";
   const note = document.createElement("span");
   note.className = "tray-note-text";
-  const label = trayAccountLabel(account);
+  const { label, email } = trayIdentity(account);
   note.textContent = label;
   note.title = label;
   noteLine.append(note);
+  if (email) {
+    const emailSpan = document.createElement("span");
+    emailSpan.className = "tray-note-email";
+    emailSpan.textContent = email;
+    emailSpan.title = email;
+    noteLine.append(emailSpan);
+  }
   main.append(noteLine);
 
   // 副行：套餐 · 有效期 · 超额/余额 · 上次刷新时间 ·（已失效）
