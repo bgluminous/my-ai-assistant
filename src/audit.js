@@ -2,7 +2,7 @@ import { el, invoke, fmtDateMs, resetError, toast, dismissToast } from "./shared
 import { onAccountsChanged } from "./accounts.js";
 
 // 审计日志：展示后端记录的账户增删改、状态变化、Codex / Claude 续期、设置变更等事件。
-// 日志由后端写入 {用户目录}/xilore/myaiassistant/audit.jsonl，这里只读展示 + 清空。
+// 日志由后端写入 {用户目录}/.xilore/myaiassistant/audit.jsonl，这里只读展示 + 清空。
 
 const EVENT_META = {
   account_add: { label: "添加账户", cls: "ok", group: "account" },
@@ -12,6 +12,8 @@ const EVENT_META = {
   account_import_file: { label: "导入账户", cls: "ok", group: "account" },
   account_export: { label: "导出账户", cls: "accent", group: "account" },
   usage_snapshot: { label: "用量快照", cls: "accent", group: "account" },
+  usage_data_delete: { label: "删除统计数据", cls: "bad", group: "account" },
+  usage_data_adopt: { label: "沿用统计数据", cls: "ok", group: "account" },
   account_state_changed: { label: "状态变化", cls: "warn", group: "state" },
   account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },
   codex_renewed: { label: "自动续期", cls: "ok", group: "renew" },
@@ -29,6 +31,9 @@ const EVENT_META = {
   pricing_update: { label: "价格表更新", cls: "accent", group: "settings" },
   backup_export: { label: "导出备份", cls: "accent", group: "settings" },
   backup_import: { label: "导入备份", cls: "ok", group: "settings" },
+  // 【过渡期临时代码，到期删除】旧用户目录迁移事件，随 paths.rs 的迁移逻辑一起删除
+  data_dir_migrated: { label: "目录迁移", cls: "ok", group: "settings" },
+  data_dir_migrate_failed: { label: "目录迁移失败", cls: "bad", group: "settings" },
 };
 
 let entries = [];

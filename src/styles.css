@@ -591,6 +591,20 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
 
 #usage-meta { margin-bottom: 12px; }
 
+/* 统计结果区不套外层面板，卡片 / 图表卡片 / 明细表 / 费用胶囊直接坐在页面背景上，
+   因此改用面板同款的 surface 底色与阴影（well 底在页面背景上几乎看不出层次） */
+.usage-results .card,
+.usage-results .chart-box,
+.usage-results .table-wrap,
+.usage-results .cost-chip {
+  background: var(--surface);
+}
+.usage-results .card,
+.usage-results .chart-box,
+.usage-results .table-wrap {
+  box-shadow: var(--shadow-sm);
+}
+
 /* 费用构成汇总 + 明细表内的分项费用 */
 .cost-breakdown {
   display: flex;
@@ -630,18 +644,66 @@ button:focus-visible, .tab:focus-visible, .chip:focus-visible, .icon-btn:focus-v
 .charts {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 20px 24px;
+  gap: 18px;
   margin-bottom: 18px;
 }
-/* 图表不再套卡片底色，直接坐在 surface 上。
+/* 每张图各自放进带边框的圆角卡片（与汇总卡片、快照图同款），标题为卡片内左上的加粗小标题。
    Chart.js 会把 canvas 写成固定像素宽；网格项默认 min-width:auto 会以该宽度为最小值，
    导致容器变窄后轨道缩不回去、图表溢出卡片。置 0 让轨道可收缩，Chart.js 才能收到 resize。 */
-.chart-box { min-width: 0; }
+.chart-box {
+  min-width: 0;
+  background: var(--well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+.chart-box h4 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--text-strong); }
 .chart-box-wide { grid-column: 1 / -1; }
 /* Chart.js responsive 需要「定高 + 相对定位 + 只放画布」的专属容器，
    配合 maintainAspectRatio:false 让图表填满整块区域。 */
 .chart-canvas { position: relative; height: 280px; }
 .chart-box-wide .chart-canvas { height: 320px; }
+
+/* 环形图：画布 + 定宽 HTML 图例并排。图例宽度固定，三张图的画布尺寸因此一致、圆环同大；
+   Chart.js 自带的右侧图例会按最长文字预留宽度，导致模型名长的图圆环被挤小。
+   图例列做窄、字号取 11px，画布高度压到 230px：圆环直径由剩余宽度决定，在常见窗口宽度下
+   能撑满这个高度，不再上下留白（与快照图的比例一致）。 */
+.pie-layout { display: flex; align-items: center; gap: 12px; }
+.pie-layout .chart-canvas { flex: 1 1 auto; min-width: 0; height: 230px; }
+/* 图例列定宽；内部用单列 grid：列宽取最长一项（不超过列宽），整列靠右贴卡片边，
+   各项在这一列里保持「色块 + 文字」左对齐，色块与文字左边缘都对齐成一条线 */
+.pie-legend {
+  flex: 0 0 124px;
+  width: 124px;
+  max-height: 230px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, max-content);
+  justify-content: end;
+  align-content: center;
+  row-gap: 6px;
+  overflow: hidden;
+}
+.pie-legend li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.pie-legend li:hover .pie-legend-label { color: var(--text-strong); }
+.pie-legend-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+/* 过长的模型名按省略号截断，完整名字放在 title 里悬停查看 */
+.pie-legend-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 点击隐藏的扇区：图例项划线变淡（与 Chart.js 自带图例一致） */
+.pie-legend li.slice-hidden .pie-legend-label { text-decoration: line-through; color: var(--faint); }
+.pie-legend li.slice-hidden .pie-legend-swatch { opacity: 0.35; }
 
 /* ---------- 表格 ---------- */
 
@@ -1039,6 +1101,9 @@ td.account-actions { white-space: nowrap; }
   color: var(--text-strong);
   border-top: 1px solid var(--border-strong);
 }
+/* 总览表中已删除账户保留数据的行：名称旁「已删除」标签、状态格内的「删除统计数据」按钮 */
+.tag.deleted { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.overview-action { margin-left: 10px; white-space: nowrap; }
 
 /* ---------- 审计日志 ---------- */
 
@@ -1354,6 +1419,8 @@ input.price-input {
 .toggle input:disabled + .toggle-track { opacity: 0.45; }
 .toggle input:disabled ~ .toggle-text { color: var(--faint); }
 .toggle:has(input:disabled) { cursor: not-allowed; }
+/* 确认弹窗正文下方的勾选项（如删除 Cursor 账户时的「保留统计数据」） */
+.modal-option { display: flex; margin: 4px 0 8px; font-size: 13px; }
 
 /* 确认弹窗的危险确认键（如「删除」「关闭并切换」） */
 button.primary.danger { background: var(--bad); box-shadow: none; }

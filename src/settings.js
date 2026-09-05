@@ -9,7 +9,8 @@ import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "
 // - Cursor / ChatGPT / Claude Desktop 客户端路径，由后端持久化到 settings.json
 //   （*_client_get / set / detect），用于切换账户后启动对应客户端；
 // - 数据备份：全量导出 / 导入（backup_export / backup_import_*），文件含全部设置与账号，
-//   可选密码加密；界面偏好（主题、数字单位）存 localStorage，由本模块随备份收集与应用。
+//   以及已删除 Cursor 账户保留的统计数据，可选密码加密；界面偏好（主题、数字单位）存
+//   localStorage，由本模块随备份收集与应用。
 
 const SAMPLE = 1234567890;
 
@@ -179,8 +180,10 @@ async function doImportApply(path, password) {
     const parts = [`新增 ${Number(r && r.imported) || 0} 个账号`];
     const exists = Number(r && r.skippedExists) || 0;
     const invalid = Number(r && r.skippedInvalid) || 0;
+    const usageRestored = Number(r && r.usageRestored) || 0;
     if (exists > 0) parts.push(`跳过 ${exists} 个已存在`);
     if (invalid > 0) parts.push(`${invalid} 个无效`);
+    if (usageRestored > 0) parts.push(`恢复 ${usageRestored} 个已删除账户的统计数据`);
     backupStatus.set("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
     // 新导入的账号后台排队刷新验证，与账户页导入体验一致
     const ids = Array.isArray(r && r.importedIds) ? r.importedIds : [];

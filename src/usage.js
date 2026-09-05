@@ -25,6 +25,9 @@ import {
   getCachedScan as cacheGetScan,
   getCachedClaudeScan as cacheGetClaudeScan,
   fetchCursorAggregate,
+  fetchArchivedAggregate,
+  listDeletedUsage,
+  removeDeletedUsage,
   fetchCodexScan,
   fetchClaudeScan,
   purgeAccountCache,
@@ -43,15 +46,24 @@ import {
   addLocalDays,
   parseYmd,
 } from "./usage_data.js";
-import { getAccounts, onAccountsChanged, refreshAccounts, getRefreshIntervalMinutes } from "./accounts.js";
+import {
+  getAccounts,
+  onAccountsChanged,
+  refreshAccounts,
+  getRefreshIntervalMinutes,
+  confirmDialog,
+} from "./accounts.js";
 import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
 // Codex / Claude 账户不在本页展示（额度信息见「账户管理」）；它们的账单只能来自本地会话日志，
 // 分别由本地扫描（CODEX_HOME / CLAUDE_CONFIG_DIR）折算，在总览中作为独立来源行参与合并。
-// 视图：全部总览（各 Cursor 账户 + 本地 Codex + 本地 Claude 合并）/ 单个 Cursor 账户 /
-// 本地 Codex 用量分析 / 本地 Claude 用量分析。
+// 统计对象为多选（点击 chip 切换选中 / 取消，「全部总览」= 全选）：
+// - 全部总览：各 Cursor 账户 + 已删除账户保留数据 + 本地 Codex + 本地 Claude 合并；
+// - 单选一项：专属视图——单个 Cursor 账户（可生成快照）/ 本地 Codex 或 Claude 用量分析（带目录
+//   输入与重新扫描）/「已删除」（全部已删除账户合并）；
+// - 选中两项及以上：所选来源的合并视图，结构与全部总览相同（卡片 / 图表 / 明细 + 各来源账单表）。
 // 时间跨度为二级 TAB（今天 / 昨天 / 近 7 / 30 天 / 全部），默认今天；
 // 「今天」用与托盘总览相同的今日缓存键（today:YYYY-MM-DD），两边数据互通；
 // 「昨天」用完整自然日键（day:YYYY-MM-DD）。这两个单日跨度下按日图切换为该日 0–23 时的
@@ -60,6 +72,13 @@ import { generateCursorSnapshot } from "./snapshot.js";
 //
 // 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v4:）。
 // 打开视图时先用缓存（含过期缓存）立即渲染，再在后台拉取最新数据原地刷新（stale-while-revalidate）。
+// Cursor 账户的数据源是后端按账户维护的本地用量事件库：各跨度都由后端从事件库切片，事件库在
+// 有效期内只切片不联网（切换跨度不再联网），过期才增量同步；「刷新」按钮强制全量重拉。
+//
+// 已删除账户：删除 Cursor 账户时勾选「保留统计数据」，其事件库会带账户展示信息留在本机。
+// 总览把它们当作独立来源（标「已删除」）计入合计与合并图表，只在所选跨度内有用量时出现；
+// 行内提供「删除统计数据」彻底清理。有记录时筛选末尾多一个「已删除」chip（键 DELETED_SELECTION），
+// 作为一个整体项参与选择：单选即全部已删除账户的合并用量与逐账户账单表；托盘总览不计入。
 //
 // 刷新模型——只有两类入口会真正重新统计，其余一律只从缓存重绘：
 // 1. 看数据：进入本页 / 切换数据源或跨度 / 再点当前 chip。结果区展示的正是当前视图且未过期
@@ -75,7 +94,11 @@ const OVERVIEW_CONCURRENCY = 2;
 // 账户刷新触发的用量预取：缓存比这更新鲜就跳过（防与刚完成的拉取重复走网络）
 const PREFETCH_MIN_AGE_MS = 60_000;
 
-let selection = "all"; // "all" | "local"（本地 Codex）| "local-claude" | Cursor 账户 id
+// 统计对象为多选：selectedKeys 为选中的 chip 值（Cursor 账户 id / "local" / "local-claude" / "deleted"），
+// 空集 = 「全部总览」。selection 由它推导（syncSelection）：
+// "all"（空集）| 单个键（单选，走专属视图）| "multi"（两项及以上，合并视图）
+const selectedKeys = new Set();
+let selection = "all";
 let span = "today"; // 时间跨度："today" | "yesterday" | "7" | "30" | "0"（全部）
 let loadSeq = 0; // 加载序号，防止过期的异步结果覆盖新视图
 let loading = false;
@@ -86,6 +109,8 @@ let lastAttemptAt = 0; // 最近一次完整加载的完成时间（新鲜度门
 let usageInterval = 0; // 定时刷新间隔（分钟，0 = 关闭），与账户状态刷新共用；本页只用它推导缓存有效期
 let accountIdsSig = "";
 const overviewResults = new Map(); // accountId -> { state, agg?, error? }
+let deletedRecords = []; // 已删除账户保留的统计数据记录（后端 cursor_usage_deleted_list）
+let deletedDirty = true; // 账户增删后置脏，下次总览加载时重新拉取已删除记录列表
 // accountId -> { at: lastRefreshAt, token }：检测「刚刷新过」（触发用量预取）与「凭据刚更换」（作废旧缓存）
 const seenAccounts = new Map();
 let seenInitialized = false; // 首批账户快照只登记不预取（启动时账户数据来自磁盘，并非刚刷新）
@@ -113,20 +138,11 @@ function chartTheme() {
 }
 function applyChartTheme() {
   const t = chartTheme();
-  if (tokenChart) {
-    tokenChart.data.datasets[0].borderColor = t.border;
-    tokenChart.options.plugins.legend.labels.color = t.tickStrong;
-    tokenChart.update("none");
-  }
-  if (modelChart) {
-    modelChart.data.datasets[0].borderColor = t.border;
-    modelChart.options.plugins.legend.labels.color = t.tickStrong;
-    modelChart.update("none");
-  }
-  if (doughnutChart) {
-    doughnutChart.data.datasets[0].borderColor = t.border;
-    doughnutChart.options.plugins.legend.labels.color = t.tickStrong;
-    doughnutChart.update("none");
+  // 环形图的图例是 HTML（跟随 CSS 变量换色），这里只需换扇区分隔色
+  for (const chart of [tokenChart, modelChart, doughnutChart]) {
+    if (!chart) continue;
+    chart.data.datasets[0].borderColor = t.border;
+    chart.update("none");
   }
   if (dailyChart) {
     dailyChart.options.scales.x.ticks.color = t.tick;
@@ -181,9 +197,41 @@ const LOCAL_SOURCES = {
   },
 };
 const LOCAL_KEYS = Object.keys(LOCAL_SOURCES);
+// 「已删除」chip 的键：全部已删除账户保留的数据作为一个整体项参与选择
+const DELETED_SELECTION = "deleted";
+// 两项及以上被选中时的 selection 值：所选来源的合并视图
+const MULTI_SELECTION = "multi";
 
 function isLocalSelection(value = selection) {
   return Object.prototype.hasOwnProperty.call(LOCAL_SOURCES, value);
+}
+function isDeletedSelection(value = selection) {
+  return value === DELETED_SELECTION;
+}
+function isMultiSelection(value = selection) {
+  return value === MULTI_SELECTION;
+}
+/** 合并视图（全部总览 / 多选 / 已删除）：结果区为多来源合并，下方带「各来源账单」表。 */
+function isMergedView() {
+  return selection === "all" || isMultiSelection() || isDeletedSelection();
+}
+/** 由 selectedKeys 推导 selection。 */
+function syncSelection() {
+  if (!selectedKeys.size) selection = "all";
+  else if (selectedKeys.size === 1) selection = [...selectedKeys][0];
+  else selection = MULTI_SELECTION;
+}
+/**
+ * 当前视图参与合并的来源：全部总览取全部；多选按 selectedKeys 过滤；
+ * 「已删除」单选只含已删除账户。单账户 / 单本地视图不走这里。
+ */
+function activeSources() {
+  const all = selection === "all";
+  return {
+    cursorAccounts: getAccounts().filter((a) => a.kind === "cursor" && (all || selectedKeys.has(a.id))),
+    localKeys: LOCAL_KEYS.filter((key) => all || selectedKeys.has(key)),
+    includeDeleted: all || selectedKeys.has(DELETED_SELECTION),
+  };
 }
 /** 本地来源表单里填写的会话目录（已 trim，空串表示用默认目录）。 */
 function localHomeRaw(key) {
@@ -246,11 +294,30 @@ function maskToken(token) {
 function accountLabel(account) {
   return cursorIdentity(account).primary;
 }
+/** 已删除账户的名称：用删除时保留的展示信息按同一口径推导。 */
+function deletedLabel(record) {
+  return cursorIdentity({
+    note: record.note,
+    noteAuto: record.noteAuto !== false,
+    status: { name: record.name, email: record.email },
+  }).primary;
+}
+/** 聚合结果在所选跨度内是否有用量（已删除账户无用量时不占总览行）。 */
+function hasUsage(agg) {
+  return !!agg && (agg.totalTokens > 0 || (Array.isArray(agg.models) && agg.models.length > 0));
+}
+/** 已删除账户的删除日期（本地 YYYY-MM-DD），总览状态列展示「数据截至」。 */
+function fmtDeletedAt(ms) {
+  const n = Number(ms);
+  return Number.isFinite(n) && n > 0 ? localYmd(new Date(n)) : "—";
+}
 function currentAccount() {
   return getAccounts().find((a) => a.id === selection) || null;
 }
 function selectionKey() {
   if (isLocalSelection()) return `${selection}:${scanKey()}:${localHomeRaw(selection)}`;
+  // 多选：所选集合本身也是视图身份的一部分
+  if (isMultiSelection()) return `multi:${[...selectedKeys].sort().join(",")}:${rangeKey()}:${scanKey()}`;
   // 今天的键含日期（today:YYYY-MM-DD），跨零点后自动视为新视图
   return `${selection}:${rangeKey()}`;
 }
@@ -461,11 +528,20 @@ function todayBandColor() {
  */
 function overviewSourceOrder() {
   const entries = [];
-  for (const a of getAccounts().filter((x) => x.kind === "cursor")) {
+  const active = activeSources();
+  for (const a of active.cursorAccounts) {
     const r = overviewResults.get(a.id) || null;
     entries.push({ kind: "cursor", account: a, result: r, tokens: r && r.agg ? r.agg.totalTokens : 0 });
   }
-  for (const key of LOCAL_KEYS) {
+  // 已删除账户：只在所选跨度内有用量（或切片出错需要露出错误）时占一行，切片未完成的不占位
+  if (active.includeDeleted) {
+    for (const record of deletedRecords) {
+      const r = overviewResults.get(record.accountId) || null;
+      if (!r || (r.state !== "error" && !hasUsage(r.agg))) continue;
+      entries.push({ kind: "cursor-deleted", record, result: r, tokens: r.agg ? r.agg.totalTokens : 0 });
+    }
+  }
+  for (const key of active.localKeys) {
     const local = overviewResults.get(key) || null;
     const scanAgg = local && local.scan ? local.scan.aggregate : null;
     entries.push({ kind: key, account: null, result: local, tokens: scanAgg ? scanAgg.totalTokens : 0 });
@@ -477,11 +553,14 @@ function overviewSourceOrder() {
 function collectDailySources() {
   const sources = [];
   for (const src of overviewSourceOrder()) {
-    if (src.kind === "cursor") {
+    if (src.kind === "cursor" || src.kind === "cursor-deleted") {
       const r = src.result;
       if (!r || !r.agg) continue;
       sources.push({
-        label: src.account.note || maskToken(src.account.token),
+        label:
+          src.kind === "cursor"
+            ? src.account.note || maskToken(src.account.token)
+            : `${deletedLabel(src.record)}（已删除）`,
         daily: r.agg.daily || [],
         hourly: r.agg.hourly || [],
         showActual: true,
@@ -717,6 +796,63 @@ function renderCharts(agg, dailySources) {
   }
 }
 
+/**
+ * 环形图的 HTML 图例（画布外定宽列表，见 .pie-legend）：色块 + 名字（过长省略，title 放全名与数值），
+ * 点击切换对应扇区的显示 / 隐藏（与 Chart.js 自带图例一致）。每次渲染整体重建，
+ * 隐藏状态从图表实例回读。
+ */
+function renderPieLegend(listId, chart, labels, colors, fmtValue) {
+  const list = el(`#${listId}`);
+  const data = (chart.data.datasets[0] && chart.data.datasets[0].data) || [];
+  const total = data.reduce((sum, v, i) => sum + (chart.getDataVisibility(i) ? Number(v) || 0 : 0), 0);
+  list.replaceChildren(
+    ...labels.map((label, i) => {
+      const li = document.createElement("li");
+      const hidden = !chart.getDataVisibility(i);
+      li.classList.toggle("slice-hidden", hidden);
+      const swatch = document.createElement("span");
+      swatch.className = "pie-legend-swatch";
+      swatch.style.background = colors[i];
+      const text = document.createElement("span");
+      text.className = "pie-legend-label";
+      text.textContent = label;
+      const value = Number(data[i]) || 0;
+      const share = hidden ? "" : fmtShare(value, total);
+      li.title = `${label}：${fmtValue(value)}${share ? `（${share}）` : ""}`;
+      li.append(swatch, text);
+      li.addEventListener("click", () => {
+        chart.toggleDataVisibility(i);
+        chart.update();
+        renderPieLegend(listId, chart, labels, colors, fmtValue);
+      });
+      return li;
+    })
+  );
+}
+
+/** 环形图 Chart.js 配置：图例交给画布外的 HTML 列表，画布只画圆环与扇区标注。 */
+function doughnutOptions(labelFormatter) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label(ctx) {
+            const total = ctx.dataset.data.reduce(
+              (sum, v, i) => sum + (ctx.chart.getDataVisibility(i) ? Number(v) || 0 : 0),
+              0
+            );
+            const share = fmtShare(ctx.parsed, total);
+            return ` ${ctx.label}: ${labelFormatter(ctx.parsed)}${share ? `（${share}）` : ""}`;
+          },
+        },
+      },
+    },
+  };
+}
+
 // 图表实例常驻，重复渲染时原地更新数据（渐进合并时不闪烁）
 function renderChartsInner(agg, dailySources) {
   renderDailyChart(dailySources);
@@ -747,28 +883,14 @@ function renderChartsInner(agg, dailySources) {
         ],
       },
       plugins: [pieSliceLabelsPlugin],
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
-          tooltip: {
-            callbacks: {
-              label(ctx) {
-                const total = ctx.dataset.data.reduce((sum, v) => sum + (Number(v) || 0), 0);
-                const share = fmtShare(ctx.parsed, total);
-                return ` ${ctx.label}: ${fmtTokens(ctx.parsed)}${share ? `（${share}）` : ""}`;
-              },
-            },
-          },
-        },
-      },
+      options: doughnutOptions(fmtTokens),
     });
     // 扇区上标注占比 + 紧凑 token 数；配置挂实例属性，不能进 options（scriptable 解析陷阱）
     tokenChart.$pieSliceLabels = {
       formatter: (value, share) => [share, compactTokens(value)],
     };
   }
+  renderPieLegend("legend-tokens", tokenChart, tokenLabels, tokenColors, fmtTokens);
 
   // 各模型等价费用饼图：Top 8 + 其他；仅统计已定价（费用 > 0）的模型
   const costSlices = topSlices(agg.models, "equivalentUsd", 8);
@@ -795,28 +917,14 @@ function renderChartsInner(agg, dailySources) {
         ],
       },
       plugins: [pieSliceLabelsPlugin],
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
-          tooltip: {
-            callbacks: {
-              label(ctx) {
-                const total = ctx.dataset.data.reduce((sum, v) => sum + (Number(v) || 0), 0);
-                const share = fmtShare(ctx.parsed, total);
-                return ` ${ctx.label}: ${fmtUsd(ctx.parsed)}${share ? `（${share}）` : ""}`;
-              },
-            },
-          },
-        },
-      },
+      options: doughnutOptions(fmtUsd),
     });
     // 扇区上标注占比 + 金额；配置挂实例属性，不能进 options（scriptable 解析陷阱）
     modelChart.$pieSliceLabels = {
       formatter: (value, share) => [share, fmtUsd(value)],
     };
   }
+  renderPieLegend("legend-models", modelChart, modelLabels, modelColors, fmtUsd);
 
   const sums = agg.models.reduce(
     (acc, m) => {
@@ -829,6 +937,8 @@ function renderChartsInner(agg, dailySources) {
     { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
   );
   const doughnutData = [sums.input, sums.cacheRead, sums.cacheWrite, sums.output];
+  const doughnutLabels = ["输入", "缓存读", "缓存写", "输出"];
+  const doughnutColors = [colorFor(0), colorFor(2), colorFor(4), colorFor(1)];
   if (doughnutChart) {
     doughnutChart.data.datasets[0].data = doughnutData;
     doughnutChart.update();
@@ -836,41 +946,42 @@ function renderChartsInner(agg, dailySources) {
     doughnutChart = new Chart(el("#chart-doughnut"), {
       type: "doughnut",
       data: {
-        labels: ["输入", "缓存读", "缓存写", "输出"],
+        labels: doughnutLabels,
         datasets: [
           {
             data: doughnutData,
-            backgroundColor: [colorFor(0), colorFor(2), colorFor(4), colorFor(1)],
+            backgroundColor: doughnutColors,
             borderColor: t.border,
             borderWidth: 2,
           },
         ],
       },
       plugins: [pieSliceLabelsPlugin],
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          // 图例放右侧，饼图主体尽量占满定高容器
-          legend: { position: "right", labels: { color: t.tickStrong, boxWidth: 12, boxHeight: 12 } },
-          tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${fmtTokens(ctx.parsed)}` } },
-        },
-      },
+      options: doughnutOptions(fmtTokens),
     });
     // 扇区上标注占比 + 紧凑 token 数；配置挂实例属性，不能进 options（scriptable 解析陷阱）
     doughnutChart.$pieSliceLabels = {
       formatter: (value, share) => [share, compactTokens(value)],
     };
   }
+  renderPieLegend("legend-doughnut", doughnutChart, doughnutLabels, doughnutColors, fmtTokens);
 }
 
 /* ---------- 数据源选择（chips） ---------- */
 
+/**
+ * 重建统计对象 chip 行，并清理已失效的选中项（账户已删除 / 已删除记录已清空），
+ * 随后按 selectedKeys 重新推导 selection。多选：点击切换选中，「全部总览」= 全选（空集）。
+ */
 function rebuildChips() {
   const cursorAccounts = getAccounts().filter((a) => a.kind === "cursor");
-  if (selection !== "all" && !isLocalSelection() && !cursorAccounts.some((a) => a.id === selection)) {
-    selection = "all";
+  const valid = new Set([...cursorAccounts.map((a) => a.id), ...LOCAL_KEYS]);
+  if (deletedRecords.length) valid.add(DELETED_SELECTION);
+  for (const key of [...selectedKeys]) {
+    if (!valid.has(key)) selectedKeys.delete(key);
   }
+  syncSelection();
+
   const chips = [{ value: "all", label: "全部总览", sub: "", kind: null }];
   // 账户 chip：名字为主显示，邮箱作为小字排在下一行（与主显示相同时不重复）
   for (const a of cursorAccounts) {
@@ -878,12 +989,16 @@ function rebuildChips() {
     chips.push({ value: a.id, label: primary, sub: email, kind: a.kind });
   }
   for (const key of LOCAL_KEYS) chips.push({ value: key, label: "本地用量分析", sub: "", kind: LOCAL_SOURCES[key].tag });
+  // 已删除账户保留的统计数据：有记录时在末尾给一个「已删除」chip，作为一个整体项参与选择
+  if (deletedRecords.length) chips.push({ value: DELETED_SELECTION, label: "已删除", sub: "", kind: "cursor" });
 
   el("#usage-sources").replaceChildren(
     ...chips.map((c) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = `chip-select${c.sub ? " has-sub" : ""}${selection === c.value ? " active" : ""}`;
+      const active = c.value === "all" ? selection === "all" : selectedKeys.has(c.value);
+      btn.className = `chip-select${c.sub ? " has-sub" : ""}${active ? " active" : ""}`;
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
       if (c.kind) {
         const tag = document.createElement("span");
         tag.className = `tag kind-${c.kind}`;
@@ -910,10 +1025,12 @@ function rebuildChips() {
 }
 
 function applyVisibility() {
+  // 本地来源的目录输入 / 重新扫描只在单选该来源时显示；多选时用默认目录
   for (const key of LOCAL_KEYS) el(LOCAL_SOURCES[key].form).hidden = selection !== key;
-  el("#usage-overview").hidden = selection !== "all";
-  // 「生成快照」仅对单个 Cursor 账户视图开放（总览 / 本地分析无对应存档口径）
-  el("#usage-snapshot").hidden = selection === "all" || isLocalSelection();
+  // 各来源账单表：合并视图（全部总览 / 多选 / 已删除）列出参与合并的来源
+  el("#usage-overview").hidden = !isMergedView();
+  // 「生成快照」仅对单个 Cursor 账户视图开放（合并视图 / 本地分析无对应存档口径）
+  el("#usage-snapshot").hidden = isMergedView() || isLocalSelection();
   el("#usage-results").hidden = true;
   el("#usage-skeleton").hidden = true;
   renderedFor = ""; // 结果区已被隐藏，需要重新渲染
@@ -921,12 +1038,20 @@ function applyVisibility() {
   clearStatus();
 }
 
+/** chip 点击：切换该项选中 / 取消；「全部总览」清空选择（已是总览时再点 = 重新加载）。 */
 function selectSource(value) {
-  if (selection === value) {
-    loadView(false);
-    return;
+  if (value === "all") {
+    if (!selectedKeys.size) {
+      loadView(false);
+      return;
+    }
+    selectedKeys.clear();
+  } else if (selectedKeys.has(value)) {
+    selectedKeys.delete(value);
+  } else {
+    selectedKeys.add(value);
   }
-  selection = value;
+  syncSelection();
   rebuildChips();
   applyVisibility();
   loadView(false);
@@ -943,9 +1068,76 @@ function getCachedLocal(key, home) {
   return LOCAL_SOURCES[key].getCached(scanKey(), home);
 }
 
-function fetchAggregate(account, force) {
+/**
+ * 当前跨度下拉取 Cursor 账户聚合。force 跳过本地缓存并让后端立即增量同步事件库；
+ * full 强制全量重拉（仅「刷新」按钮）。
+ */
+function fetchAggregate(account, { force = false, full = false } = {}) {
   const { start, end } = rangeBounds();
-  return fetchCursorAggregate(account, rangeKey(), { start, end, force });
+  return fetchCursorAggregate(account, rangeKey(), { start, end, force, full });
+}
+
+/** 当前跨度下切片某个已删除账户保留的事件库（纯本地）。 */
+function fetchDeletedAggregate(record) {
+  const { start, end } = rangeBounds();
+  return fetchArchivedAggregate(record.accountId, { start, end });
+}
+
+/**
+ * 重新拉取已删除账户记录列表（失败时沿用上次结果），并按有无记录重建筛选 chip。
+ * 重建可能清掉「已删除」选中项而改变视图（如记录全部清空）：此时切到新视图并返回 true，
+ * 调用方不必再继续原视图的加载。
+ */
+async function refreshDeletedRecords() {
+  try {
+    const list = await listDeletedUsage();
+    deletedRecords = Array.isArray(list) ? list : [];
+  } catch (error) {
+    console.error("读取已删除账户统计数据列表失败：", error);
+  }
+  deletedDirty = false;
+  const before = selectionKey();
+  rebuildChips();
+  if (selectionKey() === before) return false;
+  applyVisibility();
+  if (panelVisible) loadView(false);
+  return true;
+}
+
+/**
+ * 总览行「删除统计数据」：确认后彻底删除该已删除账户保留的事件库，然后重新加载总览
+ * （事件库在有效期内，重载只是本地切片，不会联网）。
+ */
+async function onDeleteUsageData(record) {
+  const ok = await confirmDialog({
+    title: "删除统计数据",
+    body: `确定删除已删除账户“${deletedLabel(record)}”保留的统计数据吗？此操作无法撤销。`,
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await removeDeletedUsage(record.accountId);
+  } catch (error) {
+    setStatus("bad", `删除统计数据失败：${resetError(error)}`);
+    return;
+  }
+  deletedRecords = deletedRecords.filter((r) => r.accountId !== record.accountId);
+  overviewResults.delete(record.accountId);
+  // 独立 key：随后重载视图时的 clearStatus 只清页面级提示，不吞掉这条结果
+  toast("ok", `已删除“${deletedLabel(record)}”保留的统计数据。`, { key: "usage-deleted" });
+  // 最后一条记录删掉后「已删除」chip 消失，rebuildChips 会清掉该选中项并切换视图
+  const before = selectionKey();
+  rebuildChips();
+  if (selectionKey() !== before) {
+    applyVisibility();
+    if (panelVisible) loadView(false);
+    return;
+  }
+  if (!isMergedView() || !activeSources().includeDeleted) return;
+  renderedAt = 0;
+  lastAttemptAt = 0;
+  if (panelVisible) loadView(false);
 }
 
 /**
@@ -1021,11 +1213,26 @@ function renderOverviewTable() {
   const totals = { tokens: 0, actual: 0, equivalent: 0, planUsd: 0, planEquiv: 0, planKnown: false };
   let hasData = false;
 
-  // 一行一个来源：各 Cursor 账户 + 本地 Codex 分析，按总 Token 降序；
+  // 一行一个来源：各 Cursor 账户（含已删除账户保留的数据）+ 本地 Codex / Claude 分析，按总 Token 降序；
   // showActual=false 的来源实扣列恒为 —。统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
   // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
   // 统计中 / 更新中的来源状态格带旋转指示并用强调色，避免与「完成」等静态文案混在一起看不出来。
-  const sourceRow = ({ kind, label, stateText, stateBad, statePending, at, agg, showActual, planText, ratioText }) => {
+  // 已删除账户行：名称旁标「已删除」，状态格放「删除统计数据」按钮（action）。
+  const sourceRow = ({
+    kind,
+    label,
+    deleted,
+    stateText,
+    stateTitle,
+    stateBad,
+    statePending,
+    at,
+    agg,
+    showActual,
+    planText,
+    ratioText,
+    action,
+  }) => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     const ident = document.createElement("div");
@@ -1037,6 +1244,12 @@ function renderOverviewTable() {
     name.className = "account-note";
     name.textContent = label;
     ident.append(tag, name);
+    if (deleted) {
+      const deletedTag = document.createElement("span");
+      deletedTag.className = "tag deleted";
+      deletedTag.textContent = "已删除";
+      ident.append(deletedTag);
+    }
     nameTd.append(ident);
 
     const stateTd = document.createElement("td");
@@ -1052,8 +1265,17 @@ function renderOverviewTable() {
       stateTd.textContent = stateText;
       if (stateBad) {
         stateTd.className = "cell-bad";
-        stateTd.title = stateText;
+        stateTd.title = stateTitle || stateText;
       }
+    }
+    if (action) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "table-button overview-action";
+      btn.textContent = action.label;
+      btn.title = action.title || action.label;
+      btn.addEventListener("click", action.onClick);
+      stateTd.append(btn);
     }
 
     const timeTd = document.createElement("td");
@@ -1132,6 +1354,43 @@ function renderOverviewTable() {
         planText,
         ratioText,
       });
+    } else if (src.kind === "cursor-deleted") {
+      // 已删除账户保留的数据：不再更新，状态列只标错误（切片失败）；套餐取删除时保留的信息
+      const record = src.record;
+      const result = src.result;
+      const agg = result && result.agg ? result.agg : null;
+      const stateBad = !!result && result.state === "error";
+      const membership = record.membershipType || null;
+      const planLabel = membership ? membershipLabel(membership) : "";
+      const price = planMonthlyUsd(membership);
+      const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
+      let ratioText = "—";
+      if (agg && price > 0 && !isSingleDaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
+      if (agg && price != null) {
+        totals.planUsd += price;
+        totals.planEquiv += agg.totalEquivalentUsd;
+        totals.planKnown = true;
+      }
+      sourceRow({
+        kind: "cursor",
+        label: deletedLabel(record),
+        deleted: true,
+        // 读取失败时只显示短文案，完整错误放悬停提示，避免撑开 / 裁掉旁边的按钮
+        stateText: stateBad ? "读取失败" : `数据截至 ${fmtDeletedAt(record.deletedAt)}`,
+        stateTitle: stateBad ? result.error : "",
+        stateBad,
+        statePending: false,
+        at: result ? result.at : null,
+        agg,
+        showActual: true,
+        planText,
+        ratioText,
+        action: {
+          label: "删除统计数据",
+          title: "彻底删除该已删除账户保留的统计数据",
+          onClick: () => void onDeleteUsageData(record),
+        },
+      });
     } else {
       // 本地 Codex / Claude 分析行：无论有无对应账户都展示；本地日志无账户归属，无套餐可比
       const local = src.result;
@@ -1191,31 +1450,46 @@ function renderOverviewTable() {
 /**
  * 用 overviewResults 中当前已有数据（含缓存种子与刚完成的来源）合并渲染结果区。
  * 渐进调用：每个来源完成后都重新合并一次，图表随数据逐步细化。
+ * 参与合并的来源由 activeSources 决定（全部总览 / 多选子集 / 仅已删除账户）。
  * 返回合并结果，无任何可用数据时返回 null（不主动隐藏结果区）。
  */
 function renderOverviewMerged() {
-  const cursorAccounts = getAccounts().filter((a) => a.kind === "cursor");
+  const active = activeSources();
+  const cursorAccounts = active.cursorAccounts;
   const aggs = [];
   const ats = [];
   let planUsd = 0;
   let planEquiv = 0;
   let planKnown = false;
   let cursorCount = 0;
-  for (const a of cursorAccounts) {
-    const r = overviewResults.get(a.id);
-    if (!r || !r.agg) continue;
+  let deletedCount = 0;
+  const takeCursor = (r, membership) => {
     aggs.push(r.agg);
-    cursorCount += 1;
     if (Number.isFinite(r.at)) ats.push(r.at);
-    const price = planMonthlyUsd(a.status ? a.status.membershipType : null);
+    const price = planMonthlyUsd(membership);
     if (price != null) {
       planUsd += price;
       planEquiv += r.agg.totalEquivalentUsd;
       planKnown = true;
     }
+  };
+  for (const a of cursorAccounts) {
+    const r = overviewResults.get(a.id);
+    if (!r || !r.agg) continue;
+    cursorCount += 1;
+    takeCursor(r, a.status ? a.status.membershipType : null);
+  }
+  // 已删除账户保留的数据：与账单表同一口径，只计入所选跨度内有用量的
+  if (active.includeDeleted) {
+    for (const record of deletedRecords) {
+      const r = overviewResults.get(record.accountId);
+      if (!r || !hasUsage(r.agg)) continue;
+      deletedCount += 1;
+      takeCursor(r, record.membershipType || null);
+    }
   }
   const localNames = [];
-  for (const key of LOCAL_KEYS) {
+  for (const key of active.localKeys) {
     const local = overviewResults.get(key);
     const scanAgg = local && local.scan ? local.scan.aggregate : null;
     if (!scanAgg) continue;
@@ -1227,16 +1501,23 @@ function renderOverviewMerged() {
 
   const merged = mergeAggregates(aggs);
   const sources = [];
-  if (cursorCount) sources.push(`${cursorCount} 个 Cursor 账户`);
+  if (cursorCount && deletedCount) {
+    sources.push(`${cursorCount + deletedCount} 个 Cursor 账户（含 ${deletedCount} 个已删除）`);
+  } else if (cursorCount) {
+    sources.push(`${cursorCount} 个 Cursor 账户`);
+  } else if (deletedCount) {
+    sources.push(`${deletedCount} 个已删除 Cursor 账户`);
+  }
   sources.push(...localNames);
   // 单日跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
   const tail = isSingleDaySpan()
     ? singleDayTail()
     : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，选近 30 天时最具参考性）";
+  const title = selection === "all" ? "全部总览" : isDeletedSelection() ? "已删除账户" : "所选来源";
   renderAggregate(merged, {
     showActual: true,
     plan: planKnown && !isSingleDaySpan() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
-    metaText: `全部总览 · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
+    metaText: `${title} · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
     dailySources: collectDailySources(),
   });
   // 合并视图的数据时间取最早的来源时间（保守口径）
@@ -1247,8 +1528,56 @@ function renderOverviewMerged() {
 // 上次总览加载的跨度签名：跨度切换后不复用上一跨度的内存结果作种子（口径不同会串数）
 let overviewSpanSig = "";
 
+/**
+ * 已删除账户保留的数据：没有 localStorage 缓存，切片是纯本地操作——同跨度的上轮结果作种子
+ * （previous），随后为每条记录发起切片，每条完成后重绘账单表与合并结果。总览与「已删除」视图共用。
+ */
+function startDeletedJobs(previous, seq) {
+  for (const record of deletedRecords) {
+    const prev = previous.get(record.accountId);
+    overviewResults.set(record.accountId, {
+      state: "pending",
+      agg: (prev && prev.agg) || null,
+      at: prev ? prev.at : record.syncedAt,
+    });
+  }
+  return deletedRecords.map((record) =>
+    fetchDeletedAggregate(record)
+      .then((entry) => {
+        overviewResults.set(record.accountId, { state: "ok", agg: entry.agg, at: entry.at });
+      })
+      .catch((error) => {
+        const prev = overviewResults.get(record.accountId) || {};
+        overviewResults.set(record.accountId, {
+          state: "error",
+          error: resetError(error),
+          agg: prev.agg,
+          at: prev.at,
+        });
+      })
+      .then(() => {
+        if (seq !== loadSeq) return;
+        renderOverviewTable();
+        renderOverviewMerged();
+      })
+  );
+}
+
+/** 已删除账户切片失败的条数（状态提示用）。 */
+function deletedFailedCount() {
+  return deletedRecords.filter((record) => {
+    const r = overviewResults.get(record.accountId);
+    return r && r.state === "error";
+  }).length;
+}
+
+/**
+ * 合并视图加载：全部总览 / 多选子集 / 仅已删除账户共用。参与来源由 activeSources 决定，
+ * 每个来源完成后立即合并重绘；「已删除」是整体项，包含全部已删除账户保留的数据。
+ */
 async function loadOverview(force, seq) {
-  const cursorAccounts = getAccounts().filter((a) => a.kind === "cursor");
+  const startKey = selectionKey();
+  const { cursorAccounts, localKeys, includeDeleted } = activeSources();
   el("#usage-overview").hidden = false;
   const spanSig = `${rangeKey()}:${scanKey()}`;
   const previous = spanSig === overviewSpanSig ? new Map(overviewResults) : new Map();
@@ -1268,7 +1597,7 @@ async function loadOverview(force, seq) {
     overviewResults.set(a.id, { state: fresh ? "ok" : "pending", agg, at });
   }
   // 本地扫描来源（Codex / Claude）：缓存种子，与 Cursor 账户同一口径
-  for (const key of LOCAL_KEYS) {
+  for (const key of localKeys) {
     const cachedEntry = getCachedLocal(key, null);
     const prev = previous.get(key);
     const scan = (cachedEntry && cachedEntry.scan) || (prev && prev.scan) || null;
@@ -1281,9 +1610,20 @@ async function loadOverview(force, seq) {
   // 加载进度不再弹 toast：无缓存时骨架屏占位，有缓存时顶部「更新中…」+ 状态列体现
   clearStatus();
 
+  // 已删除账户保留的数据：账户增删后先刷新记录列表（放在缓存种子渲染之后，不耽误首屏）。
+  // 刷新会重建 chip 并清理失效选中项（如已删除记录全部清空），视图身份变了就改走新视图的加载
+  let deletedJobs = [];
+  if (includeDeleted) {
+    if (deletedDirty) {
+      const switched = await refreshDeletedRecords();
+      if (switched || seq !== loadSeq || selectionKey() !== startKey) return;
+    }
+    deletedJobs = startDeletedJobs(previous, seq);
+  }
+
   // 2) 本地 Codex / Claude 扫描与各 Cursor 账户并行拉取，每个来源完成后立即合并重绘
   //   （有效期内的来源在 usage_data 中直接命中缓存，不会走网络）
-  const scanJobs = LOCAL_KEYS.map((key) =>
+  const scanJobs = localKeys.map((key) =>
     fetchLocal(key, null, force)
       .then((entry) => {
         overviewResults.set(key, { state: "ok", scan: entry.scan, at: entry.at });
@@ -1305,13 +1645,14 @@ async function loadOverview(force, seq) {
       })
   );
 
+  // Cursor 账户：「刷新」按钮（force）强制全量重拉事件库，其余走后端 auto 模式
   let next = 0;
   const lane = async () => {
     while (next < cursorAccounts.length) {
       const acc = cursorAccounts[next];
       next += 1;
       try {
-        const entry = await fetchAggregate(acc, force);
+        const entry = await fetchAggregate(acc, { force, full: force });
         overviewResults.set(acc.id, { state: "ok", agg: entry.agg, at: entry.at });
       } catch (error) {
         const prev = overviewResults.get(acc.id) || {};
@@ -1331,6 +1672,7 @@ async function loadOverview(force, seq) {
   await Promise.all([
     ...Array.from({ length: Math.min(OVERVIEW_CONCURRENCY, cursorAccounts.length) }, lane),
     ...scanJobs,
+    ...deletedJobs,
   ]);
   if (seq !== loadSeq) return;
 
@@ -1340,21 +1682,32 @@ async function loadOverview(force, seq) {
     const r = overviewResults.get(a.id);
     return r && r.state === "error";
   }).length;
+  const deletedFailed = includeDeleted ? deletedFailedCount() : 0;
+  const deletedShown =
+    includeDeleted && deletedRecords.some((record) => hasUsage((overviewResults.get(record.accountId) || {}).agg));
+  const localFailed = localKeys.filter((key) => {
+    const local = overviewResults.get(key);
+    return local && local.state === "error";
+  });
 
   if (merged) {
     const warns = [];
     if (failed) warns.push(`${failed} 个 Cursor 账户统计失败`);
-    for (const key of LOCAL_KEYS) {
-      const local = overviewResults.get(key);
-      if (local && local.state === "error") warns.push(`${LOCAL_SOURCES[key].mergedName} 扫描失败`);
-    }
+    if (deletedFailed) warns.push(`${deletedFailed} 个已删除账户的保留数据读取失败`);
+    for (const key of localFailed) warns.push(`${LOCAL_SOURCES[key].mergedName} 扫描失败`);
     if (warns.length) setStatus("warn", `${warns.join("；")}，明细见上表；失败来源如有上次数据则继续显示。`);
     else if (merged.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
-    else if (!cursorAccounts.length) setStatus("", "尚未添加 Cursor 账户，总览目前仅含本地 ChatGPT / Claude 用量。");
-    else clearStatus();
-  } else {
-    setStatus("bad", "全部来源统计失败，请检查 Token 与本地会话目录。");
+    else if (selection === "all" && !cursorAccounts.length && !deletedShown) {
+      setStatus("", "尚未添加 Cursor 账户，总览目前仅含本地 ChatGPT / Claude 用量。");
+    } else clearStatus();
+    return;
   }
+  // 什么都没合并出来：区分「没有来源」「全部失败」与「所选范围内确实没有用量」
+  const sourceCount = cursorAccounts.length + localKeys.length + (includeDeleted ? deletedRecords.length : 0);
+  if (!sourceCount) setStatus("", isDeletedSelection() ? "没有已删除账户保留的统计数据。" : "没有可统计的来源。");
+  else if (failed + deletedFailed + localFailed.length >= sourceCount) {
+    setStatus("bad", "全部来源统计失败，请检查 Token 与本地会话目录。");
+  } else setStatus("warn", "该时间范围内没有用量记录。");
 }
 
 function renderCursorAccount(account, agg, at) {
@@ -1380,7 +1733,7 @@ async function loadCursorAccount(account, force, seq) {
   const cached = getCachedAgg(account);
   if (cached) renderCursorAccount(account, cached.agg, cached.at);
   try {
-    const entry = await fetchAggregate(account, force);
+    const entry = await fetchAggregate(account, { force, full: force });
     if (seq !== loadSeq) return;
     clearStatus();
     renderCursorAccount(account, entry.agg, entry.at);
@@ -1449,14 +1802,14 @@ async function loadCurrent(force) {
   loading = true;
   setLoadingHint(true);
   try {
-    if (selection === "all") {
+    if (isMergedView()) {
       await loadOverview(force, seq);
     } else if (isLocalSelection()) {
       await loadLocalScan(selection, force, seq);
     } else {
       const account = currentAccount();
       if (!account) {
-        selection = "all";
+        selectedKeys.clear();
         rebuildChips();
         applyVisibility();
         await loadOverview(force, seq);
@@ -1515,8 +1868,9 @@ function applyCacheToOverview() {
     overviewResults.set(key, { state: "ok", [field]: cached[field], at: cached.at });
     changed = true;
   };
-  for (const a of getAccounts().filter((x) => x.kind === "cursor")) take(a.id, getCachedAgg(a), "agg");
-  for (const key of LOCAL_KEYS) take(key, getCachedLocal(key, null), "scan");
+  const active = activeSources();
+  for (const a of active.cursorAccounts) take(a.id, getCachedAgg(a), "agg");
+  for (const key of active.localKeys) take(key, getCachedLocal(key, null), "scan");
   return changed;
 }
 
@@ -1527,7 +1881,8 @@ function applyCacheToOverview() {
  */
 function rerenderFromCache() {
   if (renderedFor !== selectionKey()) return;
-  if (selection === "all") {
+  if (isDeletedSelection()) return; // 数据不在共享缓存里，无需重绘
+  if (isMergedView()) {
     const changed = applyCacheToOverview();
     // 状态列总要落地（预取失败的来源从「更新中…」转为错误态），数据没变则不重画卡片与图表
     renderOverviewTable();
@@ -1605,7 +1960,8 @@ function diffAccounts(list) {
 function prefetchUsageFor(accounts) {
   const jobs = [];
   let marked = false;
-  const canMark = panelVisible && !loading && selection === "all" && renderedFor === selectionKey();
+  // 合并视图可见时把预取中的来源标成「更新中…」（不在所选集合里的来源没有条目，标不上，天然跳过）
+  const canMark = panelVisible && !loading && isMergedView() && renderedFor === selectionKey();
   const enqueue = (key, fetchPromise) => {
     const prev = canMark ? overviewResults.get(key) : null;
     if (prev) {
@@ -1625,7 +1981,8 @@ function prefetchUsageFor(accounts) {
     if (a.kind !== "cursor") continue;
     const cached = cacheGetAgg(a.id, rangeKey());
     if (cached && Date.now() - cached.at < PREFETCH_MIN_AGE_MS) continue;
-    enqueue(a.id, fetchAggregate(a, true));
+    // 预取只增量同步事件库（sync），不走「刷新」按钮的全量重拉
+    enqueue(a.id, fetchAggregate(a, { force: true }));
   }
   // 本地扫描：同类账户刷新过视同该来源刚被刷新，60s 内扫过才跳过；否则只在缓存临近 / 已过期
   // 时顺带重扫（阈值取 TTL 提前 60s，避免与定时刷新节拍差几秒而整轮错过）。
@@ -1644,15 +2001,23 @@ function prefetchUsageFor(accounts) {
 
 /** 对端窗口写入的缓存键是否影响当前视图（跨度不同则无需重渲染）。 */
 function cacheKeyAffectsCurrentView(key) {
+  // 「已删除」视图的数据只来自本地事件库，不受共享缓存影响
+  if (isDeletedSelection()) return false;
   if (!key || !key.startsWith(USAGE_CACHE_PREFIX)) return true; // 通配 / 整体清理保守处理
   const rest = key.slice(USAGE_CACHE_PREFIX.length);
   if (rest.startsWith("agg:")) {
-    return !isLocalSelection() && rest.endsWith(`:${rangeKey()}`);
+    const suffix = `:${rangeKey()}`;
+    if (isLocalSelection() || !rest.endsWith(suffix)) return false;
+    if (selection === "all") return true;
+    // 键形如 agg:<accountId>:<rangeKey>：只有该账户在当前视图里才需要重绘
+    const accountId = rest.slice("agg:".length, rest.length - suffix.length);
+    return isMultiSelection() ? selectedKeys.has(accountId) : accountId === selection;
   }
   for (const localKey of LOCAL_KEYS) {
     const prefix = LOCAL_SOURCES[localKey].cachePrefix;
     if (!rest.startsWith(prefix)) continue;
-    if (selection !== "all" && selection !== localKey) return false;
+    const included = selection === "all" || selection === localKey || (isMultiSelection() && selectedKeys.has(localKey));
+    if (!included) return false;
     return rest.slice(prefix.length).startsWith(`${scanKey()}:`);
   }
   return true;
@@ -1676,14 +2041,13 @@ function setSpan(next) {
 
 export function initUsage() {
   el("#usage-refresh").addEventListener("click", () => {
-    // 统一刷新：重新统计当前视图，并顺带刷新视图相关账户的状态
+    // 统一刷新：重新统计当前视图，并顺带刷新视图相关账户的状态（合并视图取参与合并的账户）
     loadView(true);
-    const ids =
-      selection === "all"
-        ? getAccounts().filter((a) => a.kind === "cursor").map((a) => a.id)
-        : currentAccount()
-        ? [selection]
-        : [];
+    const ids = isMergedView()
+      ? activeSources().cursorAccounts.map((a) => a.id)
+      : currentAccount()
+      ? [selection]
+      : [];
     if (ids.length) void refreshAccounts(ids);
   });
   // 生成全量用量快照图片：数据获取（在线 / 本地存档回退）与绘制见 snapshot.js
@@ -1720,8 +2084,12 @@ export function initUsage() {
     const idsChanged = sig !== accountIdsSig;
     if (idsChanged) {
       accountIdsSig = sig;
-      // 清理已删除账户的聚合缓存（内存 + localStorage）
+      // 清理已删除账户的聚合缓存（内存 + localStorage）；保留的统计数据由后端事件库承载，
+      // 下次加载总览时重新读取已删除记录列表（删除时保留 / 重新添加后接管都会改变该列表）
       purgeMissingAccounts(list);
+      deletedDirty = true;
+      // 含已删除账户的合并视图会在随后的加载里重读列表；其它视图这里直接刷新，让「已删除」chip 及时出现
+      if (!isMergedView() || !activeSources().includeDeleted) void refreshDeletedRecords();
     }
     const { refreshed, rekeyed } = diffAccounts(list);
     // 刚更换过凭据的账户：旧 token 统计出的用量缓存与总览内存结果一并作废
@@ -1737,17 +2105,17 @@ export function initUsage() {
     }
     // 统一刷新：状态刚刷新过的账户（任意入口触发）后台预取其用量
     if (refreshed.length) prefetchUsageFor(refreshed);
-    const stillExists =
-      selection === "all" || isLocalSelection() || list.some((a) => a.id === selection && a.kind === "cursor");
+    // rebuildChips 会清掉已不存在账户的选中项并重新推导 selection；视图类型变了就切过去
+    const before = selection;
     rebuildChips();
-    if (!stillExists) {
+    if (selection !== before) {
       applyVisibility();
       if (panelVisible) loadView(false);
       return;
     }
     if (!panelVisible || loading) return;
-    // 账户状态更新时同步总览表中的套餐信息
-    if (selection === "all") renderOverviewTable();
+    // 账户状态更新时同步账单表中的套餐信息
+    if (isMergedView()) renderOverviewTable();
     // 只有结构性变化才重新加载当前视图。状态刷新一律不走这里——否则页面恰好过期时，
     // 一个账户刷新完会把所有未过期来源一起重新统计（表现为所有行同时变「更新中…」）；
     // 刷新带来的数据更新由 prefetchUsageFor → rerenderFromCache 逐行落地。
@@ -1789,6 +2157,24 @@ export function initUsage() {
     if (cacheKeyAffectsCurrentView(event.key)) scheduleRerenderFromCache();
   });
 
+  // 已删除账户保留的统计数据集合有变化（重新添加同一账号后接管 / 备份恢复）：
+  // 该通知在 accounts-changed 之后到达，此时按旧列表发起的总览加载可能仍在进行，
+  // 直接重新加载（作废在途结果；在途请求由 usage_data 的 in-flight 表去重，不会重复联网）
+  listen("usage-archive-changed", () => {
+    deletedDirty = true;
+    // 含已删除账户的合并视图当场作废重载（加载时会重读记录列表并重建 chip）；
+    // 其它视图只刷新列表让「已删除」chip 及时出现或消失，切回时 applyVisibility 会清空 renderedFor 自然重载
+    if (!isMergedView() || !activeSources().includeDeleted) {
+      void refreshDeletedRecords();
+      return;
+    }
+    renderedAt = 0;
+    lastAttemptAt = 0;
+    if (panelVisible) loadView(false);
+  }).catch(() => {
+    /* 非 Tauri 环境无事件桥 */
+  });
+
   // 总览表「数据更新」列的相对时间随时间流逝定期重算（与账户页节奏一致），
   // 只改时间文本，不整表重绘
   setInterval(() => {
@@ -1801,4 +2187,6 @@ export function initUsage() {
   rebuildChips();
   applyVisibility();
   setUsageCacheTtlMs(getRefreshIntervalMinutes() > 0 ? getRefreshIntervalMinutes() * 60_000 : DEFAULT_TTL_MS);
+  // 启动即读取已删除记录列表，让「已删除」chip 不必等到首次打开总览才出现
+  void refreshDeletedRecords();
 }

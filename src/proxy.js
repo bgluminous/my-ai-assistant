@@ -1,7 +1,7 @@
 import { el, invoke, copyText, resetError, fillStatus } from "./shared.js";
 
 // 代理设置弹窗：跟随系统 / 直连 / 自定义（http、https、socks5，可带账号密码）。
-// 保存到用户目录 xilore/myaiassistant/settings.json 的 proxy 字段，后端每次构建 HTTP 客户端时读取，保存后立即生效。
+// 保存到用户目录 .xilore/myaiassistant/settings.json 的 proxy 字段，后端每次构建 HTTP 客户端时读取，保存后立即生效。
 
 const state = { mode: "system", url: "", path: "" };
 let button = null;

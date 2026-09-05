@@ -1,8 +1,10 @@
-//! 全量数据备份：settings.json 全部内容（设置 + 账号）+ 前端界面偏好，单 JSON 文件。
+//! 全量数据备份：settings.json 全部内容（设置 + 账号）+ 前端界面偏好 + 已删除 Cursor 账户
+//! 保留的用量事件库，单 JSON 文件。在用账户的事件库不随备份携带（导入后可自行重新同步）。
 //!
 //! 导出：可选密码加密——PBKDF2-SHA256（随机盐）派生 256 位密钥，AES-256-GCM
 //! 加密 data 段整体；明文导出时 data 段直接内联。
 //! 导入：合并语义——账号按身份去重后合并（同身份跳过），其余设置整体以备份为准；
+//! 已删除账户的用量数据按身份合并（本机同身份仍在用则跳过，已有保留记录则取较新的一份）；
 //! 写盘后广播 accounts-changed，各窗口热更新，无需重启。
 //! 流程拆两步：inspect 弹文件框并解析文件头（是否加密），apply 才真正解密合并，
 //! 前端据此在两步之间向用户要密码。
@@ -21,6 +23,7 @@ use sha2::Sha256;
 use crate::accounts::{self, Account};
 use crate::audit;
 use crate::settings::{self, Settings};
+use crate::usage_archive;
 
 const FORMAT: &str = "my-ai-assistant-backup";
 const VERSION: u32 = 1;
@@ -201,7 +204,13 @@ pub async fn backup_export(
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    let data = json!({ "settings": settings_value, "uiPrefs": ui_prefs });
+    let usage_archives = usage_archive::export_deleted();
+    let usage_count = usage_archives.len();
+    let data = json!({
+        "settings": settings_value,
+        "uiPrefs": ui_prefs,
+        "usageArchives": usage_archives,
+    });
 
     let file_name = format!(
         "my-ai-assistant-backup-{}.json",
@@ -229,14 +238,23 @@ pub async fn backup_export(
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
 
     let shown = path.to_string_lossy().to_string();
+    let usage_text = if usage_count > 0 {
+        format!("、{usage_count} 个已删除账户的统计数据")
+    } else {
+        String::new()
+    };
     audit::log(
         "backup_export",
         format!(
-            "导出全量备份（{} 个账号，{}）：{shown}",
-            account_count,
+            "导出全量备份（{account_count} 个账号{usage_text}，{}）：{shown}",
             if encrypted { "已加密" } else { "明文" }
         ),
-        Some(json!({ "path": shown, "accounts": account_count, "encrypted": encrypted })),
+        Some(json!({
+            "path": shown,
+            "accounts": account_count,
+            "usageArchives": usage_count,
+            "encrypted": encrypted,
+        })),
     );
     Ok(BackupExportResult {
         cancelled: false,
@@ -294,6 +312,8 @@ pub struct BackupApplyResult {
     pub skipped_exists: usize,
     /// 凭据无法解析而跳过的账号数。
     pub skipped_invalid: usize,
+    /// 恢复的已删除账户统计数据条数。
+    pub usage_restored: usize,
     /// 备份携带的界面偏好（主题、数字单位），由前端应用到 localStorage。
     pub ui_prefs: Value,
 }
@@ -332,11 +352,17 @@ pub async fn backup_import_apply(
         serde_json::from_value(settings_value).map_err(|_| "invalid_format".to_string())?;
     let incoming = settings::sanitize_loaded(incoming);
     let ui_prefs = data.get("uiPrefs").cloned().unwrap_or(Value::Null);
+    let usage_archives: Vec<Value> = data
+        .get("usageArchives")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
 
     let mut imported_ids: Vec<String> = Vec::new();
+    let mut added: Vec<(String, String, String, String)> = Vec::new();
     let mut skipped_exists = 0usize;
     let mut skipped_invalid = 0usize;
-    settings::mutate(|s| {
+    let live_identities = settings::mutate(|s| {
         // 账号合并：同身份（离线解析，解析不出回退 token 全等）跳过；
         // 逐个推入 s.accounts，天然覆盖备份文件内部的重复项。
         for acc in incoming.accounts {
@@ -365,6 +391,12 @@ pub async fn backup_import_apply(
                 status: acc.status,
             };
             imported_ids.push(entry.id.clone());
+            added.push((
+                entry.id.clone(),
+                entry.kind.clone(),
+                entry.token.clone(),
+                accounts::display_name(&entry.kind, &entry.note, &entry.token),
+            ));
             s.accounts.push(entry);
         }
         // 其余设置整体以备份为准（已在 sanitize_loaded 归一化）
@@ -376,14 +408,31 @@ pub async fn backup_import_apply(
         s.codex_client = incoming.codex_client;
         s.claude_client = incoming.claude_client;
         s.autostart_silent = incoming.autostart_silent;
-        Ok(())
+        // 合并后仍在用的 Cursor 账户身份：备份里同身份的已删除统计数据不再恢复
+        Ok(s
+            .accounts
+            .iter()
+            .filter(|a| a.kind == "cursor")
+            .filter_map(|a| accounts::account_identity(&a.kind, &a.token))
+            .collect::<Vec<String>>())
     })?;
     accounts::broadcast_changed(&app);
+    // 先恢复备份里的已删除统计数据（同身份在用账户已跳过），再让新增账户接管本机同身份的保留记录
+    let usage_restored = usage_archive::import_deleted(&usage_archives, &live_identities).await;
+    let adopted = accounts::adopt_deleted_usage(&app, &added).await;
+    if usage_restored > 0 && !adopted {
+        accounts::notify_usage_archive_changed(&app);
+    }
 
+    let usage_text = if usage_restored > 0 {
+        format!("，恢复 {usage_restored} 个已删除账户的统计数据")
+    } else {
+        String::new()
+    };
     audit::log(
         "backup_import",
         format!(
-            "导入全量备份：新增 {} 个账号（{} 个已存在、{} 个无效已跳过），其余设置已覆盖",
+            "导入全量备份：新增 {} 个账号（{} 个已存在、{} 个无效已跳过）{usage_text}，其余设置已覆盖",
             imported_ids.len(),
             skipped_exists,
             skipped_invalid
@@ -393,6 +442,7 @@ pub async fn backup_import_apply(
             "imported": imported_ids.len(),
             "skippedExists": skipped_exists,
             "skippedInvalid": skipped_invalid,
+            "usageRestored": usage_restored,
         })),
     );
     Ok(BackupApplyResult {
@@ -400,6 +450,7 @@ pub async fn backup_import_apply(
         imported_ids,
         skipped_exists,
         skipped_invalid,
+        usage_restored,
         ui_prefs,
     })
 }

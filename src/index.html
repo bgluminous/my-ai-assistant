@@ -234,8 +234,9 @@
           <p class="muted small">统计本机 Claude Code 会话日志的 token 用量并按官方 API 价折算，为本机所有 Claude 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度窗口见「账户管理」。</p>
         </div>
 
-        <!-- 加载骨架：新视图 / 新跨度无缓存可即时渲染时占位，首个结果渲染后隐藏 -->
-        <section id="usage-skeleton" class="surface usage-skeleton" hidden aria-hidden="true">
+        <!-- 加载骨架：新视图 / 新跨度无缓存可即时渲染时占位，首个结果渲染后隐藏；
+             与结果区一样不套外层面板，占位块直接铺在页面背景上 -->
+        <section id="usage-skeleton" class="usage-skeleton" hidden aria-hidden="true">
           <div class="skeleton-cards">
             <span class="skeleton-block"></span>
             <span class="skeleton-block"></span>
@@ -255,8 +256,9 @@
           </div>
         </section>
 
-        <!-- 统计结果（Cursor 聚合 / Codex 本地扫描共用） -->
-        <section id="usage-results" class="surface" hidden>
+        <!-- 统计结果（Cursor 聚合 / Codex 本地扫描共用）：不套外层面板，
+             汇总卡片 / 图表卡片 / 明细表各自成盒直接坐在页面背景上（与快照图同一层级结构） -->
+        <section id="usage-results" class="usage-results" hidden>
           <div class="cards">
             <div class="card highlight">
               <span class="card-label">总等价费用（官方 API 价）</span>
@@ -283,9 +285,11 @@
           <div id="usage-breakdown" class="cost-breakdown" hidden></div>
           <div class="charts">
             <div class="chart-box chart-box-wide"><h4 id="chart-daily-title">按日 Token</h4><div class="chart-canvas"><canvas id="chart-daily"></canvas></div></div>
-            <div class="chart-box"><h4>各模型 Token 数量</h4><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div></div>
-            <div class="chart-box"><h4>各模型等价费用（USD）</h4><div class="chart-canvas"><canvas id="chart-models"></canvas></div></div>
-            <div class="chart-box"><h4>Token 构成</h4><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div></div>
+            <!-- 环形图的图例放在画布外的定宽列表里：三张图的画布尺寸一致、圆环同大，
+                 过长的模型名按省略号截断（悬停看全名），点击图例项隐藏 / 恢复对应扇区 -->
+            <div class="chart-box"><h4>各模型 Token 数量</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div><ul id="legend-tokens" class="pie-legend" aria-label="图例"></ul></div></div>
+            <div class="chart-box"><h4>各模型等价费用（USD）</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-models"></canvas></div><ul id="legend-models" class="pie-legend" aria-label="图例"></ul></div></div>
+            <div class="chart-box"><h4>Token 构成</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div><ul id="legend-doughnut" class="pie-legend" aria-label="图例"></ul></div></div>
           </div>
           <div class="table-wrap">
             <table>
@@ -300,9 +304,9 @@
           <p class="muted small usage-legend">明细表中每个 token 数下方为该项按官方价折算的等价费用，缓存读 / 缓存写费用单独列示。</p>
         </section>
 
-        <!-- 总览：各来源（Cursor 账户 + 本地 Codex 分析）账单小计，按总 Token 降序；置于图表之后 -->
+        <!-- 总览：各来源（Cursor 账户含已删除账户保留的数据 + 本地 Codex / Claude 分析）账单小计，按总 Token 降序；置于图表之后 -->
         <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT / Claude 为本机日志分析，无实扣金额</span></div>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT / Claude 为本机日志分析，无实扣金额；标「已删除」的为已删除账户保留的统计数据</span></div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -596,7 +600,7 @@
             <button id="backup-password-ok" class="secondary compact" type="button">确认</button>
             <button id="backup-password-cancel" class="secondary compact" type="button">取消</button>
           </div>
-          <p class="muted small">导出为单个 JSON 文件，包含全部设置、账号（含 Token，可选密码加密）与界面偏好。导入为合并模式：账号去重后合并，其余设置以备份文件为准，导入后立即生效。</p>
+          <p class="muted small">导出为单个 JSON 文件，包含全部设置、账号（含 Token，可选密码加密）、界面偏好与已删除 Cursor 账户保留的统计数据。导入为合并模式：账号去重后合并，已删除账户的统计数据按账号身份合并，其余设置以备份文件为准，导入后立即生效。</p>
           <p id="backup-status" class="status" hidden></p>
         </div>
 
@@ -723,6 +727,12 @@
         </div>
         <div class="modal-body">
           <p id="switch-modal-body" class="muted"></p>
+          <!-- 确认阶段可选的勾选项（如删除 Cursor 账户时的「保留统计数据」），由 JS 按需显示 -->
+          <label id="switch-modal-option" class="toggle modal-option" hidden>
+            <input id="switch-modal-option-input" type="checkbox" />
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span id="switch-modal-option-text" class="toggle-text"></span>
+          </label>
           <div id="switch-steps" class="switch-steps" hidden></div>
           <p id="switch-modal-status" class="status" hidden></p>
         </div>

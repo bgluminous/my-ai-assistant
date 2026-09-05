@@ -10,6 +10,7 @@ import {
   centsText,
   usdText,
   parseCreditsUsd,
+  resetCreditsBrief,
 } from "./account_format.js";
 
 // 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
@@ -384,16 +385,27 @@ function windowResetText(w, anchorSec) {
   return `重置 ${h > 0 ? `${h}h` : ""}${m}m`;
 }
 
-// 与 cursorSummaryNodes 结构对齐：bars 为额度窗口进度条（Token 到期倒计时见套餐列）
+// 与 cursorSummaryNodes 结构对齐：bars 为额度窗口进度条（Token 到期倒计时见套餐列），
+// meta 为额度条下方的小字：ChatGPT 的剩余额度重置次数（接口提供时才显示）
 function codexSummaryNodes(status, anchorSec) {
   const bars = [];
+  const meta = [];
   const windows = Array.isArray(status.windows) ? status.windows : [];
   for (const w of windows.slice(0, 3)) {
     if (!w) continue;
     const bar = quotaBar(w.label || "额度窗口", w.usedPercent, windowResetText(w, anchorSec));
     if (bar) bars.push(bar);
   }
-  return { bars, meta: [] };
+  // 「剩余重置 2 次 · 最早 09-30 过期」：次数与最早过期时间用间隔点连成一条不换行的小字，
+  // 最早一次已过期（数据陈旧）时整条标红提示刷新
+  const resets = resetCreditsBrief(status);
+  if (resets) {
+    const text = resets.expiresText ? `${resets.text} · ${resets.expiresText}` : resets.text;
+    const item = metaItem(text, resets.expired);
+    item.title = resets.title;
+    meta.push(item);
+  }
+  return { bars, meta };
 }
 
 function fillSummaryCell(cell, account) {
@@ -713,8 +725,10 @@ async function refreshIds(ids) {
  */
 export async function refreshAccounts(ids) {
   if (switching || importing) return;
-  const valid = (ids || []).filter((id) => accounts.some((a) => a.id === id));
-  if (valid.length) await refreshIds(valid);
+  // 同样按界面显示顺序（先分组再组内顺序）刷新，混合类型的一批（如备份导入）不在类型间来回跳
+  const wanted = new Set(ids || []);
+  const ordered = displayOrderIds().filter((id) => wanted.has(id));
+  if (ordered.length) await refreshIds(ordered);
 }
 
 /** 刷新单组（卡片标题栏的刷新按钮）：组内账户排队逐个刷新。 */
@@ -732,10 +746,21 @@ async function refreshGroup(kind) {
   updateHeadingActions();
 }
 
-/** 全部账户排队逐个刷新（定时刷新与启动自动刷新用）；切换/导入进行中跳过本次。 */
+/** 账户类型在页面上的分组顺序（Cursor → ChatGPT → Claude），刷新全部时按此顺序逐组进行。 */
+const KIND_ORDER = ["cursor", "codex", "claude"];
+
+/** 全部账户按界面显示顺序排列的 id：先按类型分组、组内保持存储顺序，与 render 的分组一致。 */
+function displayOrderIds() {
+  return KIND_ORDER.flatMap((kind) => accounts.filter((a) => a.kind === kind).map((a) => a.id));
+}
+
+/**
+ * 全部账户排队逐个刷新（定时刷新与启动自动刷新用）；切换/导入进行中跳过本次。
+ * 顺序与界面一致：Cursor 组刷完再刷 ChatGPT 组、Claude 组，不按存储顺序在类型间来回跳。
+ */
 async function refreshAll() {
   if (refreshAllRunning || switching || importing) return;
-  const ids = accounts.map((a) => a.id);
+  const ids = displayOrderIds();
   if (!ids.length) return;
   refreshAllRunning = true;
   clearStatus();
@@ -784,30 +809,102 @@ export async function setRefreshInterval(minutes) {
 
 /* ---------- 删除（显式确认） ---------- */
 
+/**
+ * 删除账户。Cursor 账户的确认弹窗带「保留统计数据」勾选项（默认勾选）：保留时后端先做一次
+ * 最终同步再把用量事件库标记为已删除留在本机，用量统计页总览继续计入并标「已删除」。
+ * 同步失败且本机没有该账户任何用量数据时后端不删除并报 no_usage_data，这里再问一次
+ * 是否放弃保留仍然删除。
+ */
 async function onDeleteClick(id) {
   if (switching || refreshingIds.has(id)) return;
   const account = accounts.find((item) => item.id === id);
   if (!account) return;
   const name = String(account.note || (account.status && account.status.name) || "未命名账户").trim();
+  const isCursor = account.kind === "cursor";
   const ok = await switchModal.toConfirm({
     title: "删除账户",
     body: `确定删除“${name}”吗？此操作无法撤销。`,
     confirmText: "删除",
     danger: true,
+    option: isCursor ? { label: "保留统计数据（用量统计页仍可查看，标记为「已删除」）", checked: true } : null,
   });
+  if (!ok) {
+    switchModal.close();
+    return;
+  }
+  const keepUsage = isCursor && switchModal.optionChecked();
+  if (!keepUsage) {
+    switchModal.close();
+    await doDelete(id, false);
+    return;
+  }
+  // 最终同步可能要联网拉取整份历史，期间弹窗保持忙碌态不可关闭
+  switchModal.openBusy("删除账户", `正在同步“${name}”的用量数据以便保留…`);
+  let result;
+  try {
+    result = await invoke("accounts_delete", { id, keepUsage: true });
+  } catch (error) {
+    const code = resetError(error);
+    if (!code.startsWith("no_usage_data")) {
+      switchModal.close();
+      setStatus("bad", `删除失败：${mapDeleteError(code)}`);
+      render();
+      return;
+    }
+    const reason = code.slice("no_usage_data".length).replace(/^:/, "");
+    const proceed = await switchModal.toConfirm({
+      title: "删除账户",
+      body: `无法获取“${name}”的用量数据${reason ? `（${mapDeleteError(reason)}）` : ""}，本机也没有该账户已保存的统计数据，没有可保留的内容。是否仍然删除该账户？`,
+      confirmText: "仍然删除",
+      danger: true,
+    });
+    switchModal.close();
+    if (proceed) await doDelete(id, false);
+    return;
+  }
   switchModal.close();
-  if (ok) await doDelete(id);
+  applyView(result.view);
+  setStatus(
+    "ok",
+    result.usage === "kept"
+      ? "账户已删除，统计数据已保留（见用量统计页总览）。"
+      : "账户已删除（该账户没有用量记录，无统计数据可保留）。"
+  );
+  render();
 }
 
-async function doDelete(id) {
+async function doDelete(id, keepUsage) {
   try {
-    const view = await invoke("accounts_delete", { id });
-    applyView(view);
+    const result = await invoke("accounts_delete", { id, keepUsage });
+    applyView(result.view);
     setStatus("ok", "账户已删除。");
   } catch (error) {
-    setStatus("bad", `删除失败：${resetError(error)}`);
+    setStatus("bad", `删除失败：${mapDeleteError(resetError(error))}`);
   }
   render();
+}
+
+/** 删除 / 最终同步阶段的错误码 -> 可读文案，未知错误码原样显示。 */
+function mapDeleteError(code) {
+  const M = {
+    invalid_session_token: "Token 已失效，无法从 Cursor 拉取用量",
+    empty_token: "账户 Token 为空",
+    not_found: "账户不存在",
+  };
+  if (M[code]) return M[code];
+  if (code.startsWith("cursor_http_")) return `Cursor 接口返回 HTTP ${code.slice("cursor_http_".length)}`;
+  return code;
+}
+
+/**
+ * 供其它页面复用的危险操作确认弹窗（如用量统计页删除已删除账户保留的统计数据）。
+ * 弹窗正被切换 / 删除流程占用时直接返回 false。
+ */
+export async function confirmDialog({ title, body, confirmText, danger = true }) {
+  if (switchModal.phase !== "hidden") return false;
+  const ok = await switchModal.toConfirm({ title, body, confirmText, danger });
+  switchModal.close();
+  return ok;
 }
 
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
@@ -833,6 +930,7 @@ const switchModal = {
     const body = el("#switch-modal-body");
     body.hidden = false;
     body.textContent = text;
+    this.setOption(null);
     const steps = el("#switch-steps");
     steps.hidden = true;
     steps.replaceChildren();
@@ -845,14 +943,19 @@ const switchModal = {
     el("#switch-modal").hidden = false;
   },
 
-  /** 切到确认阶段：显示正文与取消 / 确认按钮，返回用户选择（Esc / 关闭 / 取消 = false）。 */
-  toConfirm({ title, body, confirmText, danger }) {
+  /**
+   * 切到确认阶段：显示正文与取消 / 确认按钮，返回用户选择（Esc / 关闭 / 取消 = false）。
+   * option = { label, checked } 时在正文下方显示一个勾选项（如删除 Cursor 账户的「保留统计数据」），
+   * 确认后由调用方经 optionChecked() 读取。
+   */
+  toConfirm({ title, body, confirmText, danger, option }) {
     return new Promise((resolve) => {
       this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
       const text = el("#switch-modal-body");
       text.hidden = false;
       text.textContent = body || "";
+      this.setOption(option || null);
       el("#switch-steps").hidden = true;
       el("#switch-modal-status").hidden = true;
       el("#switch-modal .modal-foot").hidden = false;
@@ -868,9 +971,29 @@ const switchModal = {
     });
   },
 
+  /** 显示 / 隐藏确认阶段的勾选项。 */
+  setOption(option) {
+    const box = el("#switch-modal-option");
+    const input = el("#switch-modal-option-input");
+    if (!option) {
+      box.hidden = true;
+      input.checked = false;
+      return;
+    }
+    el("#switch-modal-option-text").textContent = option.label;
+    input.checked = !!option.checked;
+    box.hidden = false;
+  },
+
+  /** 确认阶段勾选项的当前状态（未显示勾选项时为 false）。 */
+  optionChecked() {
+    return !el("#switch-modal-option").hidden && el("#switch-modal-option-input").checked;
+  },
+
   /** 渲染步骤列表（全部待办）并进入执行阶段，期间不可关闭。 */
   toSteps(labels) {
     el("#switch-modal-body").hidden = true;
+    this.setOption(null);
     el("#switch-modal .modal-foot").hidden = true;
     const box = el("#switch-steps");
     box.replaceChildren(
@@ -915,6 +1038,7 @@ const switchModal = {
    */
   finish(ok, message) {
     el("#switch-modal-body").hidden = true;
+    this.setOption(null);
     const status = el("#switch-modal-status");
     status.hidden = false;
     status.className = `status ${ok ? "ok" : "bad"}`;
@@ -964,6 +1088,7 @@ const switchModal = {
     }
     el("#switch-modal").hidden = true;
     el("#switch-modal-body").hidden = false;
+    this.setOption(null);
     el("#switch-steps").hidden = true;
     el("#switch-modal-status").hidden = true;
     el("#switch-ok").classList.remove("danger");

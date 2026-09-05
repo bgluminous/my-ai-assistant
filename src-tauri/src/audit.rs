@@ -1,4 +1,4 @@
-//! 审计日志：追加写入 {home}/xilore/myaiassistant/audit.jsonl，每行一条 JSON。
+//! 审计日志：追加写入 {home}/.xilore/myaiassistant/audit.jsonl，每行一条 JSON。
 //! 记录账户增删改、导入导出、状态变化、刷新失败、凭据续期与切号、设置变更等事件。
 
 use chrono::Utc;

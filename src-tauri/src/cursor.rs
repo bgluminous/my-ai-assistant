@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::http;
-use crate::pricing::{self, TokenRow, UsageAggregate};
+use crate::pricing::TokenRow;
 
 const USAGE_SUMMARY: &str = "https://cursor.com/api/usage-summary";
 /// Grok Bot 周额度（"sand" 是 Cursor 的内部代号），独立于月度计划额度。
@@ -316,25 +316,21 @@ async fn fetch_events_page(
     Ok((items, total))
 }
 
-// ---------------------------------------------------------------------------
-// 聚合 + 等价费用（喂给图表/表格）
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub async fn cursor_aggregate(
-    session_token: String,
+/// 分页拉取 [start, end]（unix 毫秒，None = 不限）内的全部用量事件并解析为计价行。
+/// token 须已归一化。聚合与落盘由 usage_archive 负责：用量页各跨度从本地事件库切片，
+/// 本函数只在同步事件库时联网。
+pub(crate) async fn fetch_all_events(
+    token: &str,
     start: Option<i64>,
     end: Option<i64>,
-    archive_account_id: Option<String>,
-) -> Result<UsageAggregate, String> {
-    let token = http::normalize_cursor_token(&session_token);
+) -> Result<Vec<TokenRow>, String> {
     let client = http::client();
     let page_size: u32 = 1000;
     let mut page: u32 = 1;
     let mut rows: Vec<TokenRow> = Vec::new();
     loop {
         let (items, total) =
-            fetch_events_page(&client, &token, page, page_size, start, end).await?;
+            fetch_events_page(&client, token, page, page_size, start, end).await?;
         if items.is_empty() {
             break;
         }
@@ -349,20 +345,7 @@ pub async fn cursor_aggregate(
             break;
         }
     }
-    let table = pricing::load();
-    let agg = pricing::aggregate_and_price(rows, &table);
-    // 「全部」跨度（无起止时间）的成功结果顺手落盘存档：
-    // 账户失效后「生成快照」的兜底数据源。写盘失败静默，不影响返回。
-    if start.is_none() && end.is_none() {
-        if let Some(id) = archive_account_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            crate::usage_archive::store(id, &agg);
-        }
-    }
-    Ok(agg)
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------

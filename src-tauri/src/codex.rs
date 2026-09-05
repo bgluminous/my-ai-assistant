@@ -13,6 +13,8 @@ use crate::session_scan::{self, FileCache, TimeRange};
 const WHAM_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// 订阅起止时间（access_token JWT 经常没有 chatgpt_subscription_active_*，以此接口为准）。
 const SUBSCRIPTIONS: &str = "https://chatgpt.com/backend-api/subscriptions";
+/// 额度重置次数明细（逐条的状态与过期时间）；wham/usage 只给可用总数。
+const RESET_CREDITS: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 // ---------------------------------------------------------------------------
 // 额度窗口（来自官方 wham/usage）
@@ -44,6 +46,11 @@ pub struct CodexUsage {
     pub exp: Option<i64>,
     pub windows: Vec<UsageWindow>,
     pub credits: Option<Value>,
+    /// 剩余可用的额度重置次数（wham/usage 的 rate_limit_reset_credits.available_count；
+    /// 消耗一次可立即重置 5 小时与每周窗口）。套餐不提供或字段缺失为 None。
+    pub reset_credits_available: Option<i64>,
+    /// 可用重置次数中最早一次的过期时间（RFC3339，来自明细接口）；次数为 0 或明细拉取失败为 None。
+    pub reset_credits_expires_at: Option<String>,
     pub status: u16,
     pub raw: Value,
 }
@@ -217,6 +224,41 @@ async fn fetch_subscription(jwt: &str, account_id: &str) -> Option<SubscriptionI
     })
 }
 
+/// 拉取额度重置次数明细，返回状态为 available 的条目中最早的过期时间（RFC3339）。
+/// 接口失败、结构不符或没有可用条目都返回 None，不影响主流程。
+async fn fetch_reset_credits_earliest_expiry(jwt: &str, account_id: Option<&str>) -> Option<String> {
+    let mut req = http::client()
+        .get(RESET_CREDITS)
+        .header("Authorization", format!("Bearer {jwt}"))
+        .header("Accept", "application/json")
+        .header("Origin", "https://chatgpt.com")
+        .header("Referer", "https://chatgpt.com/");
+    if let Some(acc) = account_id {
+        req = req.header("ChatGPT-Account-Id", acc);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let raw: Value = resp.json().await.ok()?;
+    raw.get("credits")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|c| {
+            c.get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.eq_ignore_ascii_case("available"))
+        })
+        .filter_map(|c| json_date(c, &["expires_at", "expiresAt"]))
+        .filter_map(|iso| {
+            DateTime::parse_from_rfc3339(&iso)
+                .ok()
+                .map(|dt| (dt.timestamp(), iso))
+        })
+        .min_by_key(|(ts, _)| *ts)
+        .map(|(_, iso)| iso)
+}
+
 pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
     let jwt = jwt.trim().to_string();
     if jwt.is_empty() {
@@ -283,6 +325,8 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
             exp,
             windows: vec![],
             credits: None,
+            reset_credits_available: None,
+            reset_credits_expires_at: None,
             status: status.as_u16(),
             raw: Value::Null,
         });
@@ -321,6 +365,19 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         .get("credits")
         .cloned()
         .or_else(|| raw.pointer("/balance").cloned());
+    // 以 available_count 为准（total_earned_count 可能为 0 却仍有可用次数，不可用）；
+    // 整个对象为 null / 缺失表示套餐不提供
+    let reset_credits_available = raw
+        .get("rate_limit_reset_credits")
+        .filter(|v| v.is_object())
+        .and_then(|v| gi(v, &["available_count", "availableCount"]))
+        .map(|n| n.max(0));
+    // 有可用次数时再拉一次明细，取最早过期的那一次；为 0 或不提供时省掉这次请求
+    let reset_credits_expires_at = if reset_credits_available.is_some_and(|n| n > 0) {
+        fetch_reset_credits_earliest_expiry(&jwt, account_id.as_deref()).await
+    } else {
+        None
+    };
 
     Ok(CodexUsage {
         alive: status.is_success(),
@@ -333,6 +390,8 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         exp,
         windows,
         credits,
+        reset_credits_available,
+        reset_credits_expires_at,
         status: status.as_u16(),
         raw,
     })

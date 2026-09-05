@@ -11,14 +11,21 @@ import {
   tickDate,
   topSlices,
 } from "./shared.js";
-import { fetchCursorAggregate, getCachedAgg, localYmd, parseYmd, addLocalDays } from "./usage_data.js";
+import {
+  fetchCursorAggregate,
+  fetchArchivedAggregate,
+  getCachedAgg,
+  localYmd,
+  parseYmd,
+  addLocalDays,
+} from "./usage_data.js";
 import { membershipLabel, planMonthlyUsd } from "./account_format.js";
 
 // Cursor 账户全量用量快照：把「全部」跨度的聚合结果渲染成一张 PNG 图片保存到本地。
 //
 // 数据获取回退链（acquireData）：
-// - 账户有效：在线拉取（成功时后端顺手写磁盘存档）→ 磁盘存档 → localStorage 缓存；
-// - 账户已失效（status.alive === false）：磁盘存档 → localStorage 缓存 → 在线兜底
+// - 账户有效：在线同步事件库后切片 → 本地事件库只读切片 → localStorage 缓存；
+// - 账户已失效（status.alive === false）：本地事件库只读切片 → localStorage 缓存 → 在线兜底
 //   （状态可能过期，token 或许仍有效，最后一搏）。
 // 绘制在离屏 canvas 上进行：卡片 / 明细表手绘，图表用 Chart.js 渲到独立 canvas 后
 // drawImage 合成；配色读当前主题的 CSS 变量，字体与页面一致。
@@ -77,10 +84,8 @@ const SOURCE_LABELS = {
 };
 
 async function readArchive(account) {
-  const stored = await invoke("usage_archive_get", { accountId: account.id }).catch(() => null);
-  if (stored && stored.agg) {
-    return { agg: stored.agg, at: Number(stored.savedAt) || 0, source: "archive" };
-  }
+  const stored = await fetchArchivedAggregate(account.id, { start: null, end: null }).catch(() => null);
+  if (stored && stored.agg) return { ...stored, source: "archive" };
   return null;
 }
 

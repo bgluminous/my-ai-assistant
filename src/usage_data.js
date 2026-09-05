@@ -4,6 +4,8 @@ import { invoke, emit } from "./shared.js";
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
 // Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）、today:YYYY-MM-DD
 //   （进行中的今天，数据随时间增长）或 day:YYYY-MM-DD（已结束的完整自然日，如「昨天」）。
+//   Cursor 的数据源是后端按账户维护的本地用量事件库：任何跨度都由后端从事件库切片，只有事件库
+//   过期 / 强制刷新时才联网同步（增量），切换跨度不再联网；缓存条目的 at 取事件库的同步时间。
 // Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today: / day: 同上。
 // Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
@@ -187,7 +189,7 @@ export function peekAggSeries(accountId, ymd) {
 
 function attachUsageCache(error, cached) {
   const err = error instanceof Error ? error : new Error(String(error));
-  if (cached) err.usageCache = cached;
+  if (cached && !err.usageCache) err.usageCache = cached;
   return err;
 }
 
@@ -207,27 +209,37 @@ function withTimeout(promise, label) {
   });
 }
 
-export function fetchCursorAggregate(account, rangeKey, { start, end, force } = {}) {
+/**
+ * Cursor 账户在 [start, end] 内的聚合：由后端从该账户的本地事件库切片。
+ * - 缺省：本地缓存新鲜直接返回；否则让后端按 auto 模式处理——事件库在有效期内只切片不联网，
+ *   过期才增量同步；
+ * - force：跳过本地缓存并让后端立即增量同步（账户刷新后的预取、托盘刷新）；
+ * - full：强制全量重拉整份事件库（用量页「刷新」按钮）。
+ * 后端同步失败但本地事件库有数据时返回旧数据 + syncError：这里照常写入缓存（数据本身可用），
+ * 再以带 usageCache 的错误抛出，调用方按「更新失败（仍显示上次数据）」处理。
+ */
+export function fetchCursorAggregate(account, rangeKey, { start, end, force, full } = {}) {
   const key = `${account.id}:${rangeKey}`;
   const cached = getCachedAgg(account.id, rangeKey);
-  if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
+  if (!force && !full && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
   const inflightKey = `agg:${key}`;
   if (inflight.has(inflightKey)) return inflight.get(inflightKey);
   const p = withTimeout(
-    invoke("cursor_aggregate", {
+    invoke("cursor_usage_fetch", {
+      accountId: account.id,
       sessionToken: account.token,
       start: start ?? null,
       end: end ?? null,
-      // 「全部」跨度的成功结果由后端顺手写入磁盘存档（usage-archive/<账户id>.json），
-      // 作为账户失效后「生成快照」的兜底数据源。
-      archiveAccountId: rangeKey === "0" ? account.id : null,
+      mode: full ? "full" : force ? "sync" : "auto",
+      maxAgeMs: ttlMs,
     }),
-    "cursor_aggregate"
+    "cursor_usage_fetch"
   )
-    .then((agg) => {
-      const entry = { agg, at: Date.now() };
+    .then((result) => {
+      const entry = { agg: result.agg, at: Number(result.syncedAt) || Date.now() };
       memAgg.set(key, entry);
       cacheStore(`agg:${key}`, entry);
+      if (result.syncError) throw attachUsageCache(new Error(result.syncError), entry);
       return entry;
     })
     .catch((error) => {
@@ -236,6 +248,28 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force } = 
     .finally(() => inflight.delete(inflightKey));
   inflight.set(inflightKey, p);
   return p;
+}
+
+/**
+ * 只读切片本地事件库（不联网、不进 localStorage 缓存）：已删除账户保留的用量，以及快照的
+ * 本地回退数据源。已删除账户的数据不再变化且切片开销很小，不入缓存也避免被
+ * purgeMissingAccounts 当作失效账户清掉。
+ */
+export function fetchArchivedAggregate(accountId, { start, end } = {}) {
+  return withTimeout(
+    invoke("cursor_usage_slice", { accountId, start: start ?? null, end: end ?? null }),
+    "cursor_usage_slice"
+  ).then((result) => ({ agg: result.agg, at: Number(result.syncedAt) || 0 }));
+}
+
+/** 已删除账户保留的统计数据列表（账户展示信息 + 事件数，不含事件明细）。 */
+export function listDeletedUsage() {
+  return invoke("cursor_usage_deleted_list");
+}
+
+/** 删除某个已删除账户保留的统计数据。 */
+export function removeDeletedUsage(accountId) {
+  return invoke("cursor_usage_deleted_remove", { accountId });
 }
 
 /**

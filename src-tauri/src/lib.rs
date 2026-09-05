@@ -55,7 +55,40 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .setup(move |app| {
+            // 【过渡期临时代码，到期删除】旧用户目录（xilore/ 无点号）迁到 .xilore/，
+            // 必须先于 settings::load 与任何 audit::log（它们会创建新目录，导致迁移被跳过）
+            let migration = paths::migrate_legacy_app_dir();
             settings::load();
+            match migration {
+                Ok(Some(m)) => {
+                    let leftover = m
+                        .leftover_error
+                        .as_deref()
+                        .map(|e| format!("；旧目录删除失败，请手动清理：{e}"))
+                        .unwrap_or_default();
+                    audit::log(
+                        "data_dir_migrated",
+                        format!(
+                            "用户数据目录已从 {} 迁移到 {}（{}）{leftover}",
+                            m.from.display(),
+                            m.to.display(),
+                            if m.method == "rename" { "整体移动" } else { "复制后删除旧目录" }
+                        ),
+                        Some(serde_json::json!({
+                            "from": m.from.to_string_lossy(),
+                            "to": m.to.to_string_lossy(),
+                            "method": m.method,
+                            "leftoverError": m.leftover_error,
+                        })),
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => audit::log(
+                    "data_dir_migrate_failed",
+                    format!("旧用户数据目录迁移失败（{e}），本次以新目录空数据运行；旧数据仍在原目录，可手动移动到新目录后重启"),
+                    None,
+                ),
+            }
             // 静默启动 = 开机自启动拉起 + 设置勾选静默；需在设置载入后判定
             let silent = autostart_launch && settings::read(|s| s.autostart_silent).unwrap_or(false);
             launch::set_silent_launch(silent);
@@ -97,7 +130,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            cursor::cursor_aggregate,
+            usage_archive::cursor_usage_fetch,
+            usage_archive::cursor_usage_slice,
+            usage_archive::cursor_usage_deleted_list,
+            usage_archive::cursor_usage_deleted_remove,
             cursor_local::cursor_switch_local,
             cursor_local::cursor_client_get,
             cursor_local::cursor_client_set,
@@ -143,7 +179,6 @@ pub fn run() {
             accounts::account_refresh,
             audit::audit_list,
             audit::audit_clear,
-            usage_archive::usage_archive_get,
             usage_archive::usage_snapshot_save,
             tray::tray_open_main,
             launch::autostart_get,

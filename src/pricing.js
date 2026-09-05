@@ -1,7 +1,7 @@
 import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml } from "./shared.js";
 
 // 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
-// 覆盖写入用户目录 xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
+// 覆盖写入用户目录 .xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
 // 「在线更新」把远端表写入 settings.json 的 pricingRemote 缓存层（默认 < 在线 < 用户自定义）；
 // 启动时静默检测一次，仅提示存在更新，是否应用由用户手动决定。
 

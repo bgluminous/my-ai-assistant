@@ -190,3 +190,37 @@ export function creditsBrief(status) {
     title: units != null ? `${units.toLocaleString("en-US")} 点` : "",
   };
 }
+
+/**
+ * ChatGPT 剩余额度重置次数的紧凑文案（账户页摘要小字与托盘副行共用）。
+ * 接口未提供（套餐不含该权益或字段缺失）或账户无效时返回 null；为 0 也显示，提示已用完。
+ * 返回：
+ * - text：「剩余重置 N 次」；
+ * - expiresText：最早一次过期时间的短文案（「最早 MM-DD 过期」，已过期则「最早 MM-DD 已过期」），
+ *   次数为 0 或没有过期数据时为空串；expired 标记最早一次是否已过期（数据陈旧，应刷新）；
+ * - title：悬停说明，含完整过期日期时间。
+ */
+export function resetCreditsBrief(status) {
+  if (!status || status.alive === false) return null;
+  const n = Number(status.resetCreditsAvailable);
+  if (status.resetCreditsAvailable == null || !Number.isFinite(n)) return null;
+  const titleLines = ["ChatGPT 额度重置：消耗一次可立即重置 5 小时与每周额度窗口"];
+  let expiresText = "";
+  let expired = false;
+  const expiresMs = n > 0 && status.resetCreditsExpiresAt ? Date.parse(status.resetCreditsExpiresAt) : NaN;
+  if (Number.isFinite(expiresMs)) {
+    const d = new Date(expiresMs);
+    const mmdd = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    expired = expiresMs <= Date.now();
+    expiresText = expired ? `最早 ${mmdd} 已过期` : `最早 ${mmdd} 过期`;
+    const full = d.toLocaleString("zh-CN", { hour12: false, month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    titleLines.push(expired ? `最早一次已于 ${full} 过期，请刷新查看最新次数` : `最早一次将于 ${full} 过期`);
+  }
+  return {
+    count: n,
+    text: `剩余重置 ${n} 次`,
+    expiresText,
+    expired,
+    title: titleLines.join("\n"),
+  };
+}

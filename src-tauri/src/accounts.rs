@@ -220,7 +220,7 @@ fn masked_head(token: &str) -> String {
 }
 
 /// 审计日志里的账户显示名：优先备注，否则用打码后的 token 头部，绝不落全量 token。
-fn display_name(kind: &str, note: &str, token: &str) -> String {
+pub(crate) fn display_name(kind: &str, note: &str, token: &str) -> String {
     let kind_label = kind_label(kind);
     let note = note.trim();
     if note.is_empty() {
@@ -358,6 +358,8 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
     };
     let name = display_name(&entry.kind, &entry.note, &entry.token);
     let entry_id = entry.id.clone();
+    let entry_kind = entry.kind.clone();
+    let entry_token = entry.token.clone();
     let data = mutate(&app, move |d| {
         // 同身份账户查重（离线解析，身份拿不到时回退 token 全等）
         if is_duplicate_account(&d.accounts, &entry.kind, &entry.token, None) {
@@ -371,7 +373,33 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         format!("添加账户：{name}"),
         Some(serde_json::json!({ "id": entry_id })),
     );
+    adopt_deleted_usage(&app, &[(entry_id, entry_kind, entry_token, name)]).await;
     Ok(view(&data))
+}
+
+/// 新增 Cursor 账户后接管同身份已删除账户保留的用量事件库（accounts / backup 共用）。
+/// 入参为 (id, kind, token, 审计显示名)；非 Cursor 账户跳过。发生接管时广播
+/// usage-archive-changed：accounts-changed 在写盘时已经发出，用量页可能已按旧的
+/// 已删除记录列表加载，需要它再读一次。返回是否发生了接管。
+pub(crate) async fn adopt_deleted_usage(
+    app: &AppHandle,
+    added: &[(String, String, String, String)],
+) -> bool {
+    let mut adopted = false;
+    for (id, kind, token, name) in added {
+        if kind == "cursor" && crate::usage_archive::adopt_deleted(id, token, name).await {
+            adopted = true;
+        }
+    }
+    if adopted {
+        notify_usage_archive_changed(app);
+    }
+    adopted
+}
+
+/// 已删除账户保留的统计数据集合有变化（接管 / 备份恢复）时通知各窗口。
+pub(crate) fn notify_usage_archive_changed(app: &AppHandle) {
+    let _ = app.emit("usage-archive-changed", ());
 }
 
 #[tauri::command]
@@ -440,25 +468,62 @@ pub fn accounts_update(
     Ok(view(&data))
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteResult {
+    pub view: AccountsView,
+    /// 统计数据的处理结果："kept"（已保留）| "empty"（没有用量记录，无可保留）| "discarded"（未保留）。
+    pub usage: String,
+}
+
+/// 删除账户。Cursor 账户可选保留统计数据（keep_usage）：先做一次最终同步，再把用量事件库
+/// 标记为已删除留在本机；同步失败且本机没有该账户任何数据时报 no_usage_data:<原因> 且不删除，
+/// 由前端询问用户是否仍然删除。不保留时事件库随账户一并清理。
 #[tauri::command]
-pub fn accounts_delete(app: AppHandle, id: String) -> Result<AccountsView, String> {
-    let mut removed: Option<Account> = None;
+pub async fn accounts_delete(
+    app: AppHandle,
+    id: String,
+    keep_usage: bool,
+) -> Result<DeleteResult, String> {
+    settings::ensure_loaded()?;
+    let Ok(target) = snapshot(&id) else {
+        return Ok(DeleteResult {
+            view: view(&current()),
+            usage: "discarded".into(),
+        });
+    };
+    let mut usage = "discarded";
+    if keep_usage && target.kind == "cursor" {
+        usage = match crate::usage_archive::retain_for_deleted(&target).await? {
+            crate::usage_archive::Retained::Kept => "kept",
+            crate::usage_archive::Retained::Empty => "empty",
+        };
+    }
     let data = mutate(&app, |d| {
-        if let Some(pos) = d.accounts.iter().position(|a| a.id == id) {
-            removed = Some(d.accounts.remove(pos));
-        }
+        d.accounts.retain(|a| a.id != id);
         Ok(())
     })?;
-    if let Some(acc) = &removed {
-        // 全量用量存档随账户删除清理（与前端删账户时清 localStorage 缓存一致）
-        crate::usage_archive::remove(&acc.id);
-        audit::log(
-            "account_delete",
-            format!("删除账户：{}", display_name(&acc.kind, &acc.note, &acc.token)),
-            Some(serde_json::json!({ "id": acc.id })),
-        );
+    if usage != "kept" {
+        // 用量事件库随账户删除清理（与前端删账户时清 localStorage 缓存一致）
+        crate::usage_archive::discard(&id).await;
     }
-    Ok(view(&data))
+    let suffix = match usage {
+        "kept" => "（保留统计数据）",
+        "empty" => "（没有用量记录，无统计数据可保留）",
+        _ => "",
+    };
+    audit::log(
+        "account_delete",
+        format!(
+            "删除账户：{}{suffix}",
+            display_name(&target.kind, &target.note, &target.token)
+        ),
+        Some(serde_json::json!({ "id": id, "usage": usage })),
+    );
+    Ok(DeleteResult {
+        view: view(&data),
+        usage: usage.into(),
+    })
 }
 
 /// 设置定时刷新间隔（分钟，0 = 关闭），账户状态刷新与用量统计自动更新共用。
@@ -946,11 +1011,12 @@ fn import_label(hint: &str, token: &str) -> String {
 /// 读取本机已登录的指定类型凭据并导入为托管账户（Cursor / ChatGPT 互不影响）。
 /// 本机从未登录既不算导入也不算跳过；同身份已存在记 exists，凭据无法解析记 invalid。
 #[tauri::command]
-pub fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocalResult, String> {
+pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocalResult, String> {
     settings::ensure_loaded()?;
     let kind = sanitize_kind(&kind)?;
     let mut imported: Vec<ImportedItem> = Vec::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
+    let mut added: Vec<(String, String, String, String)> = Vec::new();
     let mut candidates: Vec<LocalLogin> = Vec::new();
     let read = match kind.as_str() {
         "codex" => codex_local::read_local_login(),
@@ -1010,7 +1076,9 @@ pub fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocal
                     last_refresh_at: None,
                     status: None,
                 };
-                audit_names.push(display_name(&entry.kind, &entry.note, &entry.token));
+                let name = display_name(&entry.kind, &entry.note, &entry.token);
+                audit_names.push(name.clone());
+                added.push((entry.id.clone(), entry.kind.clone(), entry.token.clone(), name));
                 imported.push(ImportedItem {
                     id: entry.id.clone(),
                     kind: entry.kind.clone(),
@@ -1030,6 +1098,7 @@ pub fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocal
             Some(json!({ "ids": ids })),
         );
     }
+    adopt_deleted_usage(&app, &added).await;
     Ok(ImportLocalResult {
         imported,
         skipped,
@@ -1220,6 +1289,7 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
     let mut imported: Vec<ImportedItem> = Vec::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
     let mut audit_names: Vec<String> = Vec::new();
+    let mut added: Vec<(String, String, String, String)> = Vec::new();
     let data = if parsed.accounts.is_empty() {
         current()
     } else {
@@ -1264,7 +1334,9 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                     last_refresh_at: None,
                     status: None,
                 };
-                audit_names.push(display_name(&entry.kind, &entry.note, &entry.token));
+                let name = display_name(&entry.kind, &entry.note, &entry.token);
+                audit_names.push(name.clone());
+                added.push((entry.id.clone(), entry.kind.clone(), entry.token.clone(), name));
                 imported.push(ImportedItem {
                     id: entry.id.clone(),
                     kind: entry.kind.clone(),
@@ -1284,6 +1356,7 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
             Some(json!({ "kind": kind, "ids": ids })),
         );
     }
+    adopt_deleted_usage(&app, &added).await;
     Ok(ImportFileResult {
         cancelled: false,
         imported,

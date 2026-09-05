@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -293,6 +293,12 @@ function accountRow(account) {
     parts.push(extra.text);
     if (extra.title) titles.push(extra.title);
   }
+  // ChatGPT 剩余额度重置次数（接口提供时才有）
+  const resets = account.kind === "codex" ? resetCreditsBrief(status) : null;
+  if (resets) {
+    parts.push(resets.text);
+    titles.push(resets.title);
+  }
   parts.push(`刷新于 ${relativeFromUnixSeconds(account.lastRefreshAt)}`);
   const info = document.createElement("span");
   info.textContent = parts.join(" · ");
@@ -411,8 +417,11 @@ async function refreshAll() {
   if (refreshing || switching || refreshingIds.size || !accounts.length) return;
   refreshing = true;
   render();
-  // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新
-  const ids = accounts.map((a) => a.id);
+  // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
+  // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按存储顺序，不在类型间来回跳
+  const ids = ["cursor", "codex", "claude"].flatMap((kind) =>
+    accounts.filter((a) => a.kind === kind).map((a) => a.id)
+  );
   let failed = 0;
   for (let i = 0; i < ids.length; i += 1) {
     setStatus("", `正在刷新账户 ${i + 1}/${ids.length}…`);
