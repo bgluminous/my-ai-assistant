@@ -6,6 +6,7 @@ import { initPricing } from "./pricing.js";
 import { initProxy } from "./proxy.js";
 import { initSettings } from "./settings.js";
 import { initAbout } from "./about.js";
+import { initRawEvents } from "./raw_events.js";
 
 function setupTheme() {
   const root = document.documentElement;
@@ -76,6 +77,7 @@ setupTheme();
 setupTabs();
 initAccounts();
 initUsage();
+initRawEvents();
 initAudit();
 initPricing();
 initProxy();

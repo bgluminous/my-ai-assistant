@@ -13,6 +13,8 @@ const EVENT_META = {
   account_export: { label: "导出账户", cls: "accent", group: "account" },
   usage_snapshot: { label: "用量快照", cls: "accent", group: "account" },
   usage_data_delete: { label: "删除统计数据", cls: "bad", group: "account" },
+  usage_data_clear: { label: "清除本地数据", cls: "bad", group: "account" },
+  usage_events_export: { label: "导出原始账单", cls: "accent", group: "account" },
   usage_data_adopt: { label: "沿用统计数据", cls: "ok", group: "account" },
   account_state_changed: { label: "状态变化", cls: "warn", group: "state" },
   account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },

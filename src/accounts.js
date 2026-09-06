@@ -1,4 +1,15 @@
-import { el, invoke, listen, fmtDateMs, resetError, toast, dismissToast, fillStatus, kindLabel } from "./shared.js";
+import {
+  el,
+  invoke,
+  listen,
+  fmtDateMs,
+  resetError,
+  toast,
+  dismissToast,
+  fillStatus,
+  kindLabel,
+  iconAction,
+} from "./shared.js";
 import {
   maskToken,
   relativeFromMs,
@@ -11,7 +22,9 @@ import {
   usdText,
   parseCreditsUsd,
   resetCreditsBrief,
+  cursorIdentity,
 } from "./account_format.js";
+import { clearCursorLocalData } from "./usage_data.js";
 
 // 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
@@ -453,31 +466,9 @@ function fillSummaryCell(cell, account) {
   if (!cell.childNodes.length) cell.textContent = "—";
 }
 
-/* ---------- 操作列图标按钮 ---------- */
+/* ---------- 账户表格行 ---------- */
 
-// feather 风格线性图标，与页面其余 SVG 一致（stroke = currentColor）
-const ACTION_ICONS = {
-  // 人像 + 对勾：把该账户设为本机 Cursor 的登录账户
-  switch:
-    '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/>',
-  refresh:
-    '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
-  edit:
-    '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
-  delete:
-    '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
-};
-
-/** 表格操作列的紧凑图标按钮：图标 + 悬停提示（title / aria-label）。 */
-function iconAction(icon, label) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "icon-action";
-  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ACTION_ICONS[icon]}</svg>`;
-  btn.title = label;
-  btn.setAttribute("aria-label", label);
-  return btn;
-}
+// 操作列的图标按钮助手 iconAction 见 shared.js（用量页总览表同款）
 
 function accountRow(account) {
   const tr = document.createElement("tr");
@@ -1522,8 +1513,11 @@ function openModal(account, presetKind) {
   setModalKind(account ? account.kind : presetKind || "cursor");
   // 编辑时不允许切换账户类型
   for (const seg of el("#account-kind").querySelectorAll(".seg")) seg.disabled = !!account;
-  // 「从本机导入」是添加场景的快捷入口，编辑时隐藏
+  // 「从本机导入」是添加场景的快捷入口，编辑时隐藏；「清除本地数据」只在编辑 Cursor 账户时提供
   el("#account-import-local").hidden = !!account;
+  const clearBtn = el("#account-clear-usage");
+  clearBtn.hidden = !(account && account.kind === "cursor");
+  clearBtn.disabled = false;
   clearModalStatus();
   el("#account-modal").hidden = false;
   el("#account-note").focus();
@@ -1532,6 +1526,36 @@ function openModal(account, presetKind) {
 function closeModal() {
   el("#account-modal").hidden = true;
   editingId = null;
+}
+
+/**
+ * 编辑 Cursor 账户时的「清除本地数据」：确认后删除该账户在本机的用量事件库与统计缓存，
+ * 账户与 Token 保留，下次刷新用量时重新全量拉取。结果显示在弹窗状态条，弹窗保持打开。
+ */
+async function onClearLocalUsage() {
+  const id = editingId;
+  const account = accounts.find((item) => item.id === id);
+  if (!account || account.kind !== "cursor") return;
+  const label = cursorIdentity(account).primary;
+  const ok = await confirmDialog({
+    title: "清除本地数据",
+    body: `确定清除“${label}”在本机保存的用量事件库与统计缓存吗？账户与 Token 会保留，下次刷新用量时会重新从 Cursor 全量拉取；Cursor 侧已不可查询的历史事件将无法恢复。`,
+    confirmText: "清除",
+    danger: true,
+  });
+  // 确认期间弹窗可能已被关掉（Esc / 切换到别的账户），不再落地
+  if (!ok || editingId !== id) return;
+  const btn = el("#account-clear-usage");
+  btn.disabled = true;
+  try {
+    const result = await clearCursorLocalData(id);
+    setModalStatus("ok", `已清除本地用量数据（${result.events} 条事件），下次刷新用量时重新全量拉取。`);
+  } catch (error) {
+    const code = resetError(error);
+    setModalStatus("bad", code === "no_usage_data" ? "本机没有该账户的用量数据。" : `清除失败：${code}`);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function onSave() {
@@ -1675,7 +1699,8 @@ export function initAccounts() {
     node.addEventListener("click", closeModal);
   }
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !modal.hidden) closeModal();
+    // 上层的确认弹窗（清除本地数据）打开时，Esc 只关它，不连带关掉编辑弹窗
+    if (e.key === "Escape" && !modal.hidden && el("#switch-modal").hidden) closeModal();
   });
   for (const seg of el("#account-kind").querySelectorAll(".seg")) {
     seg.addEventListener("click", () => setModalKind(seg.dataset.kind));
@@ -1686,6 +1711,7 @@ export function initAccounts() {
     closeModal();
     void onImportLocal(kind);
   });
+  el("#account-clear-usage").addEventListener("click", () => { void onClearLocalUsage(); });
   el("#account-oauth-open").addEventListener("click", () => { void onOauthOpen(); });
   el("#account-oauth-finish").addEventListener("click", () => { void onOauthFinish(); });
 

@@ -1127,9 +1127,11 @@ td.account-actions { white-space: nowrap; }
   color: var(--text-strong);
   border-top: 1px solid var(--border-strong);
 }
-/* 总览表中已删除账户保留数据的行：名称旁「已删除」标签、状态格内的「删除统计数据」按钮 */
+/* 总览表：已删除账户行名称旁的「已删除」标签；状态格文字后跟随的行内图标按钮
+   （原始账单 / 删除统计数据，与账户表操作列同款 .icon-action，含义放悬停提示） */
 .tag.deleted { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
-.overview-action { margin-left: 10px; white-space: nowrap; }
+.overview-action { margin-left: 10px; }
+.overview-action + .overview-action { margin-left: 4px; }
 
 /* ---------- 审计日志 ---------- */
 
@@ -1392,6 +1394,39 @@ input.price-input {
 .modal-actions { display: flex; gap: 10px; }
 
 .modal-card-sm { max-width: 560px; }
+.modal-card-lg { max-width: 1180px; }
+
+/* 原始账单弹窗：搜索 + 合计 + 导出的工具栏，表头吸顶的逐笔事件表，分批「显示更多」 */
+.raw-toolbar #raw-search { flex: 0 1 360px; }
+.raw-toolbar #raw-count { margin-left: auto; white-space: nowrap; }
+.raw-table-wrap {
+  flex: 1 1 auto;
+  min-height: 160px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.raw-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 9px 12px;
+  background: var(--surface);
+  white-space: nowrap;
+}
+.raw-table tbody td { padding: 6px 12px; vertical-align: middle; white-space: nowrap; }
+.raw-time { color: var(--muted); font-size: 12.5px; }
+.raw-model {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-strong);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.raw-display { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.raw-more { display: flex; justify-content: center; padding: 10px 12px 14px; }
+#raw-status { margin: 0 22px 12px; }
 .modal-body { padding: 20px 22px; overflow: auto; }
 .modal-body > label:first-child { margin-top: 0; }
 .segmented-full { display: flex; width: 100%; margin-bottom: 4px; }

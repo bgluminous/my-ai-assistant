@@ -1,9 +1,11 @@
 use crate::pricing::{ModelPrice, PricingTable};
 
-/// 分发方/路由前缀：Cursor 会把部分第三方模型上报为 `cursor-grok-4.6-high-fast` 这类名字，
-/// 剥离前缀后再按官方模型名匹配价格。
+/// 分发方/路由前缀：Cursor 会把自家 Grok 上报为 `cursor-grok-4.6-high-fast` 这类名字，
+/// 剥离前缀后再按表内模型名匹配价格。
 const PROVIDER_PREFIXES: &[&str] = &["cursor-"];
 
+/// 思考 / 努力度等修饰后缀：同一模型的不同等级同价，剥掉后按基础模型计价。
+/// 不含 `-fast`——Fast 模式是单独计价的变体，见 [`FAST_SUFFIX`]。
 const EFFORT_SUFFIXES: &[&str] = &[
     "-xhigh-thinking",
     "-high-thinking",
@@ -13,17 +15,21 @@ const EFFORT_SUFFIXES: &[&str] = &[
     "-max-thinking",
     "-thinking",
     "-reasoning",
-    "-xhigh-fast",
-    "-high-fast",
     "-xhigh",
     "-high",
     "-medium",
     "-low",
     "-minimal",
     "-max",
-    "-fast",
     "-latest",
 ];
+
+/// Fast 模式变体标记。Cursor / OpenAI / Anthropic 的 Fast 模式单独计价（通常为标准价 2 倍或更高），
+/// 上报名以 `-fast` 结尾且位于 effort 后缀之后：`cursor-grok-4.6-high-fast`、`gpt-5-high-fast`、
+/// `claude-opus-5-thinking-high-fast`、`composer-2.5-fast`。
+/// 价格表里 Fast 变体的键 = 基础模型规范键 + `-fast`（如 grok-4.6-fast、claude-4.8-opus-fast）。
+/// 本体名字就带 fast 的独立模型（grok-4-fast、grok-code-fast-1）靠精确收录优先命中，不受影响。
+const FAST_SUFFIX: &str = "-fast";
 
 /// 把 Cursor / Codex 上报的原始模型名归一到价格表里的键。
 /// 先用原始名走一遍匹配流程；失败后剥离已知分发前缀（如 cursor-）再试一遍。
@@ -107,27 +113,61 @@ fn ends_with_digit(s: &str) -> bool {
     s.bytes().last().is_some_and(|b| b.is_ascii_digit())
 }
 
-/// 单个候选名的匹配流程：精确匹配（含等价写法归一）-> 去掉思考/努力度后缀 ->
-/// 逐段去尾 -> 前缀匹配兜底。去尾与兜底均带版本截断防护，
-/// 避免 5.1 / 5-1 这类小版本被按 5 计价。
+/// 从末尾剥掉一个修饰后缀。返回 Some(true) 表示剥掉的是 Fast 标记，Some(false) 表示 effort 后缀，
+/// None 表示没有可剥的后缀。列表里的复合后缀（-high-thinking）排在单段之前，保证一次剥整段。
+fn strip_one_modifier(key: &mut String) -> Option<bool> {
+    if key.len() > FAST_SUFFIX.len() && key.ends_with(FAST_SUFFIX) {
+        key.truncate(key.len() - FAST_SUFFIX.len());
+        return Some(true);
+    }
+    for suffix in EFFORT_SUFFIXES {
+        if key.len() > suffix.len() && key.ends_with(suffix) {
+            key.truncate(key.len() - suffix.len());
+            return Some(false);
+        }
+    }
+    None
+}
+
+/// 表内 `key-fast` 条目。
+fn fast_of<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a ModelPrice)> {
+    get(table, &format!("{key}{FAST_SUFFIX}"))
+}
+
+/// Fast 感知的查表：带 Fast 标记时先按 `candidate-fast` 的等价写法直接查（覆盖 grok-4.1-fast 这类
+/// 只收录了带 fast 名字的独立模型），再解析基础模型的规范键 K 并优先取表内的 `K-fast`；
+/// 表内没有 Fast 条目时回退到 K，按标准价折算（展示层会保留 -fast 名字并把 priced_as 标为 K，
+/// 让这种低估可见）。不带 Fast 标记时等同于普通查表。
+fn lookup<'a>(table: &'a PricingTable, candidate: &str, fast: bool) -> Option<(&'a str, &'a ModelPrice)> {
+    if fast {
+        if let Some(hit) = get_normalized(table, &format!("{candidate}{FAST_SUFFIX}")) {
+            return Some(hit);
+        }
+    }
+    let (k, price) = get_normalized(table, candidate)?;
+    if fast {
+        if let Some(hit) = fast_of(table, k) {
+            return Some(hit);
+        }
+    }
+    Some((k, price))
+}
+
+/// 单个候选名的匹配流程：精确匹配（含等价写法归一）-> 逐个剥掉 Fast 标记 / 思考 / 努力度后缀，
+/// 每剥一层查一次表 -> 逐段去尾 -> 前缀匹配兜底。去尾与兜底均带版本截断防护，
+/// 避免 5.1 / 5-1 这类小版本被按 5 计价；全程带着 Fast 标记，命中基础键后优先取其 Fast 条目。
 fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a ModelPrice)> {
     if let Some(hit) = get_normalized(table, key) {
         return Some(hit);
     }
 
     let mut base = key.to_string();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for suffix in EFFORT_SUFFIXES {
-            if base.len() > suffix.len() && base.ends_with(suffix) {
-                base.truncate(base.len() - suffix.len());
-                changed = true;
-            }
+    let mut fast = false;
+    while let Some(was_fast) = strip_one_modifier(&mut base) {
+        fast |= was_fast;
+        if let Some(hit) = lookup(table, &base, fast) {
+            return Some(hit);
         }
-    }
-    if let Some(hit) = get_normalized(table, &base) {
-        return Some(hit);
     }
 
     let mut segments: Vec<&str> = base.split('-').collect();
@@ -140,20 +180,20 @@ fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a M
         if is_version_fragment(removed) && ends_with_digit(&candidate) {
             continue;
         }
-        if let Some(hit) = get_normalized(table, &candidate) {
+        if let Some(hit) = lookup(table, &candidate, fast) {
             return Some(hit);
         }
     }
 
-    // 最后兜底：价格表里若有某键是候选名的前缀，则采用它（取最长前缀）。
+    // 最后兜底：价格表里若有某键是（已剥修饰的）候选名的前缀，则采用它（取最长前缀）。
     // 键后必须是 `-` 且不落在版本号中间：claude-fable-5 不得命中
     // claude-fable-5.1-* / claude-fable-5-1-*，但 gpt-4o 仍可命中 gpt-4o-2024-08-06。
     let mut best: Option<(&str, &ModelPrice)> = None;
     for (k, v) in &table.models {
-        if k.is_empty() || !key.starts_with(k.as_str()) {
+        if k.is_empty() || !base.starts_with(k.as_str()) {
             continue;
         }
-        let rest = &key[k.len()..];
+        let rest = &base[k.len()..];
         if !rest.is_empty() {
             let Some(after) = rest.strip_prefix('-') else {
                 continue;
@@ -166,6 +206,13 @@ fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a M
         match best {
             Some((bk, _)) if bk.len() >= k.len() => {}
             _ => best = Some((k.as_str(), v)),
+        }
+    }
+    if fast {
+        if let Some((bk, _)) = best {
+            if let Some(hit) = fast_of(table, bk) {
+                return Some(hit);
+            }
         }
     }
     best
@@ -211,13 +258,15 @@ fn prefer_dotted(table: &PricingTable, key: String) -> String {
     key
 }
 
-/// 聚合展示用的模型名归一：同一模型的不同思考 / 效率等级并入一行，
+/// 聚合展示用的模型名归一：同一模型的不同思考 / 努力度等级并入一行，
 /// 点号 / 连字符 / 下划线与「版本-家族」词序变体归并为表内规范名
 /// （claude-opus-4-8 / claude-opus-4.8 → claude-4.8-opus，同一模型不再拆行统计），
 /// 保证归并结果与计价口径一致。价格表精确收录的名字（如 grok-4-fast、grok-code-fast-1
-/// 这类独立计价的真实模型）原样保留；剥离分发前缀与思考 / 效率后缀途中一旦命中表键
-/// 即停在该键。日期 / 快照段（gpt-5-2025-08-07）不在剥离之列，保持独立；
-/// 全程未命中的名字保留剥离后的原样。
+/// 这类独立计价的真实模型）原样保留；剥离分发前缀与修饰后缀途中一旦命中表键即停在该键。
+/// Fast 变体始终独立成行：命中基础键 K 后展示为 `K-fast`（表内有该条目则按 Fast 价，
+/// 没有则 resolve 回退到 K 的标准价、priced_as 显示 K），不与标准版合并。
+/// 日期 / 快照段（gpt-5-2025-08-07）不在剥离之列，保持独立；全程未命中的名字保留
+/// 剥离后的原样（带 Fast 标记的补回 -fast）。
 pub fn display_key(table: &PricingTable, raw: &str) -> String {
     let mut key = raw.trim().to_lowercase();
     if key.is_empty() {
@@ -237,18 +286,20 @@ pub fn display_key(table: &PricingTable, raw: &str) -> String {
             }
         }
     }
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for suffix in EFFORT_SUFFIXES {
-            if key.len() > suffix.len() && key.ends_with(suffix) {
-                key.truncate(key.len() - suffix.len());
-                if let Some((k, _)) = get_normalized(table, &key) {
-                    return prefer_dotted(table, k.to_string());
-                }
-                changed = true;
-            }
+    let mut fast = false;
+    while let Some(was_fast) = strip_one_modifier(&mut key) {
+        fast |= was_fast;
+        if let Some((k, _)) = lookup(table, &key, fast) {
+            let k = prefer_dotted(table, k.to_string());
+            return if fast && !k.ends_with(FAST_SUFFIX) {
+                format!("{k}{FAST_SUFFIX}")
+            } else {
+                k
+            };
         }
+    }
+    if fast {
+        key.push_str(FAST_SUFFIX);
     }
     key
 }
@@ -261,21 +312,57 @@ mod tests {
         crate::pricing::defaults()
     }
 
+    /// Fast 标记的三种情形：表内有 Fast 条目 → 落到「规范键 + -fast」；表内没有（厂商无 Fast 档）→
+    /// 独立成行但按基础模型标准价计价（priced_as = 基础键）；本体名字就带 fast 的独立模型不受影响。
     #[test]
-    fn cursor_prefixed_grok_models_resolve() {
+    fn fast_marker_resolution() {
         let t = table();
-        // Cursor 上报的带 cursor- 前缀、含 effort 后缀的 grok 模型名都应能归一到价格表
-        for (raw, expect) in [
-            ("cursor-grok-4.6-high-fast", "grok-4.6"),
-            ("cursor-grok-4.6-high", "grok-4.6"),
-            ("cursor-grok-4.6-xhigh-fast", "grok-4.6"),
-            ("cursor-grok-4.5-high", "grok-4.5"),
-            ("cursor-grok-4.5-high-fast", "grok-4.5"),
+        // (上报名, 计价键, 展示名)
+        for (raw, priced_as, shown) in [
+            // effort / thinking 后缀之后的 -fast；Anthropic API 风格先归一为规范键再取 Fast 条目
+            ("gpt-5-high-fast", "gpt-5-fast", "gpt-5-fast"),
+            ("gpt-5.6-sol-medium-fast", "gpt-5.6-sol-fast", "gpt-5.6-sol-fast"),
+            ("claude-opus-5-thinking-high-fast", "claude-opus-5-fast", "claude-opus-5-fast"),
+            ("claude-opus-4-8-thinking-max-fast", "claude-4.8-opus-fast", "claude-4.8-opus-fast"),
+            ("cursor-composer-2.5-fast", "composer-2.5-fast", "composer-2.5-fast"),
+            // xAI 无 Fast 档、Anthropic 不支持 Opus 4.7 fast：不得并入标准版一行，但按标准价
+            ("cursor-grok-4.6-xhigh-fast", "grok-4.6", "grok-4.6-fast"),
+            ("cursor-grok-4.5-high-fast", "grok-4.5", "grok-4.5-fast"),
+            ("claude-opus-4-7-thinking-fast", "claude-4.7-opus", "claude-4.7-opus-fast"),
+            // 本体带 fast 的独立模型：精确收录优先，只剥 effort 后缀（grok-4.1 无基础键也不得落到裸 grok）
+            ("grok-4-fast-high", "grok-4-fast", "grok-4-fast"),
+            ("grok-4.1-fast-reasoning", "grok-4.1-fast", "grok-4.1-fast"),
         ] {
-            let hit = resolve(&t, raw);
-            assert!(hit.is_some(), "{raw} 应命中价格表");
-            assert_eq!(hit.unwrap().0, expect, "{raw} 归一目标不对");
+            assert_eq!(resolve(&t, raw).unwrap().0, priced_as, "{raw} 计价键不对");
+            assert_eq!(display_key(&t, raw), shown, "{raw} 展示名不对");
+            // 聚合层先 display_key 再 resolve：展示名送回 resolve 必须得到同一计价键
+            assert_eq!(resolve(&t, shown).unwrap().0, priced_as, "{shown} 与 {raw} 计价不一致");
         }
+        // 未收录的模型保留 Fast 标记且仍为未定价
+        assert_eq!(display_key(&t, "my-model-xhigh-fast"), "my-model-fast");
+        assert!(resolve(&t, "my-model-fast").is_none());
+        // Fast 条目必须比标准版贵，防止写成同价
+        for (base, fast) in [("gpt-5", "gpt-5-fast"), ("claude-opus-5", "claude-opus-5-fast"), ("composer-2.5", "composer-2.5-fast")] {
+            let (b, f) = (resolve(&t, base).unwrap().1, resolve(&t, fast).unwrap().1);
+            assert!(f.input > b.input && f.output > b.output, "{fast} 应比 {base} 贵");
+        }
+    }
+
+    /// 等价价的口径是厂商官方 API 价目而非 Cursor 售价。只固化两者不同、容易被 Cursor 账单带偏的几处，
+    /// 其余价格以 pricing.default.json 为唯一事实来源，不在测试里重复。
+    #[test]
+    fn vendor_official_prices_pinned() {
+        let t = table();
+        let check = |raw: &str, expect: (f64, f64, f64, f64)| {
+            let p = resolve(&t, raw).unwrap_or_else(|| panic!("{raw} 未命中")).1;
+            assert_eq!((p.input, p.output, p.cache_read, p.cache_write), expect, "{raw} 单价与厂商官方价目不符");
+        };
+        check("cursor-grok-4.5-high", (2.0, 6.0, 0.3, 0.0)); // xAI：缓存读 $0.30（Cursor 收 $0.5）
+        check("cursor-grok-4.6-xhigh-fast", (2.0, 6.0, 0.5, 0.0)); // xAI 无 Fast 档（Cursor 收 2 倍）
+        check("gpt-5.6-sol-medium", (4.0, 20.0, 0.4, 5.0)); // OpenAI 官方促销价（至少到 2026-11-21）
+        check("claude-opus-5-thinking-high-fast", (10.0, 50.0, 1.0, 12.5)); // Anthropic fast mode 2 倍，缓存倍率叠加
+        check("claude-sonnet-5", (2.0, 10.0, 0.2, 2.5)); // Anthropic：$2/$10 已定为永久价
+        check("claude-fable-5-thinking-max", (10.0, 50.0, 1.0, 12.5)); // Max 是 effort 等级，无溢价
     }
 
     #[test]
@@ -361,7 +448,16 @@ mod tests {
         let t = table();
         // 表里没有的小版本不得回退按大版本计价，应保持“未定价”
         // （grok 系列除外：表里有裸 grok 兜底键，属有意设计）
-        for raw in ["claude-fable-5.2", "claude-fable-5-2-thinking", "gpt-5.1", "claude-sonnet-5.1"] {
+        for raw in [
+            "claude-fable-5.2",
+            "claude-fable-5-2-thinking",
+            "gpt-5.1",
+            "gpt-6.1",
+            "gpt-6-1-astra",
+            "claude-sonnet-5.1",
+            "composer-2",
+            "composer-2-fast",
+        ] {
             assert!(resolve(&t, raw).is_none(), "{raw} 不应错配到旧版本价格");
         }
     }
@@ -371,7 +467,8 @@ mod tests {
         let t = table();
         // 思考 / 效率等级并入基础模型（含分发前缀与大小写归一）
         assert_eq!(display_key(&t, "claude-4.5-sonnet-thinking"), "claude-4.5-sonnet");
-        assert_eq!(display_key(&t, "cursor-grok-4.6-high-fast"), "grok-4.6");
+        assert_eq!(display_key(&t, "cursor-grok-4.6-high"), "grok-4.6");
+        assert_eq!(display_key(&t, "cursor-grok-4.6-xhigh"), "grok-4.6");
         assert_eq!(display_key(&t, "GPT-5-High"), "gpt-5");
         assert_eq!(display_key(&t, "gpt-5-codex-xhigh"), "gpt-5-codex");
     }
@@ -385,6 +482,8 @@ mod tests {
         assert_eq!(display_key(&t, "grok-code-fast-1"), "grok-code-fast-1");
         // 剥离途中命中表键即停：只去掉 -high，保留独立的 grok-4-fast
         assert_eq!(display_key(&t, "grok-4-fast-high"), "grok-4-fast");
+        // 表键本身含 effort 词（codex-max）时精确匹配优先，不被当成后缀剥成 gpt-5.1-codex
+        assert_eq!(display_key(&t, "gpt-5.1-codex-max-high"), "gpt-5.1-codex-max");
     }
 
     #[test]
@@ -396,6 +495,7 @@ mod tests {
         assert_eq!(display_key(&t, "claude-fable-5_1-thinking"), "claude-fable-5.1");
         assert_eq!(display_key(&t, "cursor-claude-fable-5-1-high-thinking"), "claude-fable-5.1");
         assert_eq!(display_key(&t, "claude-3-5-sonnet"), "claude-3.5-sonnet");
+        assert_eq!(display_key(&t, "kimi-k2-7-code"), "kimi-k2.7-code");
         // 点号形式不在表内的名字保持原样（fast 系列 / 日期快照不受影响）
         assert_eq!(display_key(&t, "grok-code-fast-1"), "grok-code-fast-1");
         assert_eq!(display_key(&t, "gpt-5-2025-08-07"), "gpt-5-2025-08-07");

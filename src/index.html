@@ -219,6 +219,9 @@
             </div>
             <div class="toolbar-side">
               <span id="usage-updated" class="muted small"></span>
+              <button id="usage-raw" class="icon-action" type="button" title="查看该账户在当前时间范围内的原始账单（逐笔用量事件，来自本机事件库）" aria-label="查看原始账单" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+              </button>
               <button id="usage-snapshot" class="icon-action" type="button" title="生成该账户的全量用量快照图片（账户失效后使用本地存档数据）" aria-label="生成用量快照" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
               </button>
@@ -519,6 +522,61 @@
       </div>
     </div>
 
+    <!-- ============ 原始账单弹窗：某账户事件库里的逐笔用量事件（原始模型名 / 四类 token / 实扣 / 等价） ============ -->
+    <div id="raw-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="raw-modal-title">
+        <div class="modal-head">
+          <div>
+            <h3 id="raw-modal-title">原始账单</h3>
+            <p id="raw-modal-sub" class="muted small"></p>
+          </div>
+          <button id="raw-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-toolbar raw-toolbar">
+          <input id="raw-search" type="search" placeholder="按模型名筛选（原始名或归一名）" />
+          <span id="raw-count" class="muted small"></span>
+          <button id="raw-export" class="secondary compact" type="button" title="把当前列出的事件导出为 CSV（UTF-8，Excel 可直接打开）">导出 CSV</button>
+        </div>
+
+        <div class="table-wrap raw-table-wrap">
+          <table class="raw-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>模型（原始上报名）</th>
+                <th>计价</th>
+                <th class="num">输入</th>
+                <th class="num">缓存读</th>
+                <th class="num">缓存写</th>
+                <th class="num">输出</th>
+                <th class="num">合计 Token</th>
+                <th class="num">实扣</th>
+                <th class="num">等价 API 价</th>
+              </tr>
+            </thead>
+            <tbody id="raw-body"></tbody>
+          </table>
+          <p id="raw-empty" class="muted empty" hidden></p>
+          <div id="raw-more-wrap" class="raw-more" hidden>
+            <button id="raw-more" class="secondary compact" type="button">显示更多</button>
+          </div>
+        </div>
+
+        <p id="raw-status" class="status" hidden></p>
+
+        <div class="modal-foot">
+          <button id="raw-clear" class="secondary danger" type="button" title="删除该账户在本机的用量事件库与统计缓存（账户与 Token 保留），下次刷新重新全量拉取">清除本地数据</button>
+          <div class="modal-actions">
+            <button id="raw-cancel" class="secondary" type="button" data-close>关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ============ 设置弹窗 ============ -->
     <div id="settings-modal" class="modal" hidden>
       <div class="modal-backdrop" data-close></div>
@@ -726,6 +784,8 @@
 
         <div class="modal-foot">
           <button id="account-import-local" class="secondary" type="button">从本机导入 Cursor</button>
+          <!-- 编辑 Cursor 账户时的危险操作：删除本机事件库与统计缓存，账户与 Token 保留 -->
+          <button id="account-clear-usage" class="secondary danger" type="button" title="删除该账户在本机的用量事件库与统计缓存（账户与 Token 保留），下次刷新用量时重新全量拉取" hidden>清除本地数据</button>
           <div class="modal-actions">
             <button id="account-cancel" class="secondary" type="button" data-close>取消</button>
             <button id="account-save" class="primary" type="button">保存</button>

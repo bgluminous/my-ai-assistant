@@ -279,6 +279,57 @@ export function removeDeletedUsage(accountId) {
 }
 
 /**
+ * 只读列出账户事件库在范围内的原始用量事件（不联网；在用账户与已删除账户保留的数据均可），
+ * 每条附带当前价格表下的归一名、命中的价格键与等价费用。
+ */
+export function fetchRawEvents(accountId, { start, end } = {}) {
+  return withTimeout(
+    invoke("cursor_usage_events", { accountId, start: start ?? null, end: end ?? null }),
+    "cursor_usage_events"
+  );
+}
+
+/** 本窗口内广播：某账户的本地用量数据已清除，用量页据此重载受影响的视图。 */
+export const USAGE_LOCAL_CLEARED_EVENT = "usage-local-cleared";
+
+/** 本窗口内广播：价格表已变更（保存 / 重置 / 在线更新），用量页据此重算当前视图。 */
+export const USAGE_PRICING_CHANGED_EVENT = "usage-pricing-changed";
+
+/**
+ * 价格表变更后的缓存作废：缓存里存的是按旧价算好的聚合结果（等价费用、命中的价格键），
+ * 必须整体丢弃——清掉本窗口内存与 localStorage 里的全部 Cursor / Codex / Claude 条目，
+ * 广播让其它窗口（托盘）也丢掉内存条目并重新加载，再通知本窗口的用量页重算。
+ * 重算只是后端按新价重新切片 / 重新聚合已解析的日志，事件库在有效期内不会联网。
+ */
+export function notifyPricingChanged() {
+  clearUsageMemoryCache();
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(USAGE_CACHE_PREFIX)) localStorage.removeItem(k);
+    }
+  } catch { /* ignore */ }
+  notifyUsageCache(USAGE_CACHE_PREFIX);
+  window.dispatchEvent(new CustomEvent(USAGE_PRICING_CHANGED_EVENT));
+}
+
+/**
+ * 清除在用 Cursor 账户的本地用量数据：删掉后端事件库文件，再清掉本机各窗口的聚合缓存
+ * （账户与 Token 保留，下次拉取用量时重新全量同步）。返回 { events: 被清除的事件数 }。
+ */
+export async function clearCursorLocalData(accountId) {
+  const result = await invoke("cursor_usage_clear", { accountId });
+  purgeAccountCache(accountId);
+  window.dispatchEvent(new CustomEvent(USAGE_LOCAL_CLEARED_EVENT, { detail: { accountId } }));
+  return result;
+}
+
+/** 导出原始账单 CSV：弹系统保存框写盘；取消时 resolve { cancelled: true }。 */
+export function exportUsageEventsCsv(fileName, content) {
+  return invoke("usage_events_export", { fileName, content });
+}
+
+/**
  * 扫描范围 -> 缓存键：起点 + 终点（开区间）按覆盖的自然日命名——单日为 today:（今天）或 day:
  * （已结束的日子），多日为 range:首日_末日；只有起点视为进行中的今天；否则为天数 / all。
  * 调用方也可直接给出 key。

@@ -453,6 +453,127 @@ pub async fn cursor_usage_deleted_remove(account_id: String) -> Result<(), Strin
 }
 
 // ---------------------------------------------------------------------------
+// 命令：原始事件明细（原始账单）/ 清除在用账户的本地数据
+// ---------------------------------------------------------------------------
+
+/// 事件库里的一条原始用量事件，附带当前价格表下的归一结果与折算，供「原始账单」查看与导出。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawUsageEvent {
+    /// Cursor 接口上报的原始模型名，未做任何归一。
+    pub model: String,
+    /// 聚合展示用的归一名（与用量页明细表同口径）。
+    pub display_model: String,
+    /// 命中的价格表键；None 为未定价。
+    pub priced_as: Option<String>,
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_read_tokens: f64,
+    pub cache_write_tokens: f64,
+    pub total_tokens: f64,
+    /// 官方实扣（美元）。
+    pub actual_usd: f64,
+    /// 按当前价格表折算的等价费用（美元）；未定价为 None。
+    pub equivalent_usd: Option<f64>,
+    pub timestamp_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawUsageEvents {
+    /// 范围内的事件，按时间倒序，无时间戳的排在最后。
+    pub events: Vec<RawUsageEvent>,
+    /// 事件库全部事件数（不限范围）。
+    pub total: usize,
+    pub synced_at: Option<i64>,
+    /// 该事件库属于已删除账户保留的统计数据。
+    pub deleted: bool,
+    /// 事件库文件路径。
+    pub path: String,
+}
+
+/// 只读列出事件库在 [start, end]（unix 毫秒，闭区间，None = 不限）内的原始事件（不联网）。
+/// 范围语义与聚合切片一致：有界范围只含带时间戳的事件，「全部」连无时间戳的一起列出。
+/// 在用账户与已删除账户保留的事件库都可查看。无事件库时报 no_usage_data。
+#[tauri::command]
+pub async fn cursor_usage_events(
+    account_id: String,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<RawUsageEvents, String> {
+    let lock = account_lock(&account_id);
+    let _guard = lock.lock().await;
+    let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let table = pricing::load();
+    let bounded = start.is_some() || end.is_some();
+    let mut events: Vec<RawUsageEvent> = archive
+        .events
+        .iter()
+        .filter(|e| {
+            if !bounded {
+                return true;
+            }
+            e.6.is_some_and(|t| start.is_none_or(|s| t >= s) && end.is_none_or(|x| t <= x))
+        })
+        .map(|e| {
+            let row = from_tuple(e);
+            let priced = pricing::price_row(&row, &table);
+            RawUsageEvent {
+                display_model: crate::model_match::display_key(&table, &row.model),
+                priced_as: priced.map(|(k, _)| k.to_string()),
+                equivalent_usd: priced.map(|(_, usd)| usd),
+                total_tokens: row.input + row.output + row.cache_read + row.cache_write,
+                input_tokens: row.input,
+                output_tokens: row.output,
+                cache_read_tokens: row.cache_read,
+                cache_write_tokens: row.cache_write,
+                actual_usd: row.actual_cents / 100.0,
+                timestamp_ms: row.timestamp_ms,
+                model: row.model,
+            }
+        })
+        .collect();
+    events.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms.unwrap_or(i64::MIN)));
+    Ok(RawUsageEvents {
+        events,
+        total: archive.events.len(),
+        synced_at: archive.synced_at,
+        deleted: archive.deleted.is_some(),
+        path: file_path(&account_id)?.to_string_lossy().to_string(),
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageClearResult {
+    /// 被清除的事件数。
+    pub events: usize,
+}
+
+/// 清除在用 Cursor 账户的本地用量数据：删除其事件库文件（账户与 Token 保留），
+/// 下次拉取用量时重新全量同步。已删除账户保留的统计数据走 cursor_usage_deleted_remove。
+#[tauri::command]
+pub async fn cursor_usage_clear(account_id: String) -> Result<UsageClearResult, String> {
+    let lock = account_lock(&account_id);
+    let _guard = lock.lock().await;
+    let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    if archive.deleted.is_some() {
+        return Err("not_live_account".into());
+    }
+    std::fs::remove_file(file_path(&account_id)?).map_err(|e| e.to_string())?;
+    let events = archive.events.len();
+    let name = accounts::account_snapshot(&account_id)
+        .map(|a| accounts::display_name(&a.kind, &a.note, &a.token))
+        .unwrap_or_else(|_| account_id.clone());
+    audit::log(
+        "usage_data_clear",
+        format!("清除 {name} 的本地用量数据（{events} 条用量事件），下次刷新重新全量拉取"),
+        Some(json!({ "id": account_id, "events": events })),
+    );
+    Ok(UsageClearResult { events })
+}
+
+// ---------------------------------------------------------------------------
 // 账户生命周期联动（accounts / backup 调用）
 // ---------------------------------------------------------------------------
 
@@ -635,12 +756,19 @@ pub struct SnapshotSaveResult {
 
 const PNG_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 
-fn pick_png_path(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
+/// 弹系统「另存为」对话框（挂在主窗口下），返回用户选择的路径；取消返回 None。
+fn pick_save_path(
+    app: &AppHandle,
+    title: &str,
+    filter_name: &str,
+    ext: &str,
+    file_name: &str,
+) -> Option<PathBuf> {
     let mut builder = app
         .dialog()
         .file()
-        .set_title("保存用量快照")
-        .add_filter("PNG 图片", &["png"])
+        .set_title(title)
+        .add_filter(filter_name, &[ext])
         .set_file_name(file_name);
     if let Some(win) = app.get_webview_window("main") {
         builder = builder.set_parent(&win);
@@ -648,6 +776,63 @@ fn pick_png_path(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
     builder
         .blocking_save_file()
         .and_then(|p| p.simplified().into_path().ok())
+}
+
+fn pick_png_path(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
+    pick_save_path(app, "保存用量快照", "PNG 图片", "png", file_name)
+}
+
+/// 路径缺少期望扩展名时补上（用户在对话框里删掉了后缀的情形）。
+fn ensure_ext(mut path: PathBuf, ext: &str) -> PathBuf {
+    let missing = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| !e.eq_ignore_ascii_case(ext))
+        .unwrap_or(true);
+    if missing {
+        path.set_extension(ext);
+    }
+    path
+}
+
+/// 导出原始账单 CSV：前端已把事件明细拼成文本，这里只负责弹保存框并写盘。
+/// 文件带 UTF-8 BOM，Excel 直接打开不乱码。对话框取消返回 cancelled。
+#[tauri::command]
+pub async fn usage_events_export(
+    app: AppHandle,
+    file_name: String,
+    content: String,
+) -> Result<SnapshotSaveResult, String> {
+    if content.is_empty() {
+        return Err("empty_content".into());
+    }
+    let app_for_dialog = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        pick_save_path(&app_for_dialog, "导出原始账单", "CSV 文件", "csv", &file_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(path) = picked else {
+        return Ok(SnapshotSaveResult {
+            cancelled: true,
+            path: String::new(),
+        });
+    };
+    let path = ensure_ext(path, "csv");
+    let mut bytes = Vec::with_capacity(content.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(content.as_bytes());
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    let shown = path.to_string_lossy().to_string();
+    audit::log(
+        "usage_events_export",
+        format!("导出原始账单：{shown}"),
+        Some(json!({ "path": shown, "bytes": bytes.len() })),
+    );
+    Ok(SnapshotSaveResult {
+        cancelled: false,
+        path: shown,
+    })
 }
 
 /// 保存快照 PNG：解码前端渲染好的 data URL，弹保存框写盘。对话框取消返回 cancelled。
@@ -671,20 +856,13 @@ pub async fn usage_snapshot_save(
         tokio::task::spawn_blocking(move || pick_png_path(&app_for_dialog, &file_name))
             .await
             .map_err(|e| e.to_string())?;
-    let Some(mut path) = picked else {
+    let Some(path) = picked else {
         return Ok(SnapshotSaveResult {
             cancelled: true,
             path: String::new(),
         });
     };
-    let missing_ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| !e.eq_ignore_ascii_case("png"))
-        .unwrap_or(true);
-    if missing_ext {
-        path.set_extension("png");
-    }
+    let path = ensure_ext(path, "png");
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let shown = path.to_string_lossy().to_string();
     audit::log(

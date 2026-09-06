@@ -199,16 +199,18 @@ fn local_ymd_hour(ms: i64) -> Option<(String, u32)> {
     })
 }
 
+/// 单条记录的计价：命中的价格表键与按该单价折算的等价费用（美元）；未定价为 None。
+pub fn price_row<'a>(row: &TokenRow, table: &'a PricingTable) -> Option<(&'a str, f64)> {
+    let (key, price) = crate::model_match::resolve(table, &row.model)?;
+    let usd = row.input * price.input / 1_000_000.0
+        + row.output * price.output / 1_000_000.0
+        + row.cache_read * price.cache_read / 1_000_000.0
+        + row.cache_write * price.cache_write / 1_000_000.0;
+    Some((key, usd))
+}
+
 fn row_equivalent_usd(row: &TokenRow, table: &PricingTable) -> f64 {
-    match crate::model_match::resolve(table, &row.model) {
-        Some((_, price)) => {
-            row.input * price.input / 1_000_000.0
-                + row.output * price.output / 1_000_000.0
-                + row.cache_read * price.cache_read / 1_000_000.0
-                + row.cache_write * price.cache_write / 1_000_000.0
-        }
-        None => 0.0,
-    }
+    price_row(row, table).map_or(0.0, |(_, usd)| usd)
 }
 
 /// 按小时聚合最多覆盖的区间长度（毫秒）：不超过两天的查询才给出 24 小时分布。

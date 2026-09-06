@@ -19,7 +19,7 @@ import {
   parseYmd,
   addLocalDays,
 } from "./usage_data.js";
-import { membershipLabel, planMonthlyUsd } from "./account_format.js";
+import { membershipLabel, planMonthlyUsd, cursorIdentity } from "./account_format.js";
 
 // Cursor 账户全量用量快照：把「全部」跨度的聚合结果渲染成一张 PNG 图片保存到本地。
 //
@@ -136,8 +136,10 @@ function sanitizeFileName(s) {
 function defaultFileName(account) {
   const d = new Date();
   const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
-  const note = sanitizeFileName(account.note || "").slice(0, 40);
-  return `cursor-usage-${note ? `${note}-` : ""}${stamp}.png`;
+  // 文件名用账户昵称（与用量页显示同一口径），未命名账户不带名字段
+  const primary = cursorIdentity(account).primary;
+  const name = sanitizeFileName(primary === "未命名账户" ? "" : primary).slice(0, 40);
+  return `cursor-usage-${name ? `${name}-` : ""}${stamp}.png`;
 }
 
 /* ---------- 绘制小工具 ---------- */
@@ -443,7 +445,7 @@ function renderSnapshot(account, data, appInfo) {
   const sourceColor = data.source === "online" ? t.text : t.warn;
   const planText = planLabel ? (price != null ? `${planLabel} · $${price}/月` : planLabel) : "—";
   const infoCells = [
-    { label: "备注", value: account.note || "—" },
+    { label: "账户", value: cursorIdentity(account).primary },
     { label: "邮箱", value: (status && status.email) || "—" },
     { label: "套餐", value: planText },
     { label: "账户状态", value: aliveText, color: aliveColor },

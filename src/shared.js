@@ -30,6 +30,35 @@ export function el(selector, root = document) {
   return found;
 }
 
+// ---------- 表格操作列的图标按钮（账户表与用量总览表共用） ----------
+
+// feather 风格线性图标，与页面其余 SVG 一致（stroke = currentColor）
+const ACTION_ICONS = {
+  // 人像 + 对勾：把该账户设为本机 Cursor 的登录账户
+  switch:
+    '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/>',
+  refresh:
+    '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+  edit:
+    '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+  delete:
+    '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
+  // 带文字行的文档：原始账单（与用量页工具栏的同款图标）
+  bill:
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+};
+
+/** 紧凑图标按钮：图标 + 悬停提示（title / aria-label）；icon 为 ACTION_ICONS 的键。 */
+export function iconAction(icon, label) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon-action";
+  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ACTION_ICONS[icon]}</svg>`;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  return btn;
+}
+
 export function fmtInt(n) {
   if (n == null || !Number.isFinite(n)) return "—";
   return Math.round(n).toLocaleString("zh-CN");

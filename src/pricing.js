@@ -1,9 +1,12 @@
 import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml } from "./shared.js";
+import { notifyPricingChanged } from "./usage_data.js";
 
 // 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
 // 覆盖写入用户目录 .xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
 // 「在线更新」把远端表写入 settings.json 的 pricingRemote 缓存层（默认 < 在线 < 用户自定义）；
 // 启动时静默检测一次，仅提示存在更新，是否应用由用户手动决定。
+// 保存 / 重置 / 在线更新成功后通过 notifyPricingChanged 作废各窗口的用量聚合缓存并让用量页重算，
+// 否则缓存有效期内等价费用仍按旧价显示。
 
 const state = {
   path: "",
@@ -158,10 +161,11 @@ async function onSave() {
       cacheWrite: e.cacheWrite,
     }));
     const status = await invoke("pricing_save", { models, note: state.note ?? null });
+    notifyPricingChanged();
     await load();
     render();
     setChip(status.models);
-    setStatus("ok", `已保存，共 ${status.models} 个模型生效。`);
+    setStatus("ok", `已保存，共 ${status.models} 个模型生效，用量统计已按新价重算。`);
   } catch (err) {
     setStatus("bad", `保存失败：${resetError(err)}`);
   } finally {
@@ -175,11 +179,12 @@ async function onReset() {
   setStatus("", "重置中…");
   try {
     const view = await invoke("pricing_reset");
+    notifyPricingChanged();
     applyView(view);
     render();
     syncUpdateArea();
     setChip(view.count);
-    setStatus("ok", "已恢复为内置默认价格表（同时清除了在线表缓存）。");
+    setStatus("ok", "已恢复为内置默认价格表（同时清除了在线表缓存），用量统计已按默认价重算。");
     checkUpdate(); // 重置后重新检测：在线表若与默认表不同会再次提示
   } catch (err) {
     setStatus("bad", `重置失败：${resetError(err)}`);
@@ -216,12 +221,13 @@ async function onUpdate() {
   try {
     const url = el("#pricing-update-url").value.trim();
     const view = await invoke("pricing_update_apply", { url: url || null });
+    notifyPricingChanged();
     applyView(view);
     state.update = { available: false, models: 0 };
     render();
     syncUpdateArea();
     setChip(state.entries.length);
-    setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型。`);
+    setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型，用量统计已按新价重算。`);
   } catch (err) {
     setStatus("bad", `在线更新失败：${resetError(err)}`);
   } finally {

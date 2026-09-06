@@ -1,4 +1,4 @@
-﻿import {
+import {
   el,
   listen,
   fmtInt,
@@ -19,6 +19,7 @@
   kindLabel,
   tickDate,
   topSlices,
+  iconAction,
 } from "./shared.js";
 import {
   getCachedAgg as cacheGetAgg,
@@ -37,6 +38,8 @@ import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
   USAGE_CACHE_ORIGIN,
+  USAGE_LOCAL_CLEARED_EVENT,
+  USAGE_PRICING_CHANGED_EVENT,
   forgetUsageCacheFromEvent,
   todayRangeKey,
   dayRangeKey,
@@ -55,6 +58,7 @@ import {
 } from "./accounts.js";
 import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
+import { openRawEvents } from "./raw_events.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
 // Codex / Claude 账户不在本页展示（额度信息见「账户管理」）；它们的账单只能来自本地会话日志，
@@ -355,12 +359,10 @@ function hourlyTail() {
   return `柱图为${scope} 0–24 时分布${rangeIncludesToday() ? "（当前小时高亮）" : ""}`;
 }
 
-function maskToken(token) {
-  const t = String(token || "").trim();
-  if (!t) return "—";
-  return t.length > 12 ? `${t.slice(0, 8)}…` : t;
-}
-/** 单个 Cursor 账户视图的名称：与筛选 chip 的主显示同一口径（手填备注 > 用户名 > 邮箱 > 自动备注）。 */
+/**
+ * Cursor 账户在本页的统一名称（筛选 chip / 总览表 / 图例 / 结果说明 / 原始账单共用）：
+ * 与账户页主显示同一口径——手填备注 > 用户名 > 邮箱 > 自动备注。
+ */
 function accountLabel(account) {
   return cursorIdentity(account).primary;
 }
@@ -630,10 +632,7 @@ function collectDailySources() {
       const r = src.result;
       if (!r || !r.agg) continue;
       sources.push({
-        label:
-          src.kind === "cursor"
-            ? src.account.note || maskToken(src.account.token)
-            : `${deletedLabel(src.record)}（已删除）`,
+        label: src.kind === "cursor" ? accountLabel(src.account) : `${deletedLabel(src.record)}（已删除）`,
         daily: r.agg.daily || [],
         hourly: r.agg.hourly || [],
         showActual: true,
@@ -1110,7 +1109,8 @@ function applyVisibility() {
   for (const key of LOCAL_KEYS) el(LOCAL_SOURCES[key].form).hidden = selection !== key;
   // 各来源账单表：合并视图（全部总览 / 多选 / 已删除）列出参与合并的来源
   el("#usage-overview").hidden = !isMergedView();
-  // 「生成快照」仅对单个 Cursor 账户视图开放（合并视图 / 本地分析无对应存档口径）
+  // 「原始账单」「生成快照」仅对单个 Cursor 账户视图开放（合并视图 / 本地分析无对应存档口径）
+  el("#usage-raw").hidden = isMergedView() || isLocalSelection();
   el("#usage-snapshot").hidden = isMergedView() || isLocalSelection();
   el("#usage-results").hidden = true;
   el("#usage-skeleton").hidden = true;
@@ -1221,6 +1221,29 @@ async function onDeleteUsageData(record) {
   if (panelVisible) loadView(false);
 }
 
+/**
+ * 打开某个 Cursor 账户（在用或已删除保留的数据）在当前时间范围内的原始账单弹窗。
+ * 在用账户在弹窗里清除本地数据后，由 USAGE_LOCAL_CLEARED_EVENT 统一触发视图重载。
+ */
+function openRawBill({ accountId, label, deleted }) {
+  const { start, end } = rangeBounds();
+  void openRawEvents({ accountId, label, deleted, start, end, rangeText: rangeText() });
+}
+
+/**
+ * 某账户的本地用量数据已被清除（本页弹窗或账户页发起）：该账户参与当前视图时作废其结果并重载
+ * （事件库已删，重载会立即重新全量拉取）；页面隐藏时清掉 renderedFor，下次显示自然重载。
+ */
+function onLocalDataCleared(accountId) {
+  const involved = selection === accountId || (isMergedView() && activeSources().cursorAccounts.some((a) => a.id === accountId));
+  if (!involved) return;
+  overviewResults.delete(accountId);
+  renderedAt = 0;
+  lastAttemptAt = 0;
+  if (panelVisible) loadView(false);
+  else renderedFor = "";
+}
+
 /** 当前区间对应的本地扫描参数：「全部」不限起止，其余给首日 0 点与末日次日 0 点。 */
 function scanParams(home, force) {
   const r = currentRange();
@@ -1302,10 +1325,12 @@ function renderOverviewTable() {
   // showActual=false 的来源实扣列恒为 —。统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
   // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
   // 统计中 / 更新中的来源状态格带旋转指示并用强调色，避免与「完成」等静态文案混在一起看不出来。
-  // 已删除账户行：名称旁标「已删除」，状态格放「删除统计数据」按钮（action）。
+  // Cursor 账户行：状态格放「原始账单」按钮；已删除账户行：名称旁标「已删除」，
+  // 状态格放「原始账单」与「删除统计数据」按钮（actions）。
   const sourceRow = ({
     kind,
     label,
+    title,
     deleted,
     stateText,
     stateTitle,
@@ -1316,7 +1341,7 @@ function renderOverviewTable() {
     showActual,
     planText,
     ratioText,
-    action,
+    actions,
   }) => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
@@ -1328,6 +1353,7 @@ function renderOverviewTable() {
     const name = document.createElement("span");
     name.className = "account-note";
     name.textContent = label;
+    name.title = title || label;
     ident.append(tag, name);
     if (deleted) {
       const deletedTag = document.createElement("span");
@@ -1353,12 +1379,10 @@ function renderOverviewTable() {
         stateTd.title = stateTitle || stateText;
       }
     }
-    if (action) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "table-button overview-action";
-      btn.textContent = action.label;
-      btn.title = action.title || action.label;
+    // 行内操作用紧凑图标按钮（与账户页操作列同款），含义放悬停提示，避免文字按钮撑长状态格
+    for (const action of actions || []) {
+      const btn = iconAction(action.icon, action.title || action.label);
+      btn.classList.add("overview-action");
       btn.addEventListener("click", action.onClick);
       stateTd.append(btn);
     }
@@ -1427,9 +1451,12 @@ function renderOverviewTable() {
         totals.planEquiv += agg.totalEquivalentUsd;
         totals.planKnown = true;
       }
+      const label = accountLabel(a);
       sourceRow({
         kind: "cursor",
-        label: a.note || maskToken(a.token),
+        label,
+        // 同名账户靠悬停提示里的邮箱区分（与筛选 chip 的副行同一来源）
+        title: cursorIdentity(a).email || label,
         stateText,
         stateBad,
         statePending,
@@ -1438,6 +1465,14 @@ function renderOverviewTable() {
         showActual: true,
         planText,
         ratioText,
+        actions: [
+          {
+            icon: "bill",
+            label: "原始账单",
+            title: "原始账单：查看该账户在当前时间范围内的逐笔用量事件",
+            onClick: () => openRawBill({ accountId: a.id, label: accountLabel(a), deleted: false }),
+          },
+        ],
       });
     } else if (src.kind === "cursor-deleted") {
       // 已删除账户保留的数据：不再更新，状态列只标错误（切片失败）；套餐取删除时保留的信息
@@ -1470,11 +1505,20 @@ function renderOverviewTable() {
         showActual: true,
         planText,
         ratioText,
-        action: {
-          label: "删除统计数据",
-          title: "彻底删除该已删除账户保留的统计数据",
-          onClick: () => void onDeleteUsageData(record),
-        },
+        actions: [
+          {
+            icon: "bill",
+            label: "原始账单",
+            title: "原始账单：查看该账户保留数据在当前时间范围内的逐笔用量事件",
+            onClick: () => openRawBill({ accountId: record.accountId, label: deletedLabel(record), deleted: true }),
+          },
+          {
+            icon: "delete",
+            label: "删除统计数据",
+            title: "删除统计数据：彻底删除该已删除账户保留的统计数据",
+            onClick: () => void onDeleteUsageData(record),
+          },
+        ],
       });
     } else {
       // 本地 Codex / Claude 分析行：无论有无对应账户都展示；本地日志无账户归属，无套餐可比
@@ -2216,6 +2260,23 @@ export function initUsage() {
       ? [selection]
       : [];
     if (ids.length) void refreshAccounts(ids);
+  });
+  // 原始账单：单账户视图下查看该账户在当前时间范围内的逐笔用量事件（弹窗见 raw_events.js）
+  el("#usage-raw").addEventListener("click", () => {
+    const account = currentAccount();
+    if (account) openRawBill({ accountId: account.id, label: accountLabel(account), deleted: false });
+  });
+  window.addEventListener(USAGE_LOCAL_CLEARED_EVENT, (event) => {
+    const id = event.detail && event.detail.accountId;
+    if (id) onLocalDataCleared(id);
+  });
+  // 价格表变更（保存 / 重置 / 在线更新）：共享缓存已被 notifyPricingChanged 清空，
+  // 当前视图的等价费用是旧价，作废新鲜度后整体重算（后端只按新价重新切片，不联网）
+  window.addEventListener(USAGE_PRICING_CHANGED_EVENT, () => {
+    renderedAt = 0;
+    lastAttemptAt = 0;
+    if (panelVisible) loadView(false);
+    else renderedFor = "";
   });
   // 生成全量用量快照图片：数据获取（在线 / 本地存档回退）与绘制见 snapshot.js
   const snapshotBtn = el("#usage-snapshot");
