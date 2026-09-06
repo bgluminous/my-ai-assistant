@@ -57,7 +57,7 @@ fn toggle_panel(app: &AppHandle, x: f64, y: f64) {
     }
     let size = win
         .outer_size()
-        .unwrap_or_else(|_| tauri::PhysicalSize::new(350, 520));
+        .unwrap_or_else(|_| tauri::PhysicalSize::new(400, 600));
     let px = (x - f64::from(size.width)).max(0.0);
     let py = (y - f64::from(size.height) - 12.0).max(0.0);
     let _ = win.set_position(tauri::PhysicalPosition::new(px as i32, py as i32));

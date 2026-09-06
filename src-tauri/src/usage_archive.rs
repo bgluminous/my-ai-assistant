@@ -278,6 +278,7 @@ async fn sync_events(archive: &mut UsageArchive, token: &str, full: bool) -> Res
 
 /// 按 [start, end]（unix 毫秒，闭区间，None = 不限）切片并按当前价格表聚合。
 /// 有界范围只计入带时间戳的事件；「全部」（两端都为 None）连无时间戳的事件一起计入。
+/// 区间不超过两天时按小时序列覆盖区间内的日期（任意历史日期都能画 24 小时柱图）。
 fn slice(archive: &UsageArchive, start: Option<i64>, end: Option<i64>) -> UsageAggregate {
     let bounded = start.is_some() || end.is_some();
     let rows: Vec<TokenRow> = archive
@@ -291,7 +292,8 @@ fn slice(archive: &UsageArchive, start: Option<i64>, end: Option<i64>) -> UsageA
         })
         .map(from_tuple)
         .collect();
-    pricing::aggregate_and_price(rows, &pricing::load())
+    let hourly_dates = pricing::hourly_dates_for(start, end);
+    pricing::aggregate_and_price_for(rows, &pricing::load(), hourly_dates.as_deref())
 }
 
 fn status_field(acc: &Account, key: &str) -> Option<String> {

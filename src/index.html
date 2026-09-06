@@ -191,14 +191,31 @@
             <div id="usage-sources" class="chip-row" role="group" aria-label="统计对象"></div>
           </div>
           <div class="toolbar-group">
-            <span class="toolbar-label">时间跨度</span>
-            <!-- 时间跨度二级 TAB：默认今天；本地 ChatGPT 视图与账户视图共用 -->
-            <div id="usage-span" class="span-tabs" role="tablist" aria-label="时间跨度">
-              <button type="button" class="seg active" role="tab" aria-selected="true" data-span="today">今天</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-span="yesterday">昨天</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-span="7">近 7 天</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-span="30">近 30 天</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-span="0">全部</button>
+            <span class="toolbar-label">时间范围</span>
+            <!-- 周期：日 / 周 / 月 / 全部 / 自定义；默认「日」= 今天。所有视图共用 -->
+            <div id="usage-period" class="span-tabs" role="tablist" aria-label="时间周期">
+              <button type="button" class="seg active" role="tab" aria-selected="true" data-period="day">日</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="week">周</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="month">月</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="all">全部</button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="custom">自定义</button>
+            </div>
+            <!-- 区间导航：左右滑动一个周期（自定义按区间长度平移），不越过今天；「全部」时隐藏 -->
+            <div id="usage-range-nav" class="range-nav">
+              <button id="usage-range-prev" class="icon-action" type="button" title="上一个周期" aria-label="上一个周期">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <span id="usage-range-label" class="range-label">今天</span>
+              <button id="usage-range-next" class="icon-action" type="button" title="下一个周期" aria-label="下一个周期" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+            <!-- 自定义起止日期（含首末日，末日不晚于今天） -->
+            <div id="usage-range-custom" class="range-custom" hidden>
+              <input id="usage-range-start" type="date" aria-label="开始日期" />
+              <span class="muted small">～</span>
+              <input id="usage-range-end" type="date" aria-label="结束日期" />
+              <button id="usage-range-apply" class="secondary compact" type="button">查询</button>
             </div>
             <div class="toolbar-side">
               <span id="usage-updated" class="muted small"></span>

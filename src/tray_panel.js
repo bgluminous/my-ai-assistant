@@ -8,6 +8,7 @@ import {
   isUsageCacheFresh,
   localYmd,
   dayStartMs,
+  addLocalDays,
   todayRangeKey,
   dayRangeKey,
   peekAggForDay,
@@ -28,7 +29,7 @@ import {
 } from "./usage_data.js";
 
 // 托盘面板：托盘图标单击弹出的简易面板，分四个 tab：
-// 总览（今天 / 昨天的 token 用量合计，可切换）/ Cursor / ChatGPT / Claude（账户列表，
+// 总览（所选日的 token 用量合计，按天前后滑动）/ Cursor / ChatGPT / Claude（账户列表，
 // 查看状态额度、单账户刷新 / 一键切换、全部刷新），增删改等完整功能在主窗口。
 // 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
 
@@ -44,27 +45,30 @@ const remoteRefreshingIds = new Set();
 function isRefreshing(id) {
   return refreshingIds.has(id) || remoteRefreshingIds.has(id);
 }
-// 总览所选统计日："today" | "yesterday"，仅内存保存（应用重启回到今天）。
-// 昨天用完整自然日键 day:YYYY-MM-DD，与主窗口用量页「昨天」跨度共用同一份缓存。
-let trayDay = "today";
+// 总览所选统计日（本地 0 点毫秒），左右箭头按天前后滑动，不越过今天；仅内存保存（应用重启回到今天）。
+// 今天用 today:YYYY-MM-DD 键，其它日子用完整自然日键 day:YYYY-MM-DD，与主窗口用量页「日」周期共用缓存。
+let trayDayMs = dayStartMs(0);
 
 function dayIsPast() {
-  return trayDay === "yesterday";
+  return trayDayMs < dayStartMs(0);
 }
 /** 所选统计日的口径：本地 0 点起止（终点为次日 0 点）、YYYY-MM-DD、文案用词。 */
 function dayScope() {
-  const offset = dayIsPast() ? -1 : 0;
-  const start = dayStartMs(offset);
-  const end = dayStartMs(offset + 1);
+  const start = trayDayMs;
+  const end = addLocalDays(new Date(start), 1).getTime();
   const ymd = localYmd(new Date(start));
+  const past = dayIsPast();
+  const yesterday = start === dayStartMs(-1);
+  const d = new Date(start);
+  const word = !past ? "今日" : yesterday ? "昨日" : `${d.getMonth() + 1}月${d.getDate()}日`;
   return {
-    past: dayIsPast(),
+    past,
     start,
     end,
     ymd,
-    aggKey: dayIsPast() ? dayRangeKey(ymd) : todayRangeKey(ymd),
-    word: dayIsPast() ? "昨日" : "今日",
-    tipWord: dayIsPast() ? "昨天" : "今天",
+    aggKey: past ? dayRangeKey(ymd) : todayRangeKey(ymd),
+    word,
+    tipWord: !past ? "今天" : yesterday ? "昨天" : word,
   };
 }
 
@@ -169,7 +173,8 @@ function setTab(tab) {
   trayTab = tab;
   try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
   applyTab();
-  if (tab === "overview") void loadOverview(false);
+  // 切到总览属于主动查看：数据超过 5 分钟就强制同步
+  if (tab === "overview") void loadOverview({ viewing: true });
   else render();
 }
 
@@ -413,6 +418,7 @@ function render() {
 
 /* ---------- 数据 ---------- */
 
+/** 重载账户列表（缓存状态，不刷新账户）；面板被唤起属于主动查看，总览按 5 分钟新鲜度补拉。 */
 async function load() {
   try {
     const view = await invoke("accounts_list");
@@ -420,7 +426,7 @@ async function load() {
     const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
     render();
-    if (trayTab === "overview") void loadOverview(false);
+    if (trayTab === "overview") void loadOverview({ viewing: true });
   } catch (error) {
     setStatus("bad", `加载失败：${resetError(error)}`);
   }
@@ -484,21 +490,39 @@ function overviewTip(text, statAtMs = 0) {
   syncOverviewLoading();
 }
 
-/** 头部统计日标签与切换按钮选中态跟随 trayDay。 */
+/**
+ * 头部统计日标签与日期导航跟随所选日：标签「今日 / 昨日 / M月D日已用」，导航显示「今天 / 昨天 /
+ * MM-DD 周X」（紧凑，避免挤压左侧标签与数据时间），完整日期放悬停提示；到今天时禁用「下一天」。
+ */
 function applyDayHead() {
-  el("#tray-ov-label").textContent = `${dayScope().word}已用`;
-  for (const btn of el("#tray-day").querySelectorAll("[data-day]")) {
-    const on = btn.dataset.day === trayDay;
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-selected", on ? "true" : "false");
-  }
+  const scope = dayScope();
+  el("#tray-ov-label").textContent = `${scope.word}已用`;
+  const d = new Date(scope.start);
+  const label = el("#tray-day-label");
+  label.textContent = !scope.past
+    ? "今天"
+    : scope.start === dayStartMs(-1)
+    ? "昨天"
+    : `${scope.ymd.slice(5)} 周${"日一二三四五六"[d.getDay()]}`;
+  label.title = scope.ymd;
+  el("#tray-day-next").disabled = !scope.past;
 }
 
-function setDay(day) {
-  if ((day !== "today" && day !== "yesterday") || day === trayDay) return;
-  trayDay = day;
+/** 面板重新打开时统计日回到今天（用户上次翻到的历史日期不保留）。 */
+function resetDayToToday() {
+  const today = dayStartMs(0);
+  if (trayDayMs === today) return;
+  trayDayMs = today;
   applyDayHead();
-  void loadOverview(false);
+}
+
+/** 按天前后滑动统计日（不越过今天），切换后按主动查看口径加载。 */
+function shiftDay(direction) {
+  const next = addLocalDays(new Date(trayDayMs), direction).getTime();
+  if (next > dayStartMs(0)) return;
+  trayDayMs = next;
+  applyDayHead();
+  void loadOverview({ viewing: true });
 }
 
 /* ---------- 总览图表（Chart.js 全局脚本，缺失时静默跳过） ---------- */
@@ -562,8 +586,8 @@ function chartMotion() {
   };
 }
 
-/** 图表小节：标题 + 定高画布容器，返回 { wrap, label, canvas, box }。 */
-function chartSection(title, height) {
+/** 图表小节：标题 + 定高画布容器 + 图例列表，返回 { wrap, label, canvas, box, legend }。 */
+function chartSection(title, height, { legendRow = false } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "tray-chart";
   const label = document.createElement("div");
@@ -574,8 +598,30 @@ function chartSection(title, height) {
   box.style.height = `${height}px`;
   const canvas = document.createElement("canvas");
   box.append(canvas);
-  wrap.append(label, box);
-  return { wrap, label, canvas, box };
+  const legend = document.createElement("ul");
+  legend.className = `tray-legend${legendRow ? " tray-legend-row" : ""}`;
+  legend.hidden = true;
+  wrap.append(label, box, legend);
+  return { wrap, label, canvas, box, legend };
+}
+
+/** 填充图例（只展示，不做点击切换）：色块 + 名称，超长省略，悬停看全名与数值。 */
+function fillLegend(list, items) {
+  list.replaceChildren(
+    ...items.map(({ label, title, color }) => {
+      const li = document.createElement("li");
+      const swatch = document.createElement("span");
+      swatch.className = "tray-legend-swatch";
+      swatch.style.background = color;
+      const text = document.createElement("span");
+      text.className = "tray-legend-label";
+      text.textContent = label;
+      li.title = title || label;
+      li.append(swatch, text);
+      return li;
+    })
+  );
+  list.hidden = !items.length;
 }
 
 function shortModel(name) {
@@ -720,6 +766,14 @@ function syncMiniPie(key, section, rows, cfg) {
   chart.$shares = rows;
   chart.$hoverKey = "";
   chart.update();
+  fillLegend(
+    section.legend,
+    rows.map((r, i) => ({
+      label: cfg.labelOf(r),
+      title: `${cfg.titleOf(r)}：${cfg.fmtValue(cfg.valueOf(r))}`,
+      color: colors[i],
+    }))
+  );
 }
 
 // 三联饼图的差异配置：模型 Token / 模型费用 / 来源
@@ -855,6 +909,10 @@ function syncHourlyStack(sources, scope) {
     return;
   }
   wrap.hidden = false;
+  fillLegend(
+    overviewDom.bar.legend,
+    list.map((s, i) => ({ label: s.label, title: s.label, color: baseColors[i] }))
+  );
   if (hourlyStack) {
     hourlyStack.data.labels = labels;
     hourlyStack.data.datasets = datasets;
@@ -879,8 +937,9 @@ function ensureOverviewDom() {
   const usd = document.createElement("span");
   usd.className = "tray-ov-usd";
   total.append(tokens, usd);
-  // 图表顺序与统计页一致：24 小时柱在上，下方三个饼图三等分并排；柱图标题随所选日更新
-  const bar = chartSection("今日 Token（按小时）", 128);
+  // 图表顺序与统计页一致：24 小时柱在上（图例横排在图下），下方三个饼图三等分并排（各带竖排图例）；
+  // 柱图标题随所选日更新
+  const bar = chartSection("今日 Token（按小时）", 128, { legendRow: true });
   bar.wrap.hidden = true;
   const tokenPie = chartSection("模型 Token", 104);
   tokenPie.wrap.hidden = true;
@@ -1096,14 +1155,29 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
   return data;
 }
 
-function needsDayFetch(peeked, force) {
-  return force || !peeked || !isUsageCacheFresh(peeked.entry.at);
+// 用户主动查看总览（打开面板 / 切到总览 tab / 切换统计日）时数据最多允许多旧：超过就强制同步，
+// 不受定时刷新间隔决定的缓存有效期（可能长达 24 小时）影响。
+// 后台事件（账户变化、其它窗口写入缓存）触发的重载仍按缓存有效期判断，避免连带联网。
+const VIEW_MAX_AGE_MS = 5 * 60_000;
+
+/**
+ * 某来源是否需要拉取：没有缓存、强制刷新，或缓存超过允许的最大年龄
+ * （主动查看时为 VIEW_MAX_AGE_MS，否则为缓存有效期）。
+ */
+function needsDayFetch(peeked, { force, maxAgeMs }) {
+  if (force || !peeked) return true;
+  if (maxAgeMs != null) return Date.now() - peeked.entry.at > maxAgeMs;
+  return !isUsageCacheFresh(peeked.entry.at);
 }
 
 let overviewTail = Promise.resolve();
 
-function loadOverview(force) {
-  const run = () => loadOverviewInner(!!force);
+/**
+ * 排队加载总览。opts.force 为刷新按钮的强制刷新（全部来源立即重拉）；
+ * opts.viewing 为用户主动查看：超过 VIEW_MAX_AGE_MS 的来源强制同步，其余用缓存。
+ */
+function loadOverview(opts = {}) {
+  const run = () => loadOverviewInner(opts);
   overviewTail = overviewTail.then(run, run);
   return overviewTail;
 }
@@ -1113,11 +1187,14 @@ function loadOverview(force) {
  * （今天写 today: 键、昨天写 day: 键，与主窗口用量页互通）。加载期间用户切了统计日，
  * 本轮结果不再渲染，交给随后排队的新一轮。
  */
-async function loadOverviewInner(force) {
+async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const scope = dayScope();
-  const stillCurrent = () => trayDay === (scope.past ? "yesterday" : "today");
+  const stillCurrent = () => trayDayMs === scope.start;
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const peek = dayPeekers(scope);
+  const rule = { force, maxAgeMs: viewing ? VIEW_MAX_AGE_MS : null };
+  // 主动查看时过期的来源要真正同步（sync 模式），不能让后端按更长的有效期判定为新鲜而只切片
+  const fetchForce = force || viewing;
 
   const cached = buildOverviewData(scope);
 
@@ -1126,27 +1203,27 @@ async function loadOverviewInner(force) {
     ? { start: scope.start, end: scope.end - 1 }
     : { start: scope.start, end: Date.now() };
   const scanArgs = scope.past
-    ? { sinceMs: scope.start, untilMs: scope.end, force }
-    : { sinceMs: scope.start, force };
+    ? { sinceMs: scope.start, untilMs: scope.end, force: fetchForce }
+    : { sinceMs: scope.start, force: fetchForce };
 
   const jobs = [];
   const fetchErrors = new Map();
   for (const a of cursorAccounts) {
-    if (!needsDayFetch(peek.agg(a.id), force)) continue;
+    if (!needsDayFetch(peek.agg(a.id), rule)) continue;
     jobs.push(
-      fetchCursorAggregate(a, scope.aggKey, { ...aggRange, force }).catch((error) => {
+      fetchCursorAggregate(a, scope.aggKey, { ...aggRange, force: fetchForce }).catch((error) => {
         fetchErrors.set(a.id, resetError(error));
       })
     );
   }
-  if (needsDayFetch(peek.scan(""), force)) {
+  if (needsDayFetch(peek.scan(""), rule)) {
     jobs.push(
       fetchCodexScan(scanArgs).catch((error) => {
         fetchErrors.set("local", resetError(error));
       })
     );
   }
-  if (needsDayFetch(peek.claude(""), force)) {
+  if (needsDayFetch(peek.claude(""), rule)) {
     jobs.push(
       fetchClaudeScan(scanArgs).catch((error) => {
         fetchErrors.set("local-claude", resetError(error));
@@ -1502,7 +1579,7 @@ setupDesktopGuards();
 el("#tray-refresh").addEventListener("click", () => {
   if (trayTab === "overview") {
     if (accounts.length) void refreshAll();
-    void loadOverview(true);
+    void loadOverview({ force: true });
     return;
   }
   void refreshAll();
@@ -1511,17 +1588,16 @@ el("#tray-open").addEventListener("click", () => { void invoke("tray_open_main")
 for (const btn of document.querySelectorAll(".tray-tab")) {
   btn.addEventListener("click", () => setTab(btn.dataset.tab));
 }
-// 总览统计日切换：今天 / 昨天
-el("#tray-day").addEventListener("click", (event) => {
-  const btn = event.target instanceof Element ? event.target.closest("[data-day]") : null;
-  if (btn) setDay(btn.dataset.day);
-});
+// 总览统计日：左右箭头按天前后滑动
+el("#tray-day-prev").addEventListener("click", () => shiftDay(-1));
+el("#tray-day-next").addEventListener("click", () => shiftDay(1));
 applyTab();
 applyDayHead();
-// 面板每次被托盘点击唤起（获得焦点）时重载缓存数据；
+// 面板每次被托盘点击唤起（获得焦点）时重载缓存数据，总览按主动查看口径补拉（超过 5 分钟强制同步）；
 // 只清状态条、重绘当前 tab，不触碰切换弹窗（进行中的弹窗须保持原状）
 window.addEventListener("focus", () => {
   clearStatus();
+  resetDayToToday();
   void load();
 });
 // 订阅后端广播：主窗口刷新 / 增删改账户时，开着的面板实时同步（获焦重载仍保留作兜底）
@@ -1535,7 +1611,8 @@ listen("accounts-changed", (event) => {
   const u = Number(view && view.intervalMinutes);
   if (Number.isFinite(u)) setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
   render();
-  if (trayTab === "overview") void loadOverview(false);
+  // 后台事件触发的重载：按缓存有效期判断，不按主动查看的 5 分钟口径
+  if (trayTab === "overview") void loadOverview();
 }).catch(() => {
   /* 非 Tauri 环境（浏览器直开调试）无事件桥，忽略 */
 });
@@ -1555,7 +1632,7 @@ function scheduleOverviewFromCache(key) {
   forgetUsageCacheFromEvent(key);
   if (trayTab !== "overview") return;
   clearTimeout(usageCacheTimer);
-  usageCacheTimer = setTimeout(() => { void loadOverview(false); }, 250);
+  usageCacheTimer = setTimeout(() => { void loadOverview(); }, 250);
 }
 window.addEventListener("storage", (event) => {
   if (!event.key || !event.key.startsWith(USAGE_CACHE_PREFIX)) return;

@@ -185,9 +185,8 @@ pub struct UsageAggregate {
     pub total_cache_write_usd: f64,
     /// 按本地自然日合计，日期升序。无时间戳的行不在此列。
     pub daily: Vec<DailyUsage>,
-    /// 聚合执行日的今天与昨天的按小时合计，按日期、小时升序，仅含有数据的小时。
-    /// 无论统计范围多长都只记这两天（最多 48 条），供「今天」/「昨天」跨度的 24h 柱图；
-    /// 前端按 date 取所需的那一天。
+    /// 按小时合计，按日期、小时升序，仅含有数据的小时。查询区间不超过两天时覆盖区间内的日期，
+    /// 否则只记聚合执行日的今天与昨天（供托盘与单日视图的 24h 柱图）；前端按 date 取所需的那一天。
     pub hourly: Vec<HourlyUsage>,
 }
 
@@ -212,18 +211,52 @@ fn row_equivalent_usd(row: &TokenRow, table: &PricingTable) -> f64 {
     }
 }
 
-pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAggregate {
+/// 按小时聚合最多覆盖的区间长度（毫秒）：不超过两天的查询才给出 24 小时分布。
+const HOURLY_MAX_SPAN_MS: i64 = 2 * 86_400_000 + 60_000;
+
+/// 统计区间 [start_ms, end_ms]（unix 毫秒，闭区间）内需要按小时聚合的本地日期列表。
+/// 任一端缺失或跨度超过两天返回 None（调用方退回默认的今天 + 昨天）。
+pub fn hourly_dates_for(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<Vec<String>> {
+    let (start, end) = (start_ms?, end_ms?);
+    if end < start || end - start > HOURLY_MAX_SPAN_MS {
+        return None;
+    }
+    let first = DateTime::from_timestamp_millis(start)?.with_timezone(&Local).date_naive();
+    let last = DateTime::from_timestamp_millis(end)?.with_timezone(&Local).date_naive();
+    let mut dates = Vec::new();
+    let mut day = first;
+    while day <= last && dates.len() < 4 {
+        dates.push(day.format("%Y-%m-%d").to_string());
+        day = day.succ_opt()?;
+    }
+    Some(dates)
+}
+
+/// 默认按小时聚合的日期：今天与昨天（昨天用日历日回退而非减 24 小时，夏令时切换日也不会算错）。
+fn default_hourly_dates() -> Vec<String> {
+    let today = Local::now().date_naive();
+    let mut dates = vec![today.format("%Y-%m-%d").to_string()];
+    if let Some(y) = today.pred_opt() {
+        dates.push(y.format("%Y-%m-%d").to_string());
+    }
+    dates
+}
+
+/// 聚合并折算等价费用。hourly_dates 指定需要按小时聚合的本地日期（任意日期，最多几天），
+/// None 时退回今天 + 昨天。
+pub fn aggregate_and_price_for(
+    rows: Vec<TokenRow>,
+    table: &PricingTable,
+    hourly_dates: Option<&[String]>,
+) -> UsageAggregate {
     let mut map: BTreeMap<String, ModelUsage> = BTreeMap::new();
     let mut daily_map: BTreeMap<String, DailyUsage> = BTreeMap::new();
     let mut daily_models: BTreeMap<String, BTreeMap<String, DailyModelUsage>> = BTreeMap::new();
-    // 今天与昨天的按小时合计：(date, hour) -> (tokens, equivalent_usd, actual_usd)。
-    // 昨天用日历日回退（而非减 24 小时），夏令时切换日也不会算错日期。
-    let today = Local::now().date_naive();
-    let today_ymd = today.format("%Y-%m-%d").to_string();
-    let yesterday_ymd = today
-        .pred_opt()
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_default();
+    // 按小时合计：(date, hour) -> (tokens, equivalent_usd, actual_usd)，只记 hourly_dates 里的日期
+    let hourly_dates: Vec<String> = match hourly_dates {
+        Some(list) => list.to_vec(),
+        None => default_hourly_dates(),
+    };
     let mut hourly_map: BTreeMap<(String, u32), (f64, f64, f64)> = BTreeMap::new();
     for mut r in rows {
         // 同一模型的不同思考 / 效率等级并入一行统计（价格表精确收录的名字保持独立）
@@ -256,7 +289,7 @@ pub fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAg
             let tokens = r.input + r.output + r.cache_read + r.cache_write;
             let equivalent_usd = row_equivalent_usd(&r, table);
             let actual_usd = r.actual_cents / 100.0;
-            if date == today_ymd || date == yesterday_ymd {
+            if hourly_dates.contains(&date) {
                 let slot = hourly_map
                     .entry((date.clone(), hour))
                     .or_insert((0.0, 0.0, 0.0));
@@ -656,6 +689,11 @@ pub async fn pricing_update_apply(url: Option<String>) -> Result<PricingView, St
 #[cfg(test)]
 mod daily_tests {
     use super::*;
+
+    /// 测试用：按默认（今天 + 昨天）小时聚合。
+    fn aggregate_and_price(rows: Vec<TokenRow>, table: &PricingTable) -> UsageAggregate {
+        aggregate_and_price_for(rows, table, None)
+    }
 
     fn row(model: &str, tokens: f64, ms: Option<i64>) -> TokenRow {
         TokenRow {

@@ -573,7 +573,9 @@ fn scan_sessions_blocking(
         }
     }
 
-    let aggregate = pricing::aggregate_and_price(rows, &table);
+    // until_ms 为开区间终点，按小时聚合的日期按闭区间末毫秒推算
+    let hourly_dates = pricing::hourly_dates_for(since_ms, until_ms.map(|u| u - 1));
+    let aggregate = pricing::aggregate_and_price_for(rows, &table, hourly_dates.as_deref());
     Ok(CodexScan {
         aggregate,
         files_scanned,

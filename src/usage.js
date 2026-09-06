@@ -1,4 +1,4 @@
-import {
+﻿import {
   el,
   listen,
   fmtInt,
@@ -40,7 +40,7 @@ import {
   forgetUsageCacheFromEvent,
   todayRangeKey,
   dayRangeKey,
-  todayStartMs,
+  multiDayRangeKey,
   dayStartMs,
   localYmd,
   addLocalDays,
@@ -64,11 +64,10 @@ import { generateCursorSnapshot } from "./snapshot.js";
 // - 单选一项：专属视图——单个 Cursor 账户（可生成快照）/ 本地 Codex 或 Claude 用量分析（带目录
 //   输入与重新扫描）/「已删除」（全部已删除账户合并）；
 // - 选中两项及以上：所选来源的合并视图，结构与全部总览相同（卡片 / 图表 / 明细 + 各来源账单表）。
-// 时间跨度为二级 TAB（今天 / 昨天 / 近 7 / 30 天 / 全部），默认今天；
-// 「今天」用与托盘总览相同的今日缓存键（today:YYYY-MM-DD），两边数据互通；
-// 「昨天」用完整自然日键（day:YYYY-MM-DD）。这两个单日跨度下按日图切换为该日 0–23 时的
-// 24 小时柱（数据来自聚合结果的 hourly 序列，后端只记今天与昨天两天）。
-// 所有柱图横轴统一从左到右由旧到新。
+// 时间范围 = 周期（日 / 周 / 月 / 全部）+ 左右滑动一个周期，或自定义起止日期（按区间长度平移）；
+// 默认「日」= 今天。缓存键：今天 today:YYYY-MM-DD（与托盘共用）、已结束的单日 day:YYYY-MM-DD、
+// 多日 range:首日_末日、全部 "0"。不超过两天的区间按小时柱图（后端按区间内日期给出 hourly），
+// 其余按日柱图，周 / 月按完整日历区间列轴（未到的日子留空）。所有柱图横轴统一从左到右由旧到新。
 //
 // 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v4:）。
 // 打开视图时先用缓存（含过期缓存）立即渲染，再在后台拉取最新数据原地刷新（stale-while-revalidate）。
@@ -99,7 +98,13 @@ const PREFETCH_MIN_AGE_MS = 60_000;
 // "all"（空集）| 单个键（单选，走专属视图）| "multi"（两项及以上，合并视图）
 const selectedKeys = new Set();
 let selection = "all";
-let span = "today"; // 时间跨度："today" | "yesterday" | "7" | "30" | "0"（全部）
+// 时间范围：period 为周期类型，anchor 为周期内任意一天（本地 0 点），日 / 周 / 月由它定位当前区间，
+// 左右滑动即移动 anchor 一个周期；custom 用 customStart / customEnd（本地 0 点，含末日），
+// 滑动按区间长度平移；all 无区间。
+let period = "day"; // "day" | "week" | "month" | "all" | "custom"
+let anchor = new Date(dayStartMs(0));
+let customStart = new Date(dayStartMs(-6));
+let customEnd = new Date(dayStartMs(0));
 let loadSeq = 0; // 加载序号，防止过期的异步结果覆盖新视图
 let loading = false;
 let panelVisible = false;
@@ -164,7 +169,8 @@ function clearStatus() {
   dismissToast("usage");
 }
 
-const SPAN_LABELS = { today: "今天", yesterday: "昨天", 7: "近 7 天", 30: "近 30 天", 0: "全部" };
+const PERIODS = ["day", "week", "month", "all", "custom"];
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
 // 两个本地扫描来源（本地 Codex / Claude Code 会话日志）的全部差异点：总览行、图例、
 // 类型标签、单来源视图的表单元素与缓存 / 拉取入口，其余逻辑按此配置驱动一份实现。
@@ -238,51 +244,115 @@ function localHomeRaw(key) {
   return el(LOCAL_SOURCES[key].homeInput).value.trim();
 }
 
-function isTodaySpan() {
-  return span === "today";
+/* ---------- 时间范围（周期 + 滑动 / 自定义区间） ---------- */
+
+function isAllPeriod() {
+  return period === "all";
 }
-function isYesterdaySpan() {
-  return span === "yesterday";
+/** 本地自然日 0 点的 Date（按日历日推算，夏令时切换日也正确）。 */
+function dayStart(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
-/** 单日跨度（今天 / 昨天）：按小时柱图、隐藏与月费对比的倍数。 */
-function isSingleDaySpan() {
-  return isTodaySpan() || isYesterdaySpan();
+/** 所在周的周一 0 点。 */
+function weekStart(d) {
+  const base = dayStart(d);
+  const offset = (base.getDay() + 6) % 7; // 周一 = 0
+  return addLocalDays(base, -offset);
 }
-/** 单日跨度所展示的那一天（本地 YYYY-MM-DD）。 */
-function focusYmd() {
-  return localYmd(new Date(dayStartMs(isYesterdaySpan() ? -1 : 0)));
-}
-/** 单日跨度的缓存键：今天 today:YYYY-MM-DD（与托盘共用），昨天 day:YYYY-MM-DD（完整自然日）。 */
-function singleDayKey() {
-  return isYesterdaySpan() ? dayRangeKey(focusYmd()) : todayRangeKey();
-}
-/** Cursor 聚合的缓存键：单日跨度见 singleDayKey，其余为天数 / 0。 */
-function rangeKey() {
-  return isSingleDaySpan() ? singleDayKey() : span;
-}
-/** 本地 Codex / Claude 扫描的缓存键：单日跨度同上，其余为天数 / all。 */
-function scanKey() {
-  return isSingleDaySpan() ? singleDayKey() : span === "0" ? "all" : span;
-}
-function rangeBounds() {
-  if (isTodaySpan()) return { start: todayStartMs(), end: Date.now() };
-  // 昨天：[昨日 0 点, 今日 0 点)，终点退 1ms 避免把今天第一毫秒的事件算进去
-  if (isYesterdaySpan()) return { start: dayStartMs(-1), end: dayStartMs(0) - 1 };
-  const days = Number(span);
-  if (days > 0) {
-    const end = Date.now();
-    return { start: end - days * 86400 * 1000, end };
+/**
+ * 当前区间的首日与末日（本地 0 点 Date，末日含当天）；「全部」返回 null。
+ * 周 / 月为完整日历周期（本周 / 本月含尚未到来的日子），拉取与轴标签各自截到今天。
+ */
+function currentRange() {
+  if (isAllPeriod()) return null;
+  if (period === "custom") return { startDate: customStart, endDate: customEnd };
+  if (period === "day") return { startDate: anchor, endDate: anchor };
+  if (period === "week") {
+    const start = weekStart(anchor);
+    return { startDate: start, endDate: addLocalDays(start, 6) };
   }
-  return { start: null, end: null };
+  const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+  return { startDate: start, endDate: new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0) };
 }
+/** 区间天数（含首末日）；「全部」为 0。 */
+function rangeDays() {
+  const r = currentRange();
+  if (!r) return 0;
+  return Math.round((r.endDate.getTime() - r.startDate.getTime()) / 86_400_000) + 1;
+}
+/** 区间是否包含今天（进行中的数据，柱图高亮当前小时）。 */
+function rangeIncludesToday() {
+  const r = currentRange();
+  if (!r) return true;
+  const today = dayStartMs(0);
+  return r.startDate.getTime() <= today && today <= r.endDate.getTime();
+}
+/** 不超过两天的区间按小时柱图，其余按日柱图。 */
+function isHourlyMode() {
+  const days = rangeDays();
+  return days > 0 && days <= 2;
+}
+/** 单日区间所展示的那一天（本地 YYYY-MM-DD）；多日区间返回首日。 */
+function focusYmd() {
+  const r = currentRange();
+  return localYmd(r ? r.startDate : new Date());
+}
+/**
+ * Cursor 聚合的缓存键：全部为 "0"；单日为 today:YYYY-MM-DD（今天，与托盘共用）或
+ * day:YYYY-MM-DD（已结束的完整自然日）；多日为 range:首日_末日（含未到来的日子也按日历区间命名）。
+ */
+function rangeKey() {
+  const r = currentRange();
+  if (!r) return "0";
+  const start = localYmd(r.startDate);
+  const end = localYmd(r.endDate);
+  if (start === end) return start === localYmd() ? todayRangeKey(start) : dayRangeKey(start);
+  return multiDayRangeKey(start, end);
+}
+/** 本地 Codex / Claude 扫描的缓存键：与 rangeKey 一致，「全部」为 all。 */
+function scanKey() {
+  return isAllPeriod() ? "all" : rangeKey();
+}
+/** 拉取用的毫秒闭区间：首日 0 点到末日 24 点前 1ms，末日在未来时截到当前时刻；「全部」不限。 */
+function rangeBounds() {
+  const r = currentRange();
+  if (!r) return { start: null, end: null };
+  const end = Math.min(addLocalDays(r.endDate, 1).getTime() - 1, Date.now());
+  return { start: r.startDate.getTime(), end };
+}
+function fmtMd(d) {
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+/** 当前区间的可读名称（工具栏导航与结果区说明共用）。 */
 function rangeText() {
-  return SPAN_LABELS[span] || "全部";
+  const r = currentRange();
+  if (!r) return "全部";
+  const todayMs = dayStartMs(0);
+  if (period === "day") {
+    const ms = r.startDate.getTime();
+    if (ms === todayMs) return "今天";
+    if (ms === dayStartMs(-1)) return "昨天";
+    return `${localYmd(r.startDate)}（周${WEEKDAYS[r.startDate.getDay()]}）`;
+  }
+  if (period === "week") {
+    const prefix = weekStart(new Date(todayMs)).getTime() === r.startDate.getTime() ? "本周 " : "";
+    return `${prefix}${fmtMd(r.startDate)} ～ ${fmtMd(r.endDate)}`;
+  }
+  if (period === "month") {
+    const now = new Date(todayMs);
+    const current = now.getFullYear() === r.startDate.getFullYear() && now.getMonth() === r.startDate.getMonth();
+    return `${current ? "本月 " : ""}${r.startDate.getFullYear()} 年 ${r.startDate.getMonth() + 1} 月`;
+  }
+  const same = r.startDate.getTime() === r.endDate.getTime();
+  return same
+    ? `${localYmd(r.startDate)}（周${WEEKDAYS[r.startDate.getDay()]}）`
+    : `${localYmd(r.startDate)} ～ ${localYmd(r.endDate)}（${rangeDays()} 天）`;
 }
-/** 单日跨度的说明尾巴（结果区 meta 文案）。 */
-function singleDayTail() {
-  return isYesterdaySpan()
-    ? `柱图为昨日（${focusYmd()}）0–24 时分布`
-    : "柱图为今日 0–24 时分布（当前小时高亮）";
+/** 按小时柱图的说明尾巴（结果区 meta 文案）。 */
+function hourlyTail() {
+  const days = rangeDays();
+  const scope = days === 1 ? `该日（${focusYmd()}）` : "区间内两天";
+  return `柱图为${scope} 0–24 时分布${rangeIncludesToday() ? "（当前小时高亮）" : ""}`;
 }
 
 function maskToken(token) {
@@ -448,18 +518,21 @@ function renderAggregate(agg, { showActual, metaText, plan, dailySources }) {
 }
 
 /** 按日图的横轴天数（仅多日跨度使用；今天 / 昨天走 24h 小时图）。全部 = 0（从最早日期起）。 */
-function chartRangeDays() {
-  const n = Number(span);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-/** 按日图横轴日期，从左到右由旧到新（今天在最右），与小时图 0:00 → 23:00 的方向一致。 */
+/**
+ * 按日图横轴日期，从左到右由旧到新，与小时图 0:00 → 23:00 的方向一致。
+ * 有界区间按完整日历区间列出（本周 / 本月尚未到来的日子留空）；「全部」从最早有数据的日期到今天。
+ */
 function dailyAxisLabels(sources) {
-  const days = chartRangeDays();
   const now = new Date();
   const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (days > 0) {
+  const range = currentRange();
+  if (range) {
     const labels = [];
-    for (let i = days - 1; i >= 0; i -= 1) labels.push(localYmd(addLocalDays(today0, -i)));
+    let cur = range.startDate;
+    while (cur.getTime() <= range.endDate.getTime() && labels.length < 3660) {
+      labels.push(localYmd(cur));
+      cur = addLocalDays(cur, 1);
+    }
     return labels;
   }
   let min = null;
@@ -583,31 +656,34 @@ function collectDailySources() {
 function renderDailyChart(sources) {
   const t = chartTheme();
   const list = Array.isArray(sources) ? sources : [];
-  // 单日跨度（今天 / 昨天）渲染该日 24 小时柱，0:00 → 23:00 从左到右（今天未到时段留空），
-  // 其余跨度按日渲染（同样从左到右由旧到新）；两种模式共用同一图表实例，切换时原地更新。
-  const hourlyMode = isSingleDaySpan();
-  const dayLabel = isYesterdaySpan() ? "昨天" : "今天";
+  // 不超过两天的区间渲染逐小时柱，0:00 → 23:00 从左到右（两天则 48 根，今天未到时段留空），
+  // 其余区间按日渲染（同样从左到右由旧到新）；两种模式共用同一图表实例，切换时原地更新。
+  const hourlyMode = isHourlyMode();
+  const dayLabel = rangeText();
   el("#chart-daily-title").textContent = hourlyMode ? `按小时 Token（${dayLabel}）` : "按日 Token";
-  let hours = null;
+  // 小时模式的槽位：{ ymd, hour }，跨两天时标签带日期前缀
+  let slots = null;
   let labels;
   if (hourlyMode) {
-    hours = [];
-    for (let h = 0; h <= 23; h += 1) hours.push(h);
-    labels = hours.map((h) => `${h}:00`);
+    slots = [];
+    const range = currentRange();
+    const days = rangeDays();
+    for (let d = 0; d < days; d += 1) {
+      const ymd = localYmd(addLocalDays(range.startDate, d));
+      for (let h = 0; h <= 23; h += 1) slots.push({ ymd, hour: h });
+    }
+    labels = slots.map((s) => (days > 1 ? `${tickDate(s.ymd)} ${s.hour}:00` : `${s.hour}:00`));
   } else {
     labels = dailyAxisLabels(list);
   }
-  const ymd = focusYmd();
   const baseColors = list.map((_, i) => colorFor(i));
   const meta = [];
   const showActual = [];
   const datasets = list.map((s, i) => {
     let rows;
     if (hourlyMode) {
-      const byHour = new Map(
-        (s.hourly || []).filter((r) => r && r.date === ymd).map((r) => [Number(r.hour), r])
-      );
-      rows = hours.map((h) => byHour.get(h) || null);
+      const byKey = new Map((s.hourly || []).filter((r) => r && r.date).map((r) => [`${r.date}#${Number(r.hour)}`, r]));
+      rows = slots.map((slot) => byKey.get(`${slot.ymd}#${slot.hour}`) || null);
     } else {
       const byDate = new Map((s.daily || []).map((d) => [d.date, d]));
       rows = labels.map((label) => byDate.get(label) || null);
@@ -636,8 +712,12 @@ function renderDailyChart(sources) {
     chart.$hoverKey = "";
     chart.$hourly = hourlyMode;
     chart.$dayLabel = dayLabel;
-    // 高亮带：只有「今天」的小时图标记当前小时列（昨天已是完整的一天，按日图不高亮）
-    chart.$todayIndex = hourlyMode && isTodaySpan() && hours ? hours.indexOf(new Date().getHours()) : -1;
+    chart.$slots = slots;
+    // 高亮带：小时图且区间含今天时标记当前小时列（已结束的日子与按日图不高亮）
+    const now = new Date();
+    const todayYmd = localYmd(now);
+    chart.$todayIndex =
+      hourlyMode && slots ? slots.findIndex((s) => s.ymd === todayYmd && s.hour === now.getHours()) : -1;
     chart.$todayBandColor = todayBandColor();
   };
 
@@ -684,8 +764,9 @@ function renderDailyChart(sources) {
               const chart = items[0].chart;
               const label = chart.data.labels[items[0].dataIndex];
               if (chart.$hourly) {
-                const h = parseInt(label, 10);
-                return Number.isFinite(h) ? `${chart.$dayLabel || "今天"} ${h}:00 – ${h + 1}:00` : String(label);
+                const slot = chart.$slots ? chart.$slots[items[0].dataIndex] : null;
+                if (!slot) return String(label);
+                return `${titleDate(slot.ymd)} ${slot.hour}:00 – ${slot.hour + 1}:00`;
               }
               return titleDate(label);
             },
@@ -1140,14 +1221,18 @@ async function onDeleteUsageData(record) {
   if (panelVisible) loadView(false);
 }
 
-/**
- * 当前跨度对应的本地扫描参数：今天只给起点（fetch 层落到 today: 键），
- * 昨天给起点 + 终点（落到 day: 键），其余按天数。
- */
+/** 当前区间对应的本地扫描参数：「全部」不限起止，其余给首日 0 点与末日次日 0 点。 */
 function scanParams(home, force) {
-  if (isTodaySpan()) return { sinceMs: todayStartMs(), home, force };
-  if (isYesterdaySpan()) return { sinceMs: dayStartMs(-1), untilMs: dayStartMs(0), home, force };
-  return { days: span === "0" ? null : Number(span), home, force };
+  const r = currentRange();
+  if (!r) return { days: null, home, force };
+  // 起点为区间首日 0 点，终点为末日次日 0 点（开区间）；缓存键与 Cursor 侧一致，由 scanKey 给出
+  return {
+    key: scanKey(),
+    sinceMs: r.startDate.getTime(),
+    untilMs: addLocalDays(r.endDate, 1).getTime(),
+    home,
+    force,
+  };
 }
 
 function fetchLocal(key, home, force) {
@@ -1336,7 +1421,7 @@ function renderOverviewTable() {
       const price = planMonthlyUsd(membership);
       const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
       let ratioText = "—";
-      if (agg && price > 0 && !isSingleDaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
+      if (agg && price > 0 && !isHourlyMode()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
       if (agg && price != null) {
         totals.planUsd += price;
         totals.planEquiv += agg.totalEquivalentUsd;
@@ -1365,7 +1450,7 @@ function renderOverviewTable() {
       const price = planMonthlyUsd(membership);
       const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
       let ratioText = "—";
-      if (agg && price > 0 && !isSingleDaySpan()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
+      if (agg && price > 0 && !isHourlyMode()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
       if (agg && price != null) {
         totals.planUsd += price;
         totals.planEquiv += agg.totalEquivalentUsd;
@@ -1432,7 +1517,7 @@ function renderOverviewTable() {
     planTd.textContent = totals.planKnown ? `$${totals.planUsd}/月` : "—";
     // 合计倍数只按「套餐月费已知的 Cursor 账户」口径计算，与套餐列保持一致
     const totalRatio =
-      totals.planUsd > 0 && !isSingleDaySpan() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
+      totals.planUsd > 0 && !isHourlyMode() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
     tr.append(
       label,
       spacer,
@@ -1510,13 +1595,13 @@ function renderOverviewMerged() {
   }
   sources.push(...localNames);
   // 单日跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
-  const tail = isSingleDaySpan()
-    ? singleDayTail()
-    : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，选近 30 天时最具参考性）";
+  const tail = isHourlyMode()
+    ? hourlyTail()
+    : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，按「月」查看时最具参考性）";
   const title = selection === "all" ? "全部总览" : isDeletedSelection() ? "已删除账户" : "所选来源";
   renderAggregate(merged, {
     showActual: true,
-    plan: planKnown && !isSingleDaySpan() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
+    plan: planKnown && !isHourlyMode() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
     metaText: `${title} · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
     dailySources: collectDailySources(),
   });
@@ -1712,11 +1797,11 @@ async function loadOverview(force, seq) {
 
 function renderCursorAccount(account, agg, at) {
   const price = planMonthlyUsd(account.status ? account.status.membershipType : null);
-  const tail = isSingleDaySpan() ? singleDayTail() : "倍数 = 等价费用 ÷ 套餐月费";
+  const tail = isHourlyMode() ? hourlyTail() : "倍数 = 等价费用 ÷ 套餐月费";
   renderAggregate(agg, {
     showActual: true,
     plan:
-      price != null && !isSingleDaySpan()
+      price != null && !isHourlyMode()
         ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd }
         : null,
     metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
@@ -2025,18 +2110,100 @@ function cacheKeyAffectsCurrentView(key) {
 
 /* ---------- 初始化 ---------- */
 
-function setSpan(next) {
-  if (!Object.prototype.hasOwnProperty.call(SPAN_LABELS, next) || next === span) return;
-  span = next;
-  for (const btn of el("#usage-span").querySelectorAll("[data-span]")) {
-    const on = btn.dataset.span === next;
+/** 把周期按钮、区间导航与自定义日期输入同步到当前范围状态。 */
+function syncRangeControls() {
+  for (const btn of el("#usage-period").querySelectorAll("[data-period]")) {
+    const on = btn.dataset.period === period;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-selected", on ? "true" : "false");
   }
-  // 先隐藏结果区再加载：新跨度有缓存时同步段立即重渲染（无闪烁），
-  // 无缓存时由 loadView 露出骨架占位，不残留上一跨度口径的数字
+  const range = currentRange();
+  el("#usage-range-nav").hidden = !range;
+  el("#usage-range-label").textContent = rangeText();
+  // 不能滑到未来：区间末日已到今天时禁用「下一个」
+  el("#usage-range-next").disabled = !range || range.endDate.getTime() >= dayStartMs(0);
+  const custom = period === "custom";
+  el("#usage-range-custom").hidden = !custom;
+  if (custom) {
+    el("#usage-range-start").value = localYmd(customStart);
+    el("#usage-range-end").value = localYmd(customEnd);
+    el("#usage-range-end").max = localYmd();
+    el("#usage-range-start").max = localYmd();
+  }
+}
+
+/** 范围变化后的统一收尾：先隐藏结果区再加载（有缓存立即重绘，无缓存露骨架），不残留旧口径的数字。 */
+function applyRangeChange() {
+  syncRangeControls();
   applyVisibility();
   loadView(false);
+}
+
+/** 主窗口从托盘重新打开时回到默认范围（日 / 今天）；已是默认范围则不动。 */
+function resetRangeToToday() {
+  const today = dayStartMs(0);
+  if (period === "day" && anchor.getTime() === today) return;
+  period = "day";
+  anchor = new Date(today);
+  syncRangeControls();
+  applyVisibility();
+  if (panelVisible) loadView(false);
+}
+
+/** 切换周期：日 / 周 / 月以今天所在周期为起点，自定义沿用上次的起止日期。 */
+function setPeriod(next) {
+  if (!PERIODS.includes(next) || next === period) return;
+  period = next;
+  if (next !== "custom" && next !== "all") anchor = new Date(dayStartMs(0));
+  applyRangeChange();
+}
+
+/** 左右滑动：日 / 周 / 月移动一个周期，自定义按区间长度平移；不越过今天。 */
+function shiftRange(direction) {
+  const range = currentRange();
+  if (!range) return;
+  const today = dayStartMs(0);
+  if (direction > 0 && range.endDate.getTime() >= today) return;
+  if (period === "day") anchor = addLocalDays(anchor, direction);
+  else if (period === "week") anchor = addLocalDays(anchor, 7 * direction);
+  else if (period === "month") anchor = new Date(anchor.getFullYear(), anchor.getMonth() + direction, 1);
+  else {
+    const days = rangeDays();
+    let start = addLocalDays(customStart, days * direction);
+    let end = addLocalDays(customEnd, days * direction);
+    // 向后平移不越过今天：末日贴到今天，首日保持区间长度
+    if (end.getTime() > today) {
+      end = new Date(today);
+      start = addLocalDays(end, -(days - 1));
+    }
+    customStart = start;
+    customEnd = end;
+  }
+  applyRangeChange();
+}
+
+/** 自定义查询：读取两个日期输入，起止颠倒时自动交换，末日不晚于今天。 */
+function applyCustomRange() {
+  const startText = el("#usage-range-start").value;
+  const endText = el("#usage-range-end").value;
+  if (!startText || !endText) {
+    setStatus("warn", "请选择开始与结束日期。");
+    return;
+  }
+  let start = dayStart(parseYmd(startText));
+  let end = dayStart(parseYmd(endText));
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) {
+    setStatus("warn", "日期无效。");
+    return;
+  }
+  if (start.getTime() > end.getTime()) [start, end] = [end, start];
+  const today = new Date(dayStartMs(0));
+  if (end.getTime() > today.getTime()) end = today;
+  if (start.getTime() > end.getTime()) start = end;
+  customStart = start;
+  customEnd = end;
+  period = "custom";
+  applyRangeChange();
 }
 
 export function initUsage() {
@@ -2067,10 +2234,23 @@ export function initUsage() {
       snapshotBtn.disabled = false;
     }
   });
-  // 时间跨度二级 TAB（默认今天）
-  el("#usage-span").addEventListener("click", (event) => {
-    const btn = event.target instanceof Element ? event.target.closest("[data-span]") : null;
-    if (btn) setSpan(btn.dataset.span);
+  // 时间范围：周期按钮 + 左右滑动 + 自定义起止日期（默认「日」= 今天）
+  el("#usage-period").addEventListener("click", (event) => {
+    const btn = event.target instanceof Element ? event.target.closest("[data-period]") : null;
+    if (btn) setPeriod(btn.dataset.period);
+  });
+  el("#usage-range-prev").addEventListener("click", () => shiftRange(-1));
+  el("#usage-range-next").addEventListener("click", () => shiftRange(1));
+  el("#usage-range-apply").addEventListener("click", () => applyCustomRange());
+  for (const id of ["#usage-range-start", "#usage-range-end"]) {
+    el(id).addEventListener("keydown", (event) => {
+      if (event.key === "Enter") applyCustomRange();
+    });
+  }
+  syncRangeControls();
+  // 主窗口关闭到托盘后再打开：时间范围回到今天
+  listen("main-window-shown", () => resetRangeToToday()).catch(() => {
+    /* 非 Tauri 环境无事件桥 */
   });
   for (const key of LOCAL_KEYS) {
     el(LOCAL_SOURCES[key].scanBtn).addEventListener("click", () => {

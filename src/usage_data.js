@@ -2,11 +2,12 @@ import { invoke, emit } from "./shared.js";
 
 // 主窗口用量页与托盘总览共用的聚合缓存。
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
-// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 7 / 30 / 0（全部）、today:YYYY-MM-DD
-//   （进行中的今天，数据随时间增长）或 day:YYYY-MM-DD（已结束的完整自然日，如「昨天」）。
-//   Cursor 的数据源是后端按账户维护的本地用量事件库：任何跨度都由后端从事件库切片，只有事件库
-//   过期 / 强制刷新时才联网同步（增量），切换跨度不再联网；缓存条目的 at 取事件库的同步时间。
-// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 7 / 30 / all 或 today: / day: 同上。
+// Cursor 键：agg:${accountId}:${rangeKey}，rangeKey 为 0（全部）、today:YYYY-MM-DD（进行中的今天，
+//   数据随时间增长）、day:YYYY-MM-DD（已结束的完整自然日）或 range:首日_末日（周 / 月 / 自定义等
+//   多日区间，按日历区间命名）；托盘按日探查时还会回退到 7 / 30 等旧版天数键。
+//   Cursor 的数据源是后端按账户维护的本地用量事件库：任何区间都由后端从事件库切片，只有事件库
+//   过期 / 强制刷新时才联网同步（增量），切换区间不再联网；缓存条目的 at 取事件库的同步时间。
+// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 all 或 today: / day: / range: 同上。
 // Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
 export const USAGE_CACHE_PREFIX = "usage-cache:v4:";
@@ -82,6 +83,11 @@ export function todayRangeKey(ymd = localYmd()) {
 /** 已结束的完整自然日的缓存键（与 today: 区分：今天的缓存是进行中的部分数据）。 */
 export function dayRangeKey(ymd) {
   return `day:${ymd}`;
+}
+
+/** 多日区间的缓存键（首日与末日均含），周 / 月 / 自定义区间按日历区间命名。 */
+export function multiDayRangeKey(startYmd, endYmd) {
+  return `range:${startYmd}_${endYmd}`;
 }
 
 function dailyOn(agg, ymd) {
@@ -273,13 +279,17 @@ export function removeDeletedUsage(accountId) {
 }
 
 /**
- * 扫描范围 -> 缓存键：只有起点 = 进行中的今天（today:，跨零点自动失效）；
- * 起点 + 终点 = 已结束的完整自然日（day:，按起点所在日命名）；否则为天数 / all。
+ * 扫描范围 -> 缓存键：起点 + 终点（开区间）按覆盖的自然日命名——单日为 today:（今天）或 day:
+ * （已结束的日子），多日为 range:首日_末日；只有起点视为进行中的今天；否则为天数 / all。
+ * 调用方也可直接给出 key。
  */
 function scanRangeKey(days, sinceMs, untilMs) {
   if (sinceMs != null && Number.isFinite(Number(sinceMs))) {
-    const ymd = localYmd(Number(sinceMs));
-    return untilMs != null ? dayRangeKey(ymd) : todayRangeKey(ymd);
+    const startYmd = localYmd(Number(sinceMs));
+    if (untilMs == null) return todayRangeKey(startYmd);
+    const endYmd = localYmd(Number(untilMs) - 1);
+    if (startYmd !== endYmd) return multiDayRangeKey(startYmd, endYmd);
+    return startYmd === localYmd() ? todayRangeKey(startYmd) : dayRangeKey(startYmd);
   }
   return days == null || days === 0 ? "all" : String(days);
 }
@@ -333,9 +343,9 @@ function makeScanSource({ prefix, command }) {
     return peekForDay(ymd, h);
   };
 
-  const fetch = ({ days, sinceMs, untilMs, home, force } = {}) => {
+  const fetch = ({ key: explicitKey, days, sinceMs, untilMs, home, force } = {}) => {
     const h = home || "";
-    const rangeKey = scanRangeKey(days, sinceMs, untilMs);
+    const rangeKey = explicitKey || scanRangeKey(days, sinceMs, untilMs);
     const key = `${rangeKey}:${h}`;
     const cached = getCached(rangeKey, h);
     if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
@@ -398,9 +408,9 @@ export function purgeAccountCache(accountId) {
   notifyUsageCache(USAGE_CACHE_PREFIX);
 }
 
-/** 从内存键 ${accountId}:${rangeKey} 取回账户 id（带日期的 today: / day: 键自身含冒号）。 */
+/** 从内存键 ${accountId}:${rangeKey} 取回账户 id（带日期的 today: / day: / range: 键自身含冒号）。 */
 function aggAccountIdFromMemKey(key) {
-  const m = /:(?:today|day):/.exec(key);
+  const m = /:(?:today|day|range):/.exec(key);
   if (m) return key.slice(0, m.index);
   const last = key.lastIndexOf(":");
   return last >= 0 ? key.slice(0, last) : key;

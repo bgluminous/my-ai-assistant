@@ -152,24 +152,51 @@
       .tray-overview { flex: 1; overflow-y: auto; padding: 12px 14px; }
       .tray-ov-label { font-size: 11px; color: var(--muted); }
       .tray-ov-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-      /* 统计日标签 + 数据时间并排：「今日已用 · 更新于 12:34」，过期带「（缓存）」 */
-      .tray-ov-head-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
-      .tray-ov-updated { font-size: 11px; color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+      /* 统计日标签 + 数据时间并排：「今日已用 · 更新于 12:34」，过期带「（缓存）」；
+         标签不折行，空间不足时只截断数据时间 */
+      .tray-ov-head-left { display: flex; align-items: baseline; gap: 8px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+      .tray-ov-head-left .tray-ov-label { white-space: nowrap; flex-shrink: 0; }
+      .tray-ov-updated {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 11px;
+        color: var(--faint);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
       .tray-ov-updated::before { content: "·"; margin-right: 8px; }
       /* 进行中胶囊沿用主窗口样式，但避开顶部标题栏与 tab 栏，缩小一号 */
       .tray-panel .loading-float { top: 86px; padding: 6px 12px 6px 10px; font-size: 12px; }
       .tray-panel .loading-float .spinner { width: 12px; height: 12px; }
-      /* 今天 / 昨天：紧凑胶囊分段，复用 .seg 按钮样式 */
-      .tray-day {
-        display: inline-flex;
-        gap: 2px;
-        padding: 2px;
-        background: var(--field-bg);
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        flex-shrink: 0;
+      /* 统计日导航：前一天 / 后一天箭头夹着日期文字，按钮复用标题栏图标按钮尺寸 */
+      .tray-day { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+      .tray-day .icon-action + .tray-day-label { margin-left: 0; }
+      .tray-day-label {
+        min-width: 6em;
+        text-align: center;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--text-strong);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
       }
-      .tray-day .seg { padding: 3px 10px; font-size: 11px; }
+      /* 图表图例：色块 + 名称，饼图下方竖排、柱图下方横排换行；超长名称省略，悬停看全名 */
+      .tray-legend {
+        list-style: none;
+        margin: 6px 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .tray-legend li { display: flex; align-items: center; gap: 5px; min-width: 0; }
+      .tray-legend-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+      .tray-legend-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tray-legend-row { flex-direction: row; flex-wrap: wrap; gap: 3px 12px; }
+      .tray-legend-row li { max-width: calc(50% - 6px); }
       .tray-ov-total { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
       .tray-ov-tokens { font-size: 22px; font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; }
       .tray-ov-usd { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -318,15 +345,20 @@
       </div>
       <div id="tray-list" class="tray-list"></div>
       <div id="tray-overview" class="tray-overview" hidden>
-        <!-- 头部常驻：统计日标签 + 数据时间（更新于 HH:MM）+ 今天 / 昨天切换；下方 body 由脚本整体重建 -->
+        <!-- 头部常驻：统计日标签 + 数据时间（更新于 HH:MM）+ 按天前后滑动的日期导航；下方 body 由脚本整体重建 -->
         <div class="tray-ov-head">
           <div class="tray-ov-head-left">
             <span id="tray-ov-label" class="tray-ov-label">今日已用</span>
             <span id="tray-ov-updated" class="tray-ov-updated" hidden></span>
           </div>
-          <div id="tray-day" class="tray-day" role="tablist" aria-label="统计日">
-            <button type="button" class="seg active" role="tab" aria-selected="true" data-day="today">今天</button>
-            <button type="button" class="seg" role="tab" aria-selected="false" data-day="yesterday">昨天</button>
+          <div class="tray-day" role="group" aria-label="统计日">
+            <button id="tray-day-prev" class="icon-action" type="button" title="前一天" aria-label="前一天">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <span id="tray-day-label" class="tray-day-label">今天</span>
+            <button id="tray-day-next" class="icon-action" type="button" title="后一天" aria-label="后一天" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
           </div>
         </div>
         <div id="tray-ov-body">

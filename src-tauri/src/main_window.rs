@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewWindow, Window, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow, Window, WindowEvent};
 
 pub const LABEL: &str = "main";
 
@@ -17,14 +17,19 @@ static INITIAL_POS: OnceLock<PhysicalPosition<i32>> = OnceLock::new();
 static MINIMIZED: AtomicBool = AtomicBool::new(false);
 
 /// 唤出主窗口：解除最小化、复位到首次显示的位置、显示并聚焦。
+/// 从隐藏状态（关闭到托盘）重新显示时广播 main-window-shown，前端据此把统计页时间范围回到今天。
 pub fn show(app: &AppHandle) {
     let Some(win) = app.get_webview_window(LABEL) else {
         return;
     };
+    let was_hidden = !win.is_visible().unwrap_or(true);
     let _ = win.unminimize();
     restore_position(&win);
     let _ = win.show();
     let _ = win.set_focus();
+    if was_hidden {
+        let _ = app.emit("main-window-shown", ());
+    }
 }
 
 /// 主窗口事件钩子（lib.rs 的 on_window_event 转发）。
