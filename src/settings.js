@@ -26,6 +26,7 @@ function statusBox(selector) {
   };
 }
 const intervalStatus = statusBox("#interval-status");
+const localSyncStatus = statusBox("#local-sync-status");
 const autostartStatus = statusBox("#autostart-status");
 const backupStatus = statusBox("#backup-status");
 const cursorPathStatus = statusBox("#cursor-path-status");
@@ -59,6 +60,29 @@ async function onIntervalChange() {
   } catch (error) {
     select.value = String(previous);
     intervalStatus.set("bad", `设置定时刷新失败：${resetError(error)}`);
+  }
+}
+
+/* ---------- 同步本机 ChatGPT 凭据的间隔 ---------- */
+
+async function loadLocalSyncInterval() {
+  try {
+    const minutes = await invoke("local_sync_get");
+    el("#local-sync-interval").value = String(minutes);
+  } catch {
+    // 非 Tauri 环境读取失败，静默即可（仅影响回显）
+  }
+}
+
+async function onLocalSyncChange() {
+  const select = el("#local-sync-interval");
+  try {
+    const minutes = await invoke("local_sync_set", { minutes: Number(select.value) });
+    const text = minutes === 1440 ? "1 天" : intervalText(minutes);
+    localSyncStatus.set("ok", `已设为每 ${text}检查一次本机 auth.json。`);
+  } catch (error) {
+    void loadLocalSyncInterval();
+    localSyncStatus.set("bad", `设置同步间隔失败：${resetError(error)}`);
   }
 }
 
@@ -428,6 +452,8 @@ export function initSettings() {
     renderUnitSeg();
     intervalStatus.clear();
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
+    localSyncStatus.clear();
+    void loadLocalSyncInterval();
     autostartStatus.clear();
     backupStatus.clear();
     hidePasswordRow();
@@ -460,6 +486,7 @@ export function initSettings() {
     });
   }
   el("#accounts-interval").addEventListener("change", () => { void onIntervalChange(); });
+  el("#local-sync-interval").addEventListener("change", () => { void onLocalSyncChange(); });
   el("#autostart-enabled").addEventListener("change", () => { void onAutostartChange(); });
   el("#autostart-silent").addEventListener("change", () => { void onAutostartChange(); });
   el("#backup-export").addEventListener("click", onBackupExportClick);

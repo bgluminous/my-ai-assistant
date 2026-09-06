@@ -40,6 +40,27 @@ pub struct Settings {
     /// 自启动开关本身注册在系统里（Windows 注册表 / macOS LaunchAgent），不落本文件。
     #[serde(default)]
     pub autostart_silent: bool,
+    /// 后台检查本机 Codex `auth.json` 是否被客户端改写的间隔（分钟），默认 5。
+    #[serde(default = "default_local_sync_minutes")]
+    pub codex_local_sync_minutes: u32,
+}
+
+pub const DEFAULT_LOCAL_SYNC_MINUTES: u32 = 5;
+/// 本机同步间隔的可选值（分钟），与设置弹窗的下拉项一致。
+pub const LOCAL_SYNC_CHOICES: [u32; 7] = [1, 5, 10, 30, 60, 360, 1440];
+
+fn default_local_sync_minutes() -> u32 {
+    DEFAULT_LOCAL_SYNC_MINUTES
+}
+
+/// 当前生效的本机同步间隔：全新安装（`Settings::default()` 为 0）或落盘值不在可选范围时按默认值。
+pub fn local_sync_minutes() -> u32 {
+    let v = read(|s| s.codex_local_sync_minutes).unwrap_or(DEFAULT_LOCAL_SYNC_MINUTES);
+    if LOCAL_SYNC_CHOICES.contains(&v) {
+        v
+    } else {
+        DEFAULT_LOCAL_SYNC_MINUTES
+    }
 }
 
 impl Settings {
@@ -77,11 +98,27 @@ pub fn path_display() -> String {
 }
 
 /// 归一化外部来源的设置数据（磁盘载入 / 全量备份导入共用）。
+/// ChatGPT 账户由加密副本解出 token / refresh_token；只有明文凭据的旧数据组成副本。
 pub(crate) fn sanitize_loaded(mut data: Settings) -> Settings {
     data.proxy = proxy::sanitize(data.proxy);
     data.pricing = data.pricing.lowercased();
     data.pricing_remote.table = data.pricing_remote.table.lowercased();
+    crate::accounts::hydrate_accounts(&mut data.accounts);
     data
+}
+
+/// 落盘 / 备份导出的形态：有副本的 ChatGPT 账户不再单独写出 token / refresh_token。
+pub(crate) fn persisted_form(data: &Settings) -> Settings {
+    let mut copy = data.clone();
+    crate::accounts::dehydrate_accounts(&mut copy.accounts);
+    copy
+}
+
+/// 旧版本把 ChatGPT 凭据以明文存放；载入时若有这类账户，组好副本后立刻重写一次文件。
+fn needs_codex_auth_migration(data: &Settings) -> bool {
+    data.accounts
+        .iter()
+        .any(|a| a.kind == "codex" && a.codex_auth.is_none() && !a.token.trim().is_empty())
 }
 
 /// 尝试从磁盘载入一次。失败时内存保持原样并返回错误：
@@ -97,8 +134,11 @@ fn attempt_load() -> Result<(), String> {
         }
         Err(e) => return Err(format!("settings_read_failed: {e}")),
     };
-    let data = match serde_json::from_str::<Settings>(&text) {
-        Ok(d) => sanitize_loaded(d),
+    let (data, migrate) = match serde_json::from_str::<Settings>(&text) {
+        Ok(d) => {
+            let migrate = needs_codex_auth_migration(&d);
+            (sanitize_loaded(d), migrate)
+        }
         Err(e) => {
             let _ = std::fs::copy(&path, path.with_extension("json.bad"));
             return Err(format!("settings_parse_failed: {e}"));
@@ -111,6 +151,25 @@ fn attempt_load() -> Result<(), String> {
         *g = data;
     }
     LOADED.store(true, Ordering::SeqCst);
+    if migrate {
+        // 明文凭据已换成加密副本，立刻重写文件；失败不影响载入（下次任何写盘会再落）
+        let result = cell()
+            .read()
+            .map_err(|_| "state_lock_poisoned".to_string())
+            .and_then(|g| save_to_disk(&g));
+        match result {
+            Ok(()) => audit::log(
+                "codex_auth_migrated",
+                "ChatGPT 账户凭据已改为加密副本存储，settings.json 中不再保留明文".to_string(),
+                None,
+            ),
+            Err(e) => audit::log(
+                "codex_auth_migrated",
+                format!("ChatGPT 账户凭据已在内存中改为加密副本，但重写 settings.json 失败：{e}"),
+                None,
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -146,7 +205,7 @@ fn save_to_disk(data: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(&persisted_form(data)).map_err(|e| e.to_string())?;
     // 先写临时文件再原子替换：写入中途崩溃 / 被杀不会损坏原文件，
     // 并发读取方也永远不会读到半截内容。
     let tmp = path.with_extension("json.tmp");

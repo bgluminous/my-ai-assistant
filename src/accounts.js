@@ -939,6 +939,7 @@ const switchModal = {
   stepIndex: -1,
   confirmResolve: null,
   autoCloseTimer: null,
+  altHandler: null, // 结果阶段备选操作按钮的回调（finish 的 alt 参数）
 
   /** 打开弹窗并显示忙碌文案（如「正在检测本地 Cursor…」），期间不可关闭。 */
   openBusy(title, text) {
@@ -1052,8 +1053,9 @@ const switchModal = {
   /**
    * 展示最终结果，底部变单个「关闭」按钮，此后允许 Esc / 关闭。
    * 成功结果几秒后自动关闭（按钮上倒计时）；失败结果保留，等用户看完手动关闭。
+   * alt = { label, onClick } 时在「关闭」左侧多一个备选操作按钮（如切换失败后的「强制写入并启动」）。
    */
-  finish(ok, message) {
+  finish(ok, message, alt = null) {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
     const status = el("#switch-modal-status");
@@ -1062,6 +1064,10 @@ const switchModal = {
     status.textContent = message;
     el("#switch-modal .modal-foot").hidden = false;
     el("#switch-cancel").hidden = true;
+    const altBtn = el("#switch-alt");
+    altBtn.hidden = !alt;
+    altBtn.textContent = alt ? alt.label : "";
+    this.altHandler = alt ? alt.onClick : null;
     const btn = el("#switch-ok");
     btn.hidden = false;
     btn.textContent = "关闭";
@@ -1069,6 +1075,15 @@ const switchModal = {
     this.phase = "done";
     btn.focus();
     if (ok) this.startAutoClose();
+  },
+
+  /** 备选操作按钮：只在结果阶段有效，点击后由调用方接管弹窗（通常重新进入步骤阶段）。 */
+  onAlt() {
+    if (this.phase !== "done" || typeof this.altHandler !== "function") return;
+    const handler = this.altHandler;
+    this.altHandler = null;
+    el("#switch-alt").hidden = true;
+    handler();
   },
 
   /** 结果阶段倒计时：按钮显示「关闭（3s）」逐秒递减，归零自动 close。 */
@@ -1108,6 +1123,8 @@ const switchModal = {
     this.setOption(null);
     el("#switch-steps").hidden = true;
     el("#switch-modal-status").hidden = true;
+    el("#switch-alt").hidden = true;
+    this.altHandler = null;
     el("#switch-ok").classList.remove("danger");
     this.phase = "hidden";
     this.stepIndex = -1;
@@ -1147,6 +1164,17 @@ function mapSwitchError(err) {
   if (code.startsWith("claude_creds_write_failed")) {
     return "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
   }
+  // ChatGPT 换票被拒：后缀为服务端错误码的归类（expired / reused / revoked / invalid）
+  if (code.startsWith("codex_refresh_denied")) {
+    const reason = code.split(":")[1] || "invalid";
+    const why = {
+      expired: "Refresh Token 已过期",
+      reused: "Refresh Token 已被使用过（已被本机客户端或其它地方轮换）",
+      revoked: "Refresh Token 已被吊销（已登出或撤销授权）",
+      invalid: "Refresh Token 已失效",
+    }[reason] || "Refresh Token 已失效";
+    return `${why}，无法换取新凭据。可编辑账户更新凭据后重试，或直接写入账户里保存的登录副本。`;
+  }
   const M = {
     account_not_verified: "该账户尚未验证有效，请先刷新后再切换。",
     cursor_running: "Cursor 仍在运行，请关闭后重试。",
@@ -1165,8 +1193,9 @@ function mapSwitchError(err) {
     codex_exe_not_found: "未找到 ChatGPT 可执行文件，请在设置中配置路径。",
     codex_exe_invalid: "配置的 ChatGPT 路径无效或文件不存在。",
     codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
-    codex_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
     codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
+    codex_auth_missing: "账户里没有保存 auth.json 副本，无法直接写入；请先成功刷新或切换一次。",
+    codex_auth_incomplete: "保存的 auth.json 副本不完整（缺少 id_token），无法直接写入。",
     claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
     claude_exe_not_found: "未找到 Claude Desktop，请在设置中配置路径。",
     claude_exe_invalid: "配置的 Claude Desktop 路径无效或文件不存在。",
@@ -1269,7 +1298,8 @@ async function onSwitchCodexAccount(id) {
       switchModal.close();
       return;
     }
-    switchModal.toSteps(running ? ["关闭 ChatGPT", "换取登录凭证并写入", "启动 ChatGPT"] : ["换取登录凭证并写入", "启动 ChatGPT"]);
+    // 副本完整且未到续期窗口时直接写入，否则先换票再写入；步骤文案不预设哪一种
+    switchModal.toSteps(running ? ["关闭 ChatGPT", "写入登录凭证", "启动 ChatGPT"] : ["写入登录凭证", "启动 ChatGPT"]);
     if (running) {
       switchModal.stepStart();
       const c = await invoke("codex_client_close");
@@ -1292,7 +1322,55 @@ async function onSwitchCodexAccount(id) {
     switchModal.finish(true, l.launched ? "已切换账户并启动 ChatGPT。" : "已切换账户，但自动启动失败，请手动启动 ChatGPT。");
   } catch (error) {
     switchModal.stepFail();
-    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`);
+    // Refresh Token 已失效换不到新凭据：提供兜底——直接把账户里保存的 auth.json 副本写入本机并启动
+    const alt = resetError(error).startsWith("codex_refresh_denied")
+      ? { label: "强制写入并启动", onClick: () => void forceWriteCodex(id) }
+      : null;
+    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`, alt);
+  } finally {
+    switching = false;
+    render();
+  }
+}
+
+/**
+ * 「强制写入并启动」：不向 OpenAI 换新凭据，把账户里保存的完整 auth.json 副本直接覆盖到本机，
+ * 再启动 ChatGPT。步骤与正常切换一致（运行中先关闭），但写入的是旧凭据组——若该组的
+ * refresh_token 已在服务端失效，客户端启动后仍可能要求重新登录。
+ */
+async function forceWriteCodex(id) {
+  if (switching) return;
+  switching = true;
+  render();
+  try {
+    const st = await invoke("codex_client_status");
+    const running = !!st.running;
+    switchModal.toSteps(running ? ["关闭 ChatGPT", "写入保存的登录副本", "启动 ChatGPT"] : ["写入保存的登录副本", "启动 ChatGPT"]);
+    if (running) {
+      switchModal.stepStart();
+      const c = await invoke("codex_client_close");
+      if (!c.closed) {
+        switchModal.stepFail();
+        switchModal.finish(false, "未能完全关闭 ChatGPT，请手动关闭后重试。");
+        return;
+      }
+      switchModal.stepDone();
+    }
+    switchModal.stepStart();
+    await invoke("codex_force_write_local", { id });
+    switchModal.stepDone();
+    switchModal.stepStart();
+    const l = await invoke("codex_client_launch");
+    switchModal.stepDone();
+    switchModal.finish(
+      true,
+      l.launched
+        ? "已写入保存的登录副本并启动 ChatGPT（未换新凭据）。"
+        : "已写入保存的登录副本，但自动启动失败，请手动启动 ChatGPT。"
+    );
+  } catch (error) {
+    switchModal.stepFail();
+    switchModal.finish(false, `强制写入失败：${mapSwitchError(error)}`);
   } finally {
     switching = false;
     render();
@@ -1717,6 +1795,7 @@ export function initAccounts() {
 
   // 切换流程弹窗：事件一次性绑定，按 switchModal 当前阶段分发
   el("#switch-ok").addEventListener("click", () => switchModal.onOk());
+  el("#switch-alt").addEventListener("click", () => switchModal.onAlt());
   el("#switch-cancel").addEventListener("click", () => switchModal.requestClose());
   el("#switch-close").addEventListener("click", () => switchModal.requestClose());
   document.addEventListener("keydown", (e) => {

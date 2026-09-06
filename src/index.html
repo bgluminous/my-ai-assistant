@@ -618,6 +618,21 @@
 
           <hr class="modal-divider" />
 
+          <label for="local-sync-interval">同步本机 ChatGPT 凭据</label>
+          <select id="local-sync-interval" class="compact-select">
+            <option value="1">1 分钟</option>
+            <option value="5" selected>5 分钟</option>
+            <option value="10">10 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">1 小时</option>
+            <option value="360">6 小时</option>
+            <option value="1440">1 天</option>
+          </select>
+          <p class="muted small">ChatGPT Desktop / Codex CLI 运行时会自行续期并改写本机 auth.json；按此间隔检查文件变化，把同账号账户的凭据副本更新过来（不联网）。</p>
+          <p id="local-sync-status" class="status" hidden></p>
+
+          <hr class="modal-divider" />
+
           <label>开机启动</label>
           <div class="toggle-group">
             <label class="toggle">
@@ -817,6 +832,8 @@
           <p id="switch-modal-status" class="status" hidden></p>
         </div>
         <div class="modal-foot">
+          <!-- 结果阶段的备选操作（如 ChatGPT 切换失败后的「强制写入并启动」），由 JS 按需显示 -->
+          <button id="switch-alt" class="secondary danger" type="button" hidden></button>
           <div class="modal-actions">
             <button id="switch-cancel" class="secondary" type="button">取消</button>
             <button id="switch-ok" class="primary" type="button">确认</button>

@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -8,7 +8,10 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{audit, claude, claude_local, claude_oauth, codex, codex_local, cursor, cursor_local, http, settings};
+use crate::{
+    audit, claude, claude_local, claude_oauth, codex, codex_local, cursor, cursor_local, http,
+    local_crypto, settings,
+};
 
 /// 账户 JSON 导入/导出文件标识。
 const EXPORT_FORMAT: &str = "my-ai-assistant-accounts";
@@ -18,7 +21,11 @@ const EXPORT_VERSION: u32 = 1;
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// Codex CLI 使用的公开 OAuth client_id。
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// access_token 距过期不足该秒数（含已过期）时提前续期。
+/// ChatGPT 续期策略与 Codex CLI 一致：access_token 距过期不足 5 分钟（含已过期）就续期；
+/// 解析不出过期时刻时，距上次获取凭据超过 8 天就续期。每次续期都会轮换 refresh_token。
+const CODEX_RENEW_AHEAD_SECS: i64 = 5 * 60;
+const CODEX_RENEW_INTERVAL_DAYS: i64 = 8;
+/// Claude access_token 距过期不足该秒数（含已过期）时提前续期。
 const REFRESH_AHEAD_SECS: i64 = 1800;
 
 // ---------------------------------------------------------------------------
@@ -37,16 +44,190 @@ pub struct Account {
     #[serde(default)]
     pub note_auto: bool,
     /// Cursor user token / Codex access_token（JWT）/ Claude access_token（不透明值）。
+    /// ChatGPT 账户有 codex_auth 副本时，本字段只在内存里由副本解出，不落盘。
     pub token: String,
-    /// Codex / Claude：用于自动续期。
+    /// Codex / Claude：用于自动续期。ChatGPT 账户同 token，有副本时不落盘。
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// ChatGPT：本机 Codex 客户端 auth.json 的完整副本（id_token / access_token / refresh_token /
+    /// account_id / last_refresh），经 local_crypto 加密。续期、切换、导入、添加都会写入；
+    /// 也是「强制写入 auth.json」的数据源。发给前端的视图里去掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth: Option<String>,
     /// 上次刷新时间（unix 秒）。
     #[serde(default)]
     pub last_refresh_at: Option<i64>,
     /// 缓存的状态摘要（cursor_inspect_token / codex_usage 去掉 raw 后的结果）。
     #[serde(default)]
     pub status: Option<Value>,
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT 凭据副本（加密的 auth.json）
+// ---------------------------------------------------------------------------
+
+fn json_str_at(v: &Value, pointer: &str) -> Option<String> {
+    v.pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 解出 ChatGPT 账户保存的 auth.json 副本；无副本、解密或解析失败为 None。
+pub(crate) fn codex_auth_json(acc: &Account) -> Option<Value> {
+    let blob = acc.codex_auth.as_deref()?;
+    serde_json::from_str(&local_crypto::open(blob)?).ok()
+}
+
+/// 副本里记录的上次获取凭据时刻（auth.json 的 last_refresh）。
+pub(crate) fn codex_last_refresh(acc: &Account) -> Option<DateTime<Utc>> {
+    let v = codex_auth_json(acc)?;
+    let text = json_str_at(&v, "/last_refresh")?;
+    DateTime::parse_from_rfc3339(&text)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// 用副本里的 access_token / refresh_token 覆盖内存字段（副本缺该字段时保留原值）。
+fn hydrate_codex(acc: &mut Account) {
+    if acc.kind != "codex" {
+        return;
+    }
+    let Some(v) = codex_auth_json(acc) else {
+        return;
+    };
+    if let Some(token) = json_str_at(&v, "/tokens/access_token") {
+        acc.token = token;
+    }
+    if let Some(rt) = json_str_at(&v, "/tokens/refresh_token") {
+        acc.refresh_token = Some(rt);
+    }
+}
+
+/// 只有 access_token / refresh_token 时组一份骨架副本（无 id_token，首次续期或切换时补全）。
+fn skeleton_codex_auth(token: &str, refresh_token: Option<&str>) -> Value {
+    json!({
+        "OPENAI_API_KEY": Value::Null,
+        "tokens": {
+            "access_token": token,
+            "refresh_token": refresh_token,
+            "account_id": codex_local::account_id_from_token(token),
+        },
+        "last_refresh": Value::Null,
+    })
+}
+
+/// 把新凭据组写进副本：access_token 必填，refresh_token / id_token 有新值才替换，
+/// account_id 由 access_token 解出，last_refresh 记当前时刻。
+pub(crate) fn apply_codex_tokens(
+    v: &mut Value,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    id_token: Option<&str>,
+) {
+    if !v.is_object() {
+        *v = json!({});
+    }
+    let obj = v.as_object_mut().expect("object");
+    obj.entry("OPENAI_API_KEY").or_insert(Value::Null);
+    let tokens = obj.entry("tokens").or_insert_with(|| json!({}));
+    if !tokens.is_object() {
+        *tokens = json!({});
+    }
+    let t = tokens.as_object_mut().expect("object");
+    t.insert("access_token".into(), json!(access_token));
+    if let Some(rt) = refresh_token {
+        t.insert("refresh_token".into(), json!(rt));
+    }
+    if let Some(idt) = id_token {
+        t.insert("id_token".into(), json!(idt));
+    }
+    if let Some(account_id) = codex_local::account_id_from_token(access_token) {
+        t.insert("account_id".into(), json!(account_id));
+    }
+    obj.insert("last_refresh".into(), json!(Utc::now().to_rfc3339()));
+}
+
+/// 加密写入 acc.codex_auth，并同步内存里的 access_token / refresh_token。
+fn set_codex_auth(acc: &mut Account, v: &Value) -> Result<(), String> {
+    let text = serde_json::to_string(v).map_err(|e| e.to_string())?;
+    acc.codex_auth = Some(local_crypto::seal(&text)?);
+    hydrate_codex(acc);
+    Ok(())
+}
+
+/// 载入 / 导入后的归一：有副本的 ChatGPT 账户由副本解出 token；没有副本但有明文凭据的
+/// （旧版本数据、文件导入）组骨架副本，明文随下次写盘不再保留。返回是否组了新副本。
+pub(crate) fn hydrate_accounts(accounts: &mut [Account]) -> bool {
+    let mut migrated = false;
+    for acc in accounts.iter_mut().filter(|a| a.kind == "codex") {
+        if acc.codex_auth.is_some() && codex_auth_json(acc).is_some() {
+            hydrate_codex(acc);
+        } else if !acc.token.trim().is_empty() {
+            let v = skeleton_codex_auth(&acc.token, acc.refresh_token.as_deref());
+            if set_codex_auth(acc, &v).is_ok() {
+                migrated = true;
+            }
+        }
+    }
+    migrated
+}
+
+/// 落盘 / 备份导出形态：有副本的 ChatGPT 账户不再单独写出 token / refresh_token。
+pub(crate) fn dehydrate_accounts(accounts: &mut [Account]) {
+    for acc in accounts.iter_mut() {
+        if acc.kind == "codex" && acc.codex_auth.is_some() {
+            acc.token = String::new();
+            acc.refresh_token = None;
+        }
+    }
+}
+
+/// 更新 ChatGPT 账户的副本：以现有副本为底（没有则由当前凭据组骨架），交给 f 修改后重新加密写回，
+/// 并同步内存里的 access_token / refresh_token；写盘后广播 accounts-changed。
+pub(crate) fn update_codex_auth(
+    app: &AppHandle,
+    id: &str,
+    f: impl FnOnce(&mut Value),
+) -> Result<(), String> {
+    mutate(app, |d| {
+        let acc = d
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "not_found".to_string())?;
+        let mut v = codex_auth_json(acc)
+            .unwrap_or_else(|| skeleton_codex_auth(&acc.token, acc.refresh_token.as_deref()));
+        f(&mut v);
+        set_codex_auth(acc, &v)
+    })?;
+    Ok(())
+}
+
+/// 用 refresh_token 换一组完整凭据并组成副本（添加 / 编辑 ChatGPT 账户时调用，拿到 id_token）。
+/// 失败时返回可读原因（被拒的归类说明或网络错误），由调用方退回骨架副本并写进审计。
+async fn exchange_codex_auth(refresh_token: &str) -> Result<Value, String> {
+    match request_codex_refresh(refresh_token).await {
+        Ok(RefreshOutcome::Success {
+            access_token,
+            refresh_token: new_rt,
+            id_token,
+        }) => {
+            let mut v = json!({});
+            apply_codex_tokens(
+                &mut v,
+                &access_token,
+                Some(new_rt.as_deref().unwrap_or(refresh_token)),
+                id_token.as_deref(),
+            );
+            Ok(v)
+        }
+        Ok(RefreshOutcome::Denied { reason, detail }) => {
+            Err(format!("{}：{detail}", reason.label()))
+        }
+        Err(e) => Err(format!("网络或服务异常：{e}")),
+    }
 }
 
 /// 账户相关字段（写入统一 settings.json）。
@@ -101,8 +282,18 @@ pub struct AccountsView {
 }
 
 fn view(data: &AccountsFile) -> AccountsView {
+    // 加密副本只在后端使用，不发给前端；token / refresh_token 已由副本解出，前端照常展示与编辑
+    let accounts = data
+        .accounts
+        .iter()
+        .cloned()
+        .map(|mut a| {
+            a.codex_auth = None;
+            a
+        })
+        .collect();
     AccountsView {
-        accounts: data.accounts.clone(),
+        accounts,
         interval_minutes: data.interval_minutes,
         path: settings::path_display(),
     }
@@ -346,16 +537,38 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
     } else {
         trimmed_note
     };
-    let entry = Account {
+    let mut entry = Account {
         id: new_id(),
         kind,
         note,
         note_auto,
         token,
         refresh_token: sanitize_refresh_token(account.refresh_token),
+        codex_auth: None,
         last_refresh_at: None,
         status: None,
     };
+    // ChatGPT：手动粘贴的凭据没有 id_token，立刻用 refresh_token 换一组完整凭据存成副本
+    //（会消耗并轮换 refresh_token）；换不到时退回骨架副本，首次续期或切换时再补全。
+    let mut exchanged = false;
+    let mut exchange_error = String::new();
+    if entry.kind == "codex" {
+        let full = match entry.refresh_token.as_deref() {
+            Some(rt) => exchange_codex_auth(rt).await,
+            None => Err("没有 Refresh Token".to_string()),
+        };
+        let v = match full {
+            Ok(v) => {
+                exchanged = true;
+                v
+            }
+            Err(e) => {
+                exchange_error = e;
+                skeleton_codex_auth(&entry.token, entry.refresh_token.as_deref())
+            }
+        };
+        set_codex_auth(&mut entry, &v)?;
+    }
     let name = display_name(&entry.kind, &entry.note, &entry.token);
     let entry_id = entry.id.clone();
     let entry_kind = entry.kind.clone();
@@ -368,9 +581,14 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         d.accounts.push(entry);
         Ok(())
     })?;
+    let suffix = match (entry_kind.as_str(), exchanged) {
+        ("codex", true) => "（已换取完整凭据）".to_string(),
+        ("codex", false) => format!("（未能换取完整凭据：{exchange_error}；首次续期或切换时补全）"),
+        _ => String::new(),
+    };
     audit::log(
         "account_add",
-        format!("添加账户：{name}"),
+        format!("添加账户：{name}{suffix}"),
         Some(serde_json::json!({ "id": entry_id })),
     );
     adopt_deleted_usage(&app, &[(entry_id, entry_kind, entry_token, name)]).await;
@@ -403,13 +621,37 @@ pub(crate) fn notify_usage_archive_changed(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub fn accounts_update(
+pub async fn accounts_update(
     app: AppHandle,
     id: String,
     note: String,
     token: String,
     refresh_token: Option<String>,
 ) -> Result<AccountsView, String> {
+    let before = snapshot(&id)?;
+    let token = sanitize_token(&before.kind, &token)?;
+    let refresh_token = sanitize_refresh_token(refresh_token);
+    let credentials_changed = token != before.token || refresh_token != before.refresh_token;
+    // ChatGPT 改了凭据：与添加时一样立刻换一组完整凭据存成副本（换不到退回骨架副本）
+    let mut exchange_note = String::new();
+    let new_codex_auth = if before.kind == "codex" && credentials_changed {
+        let full = match refresh_token.as_deref() {
+            Some(rt) => exchange_codex_auth(rt).await,
+            None => Err("没有 Refresh Token".to_string()),
+        };
+        Some(match full {
+            Ok(v) => {
+                exchange_note = "，已换取完整凭据".to_string();
+                v
+            }
+            Err(e) => {
+                exchange_note = format!("，未能换取完整凭据：{e}");
+                skeleton_codex_auth(&token, refresh_token.as_deref())
+            }
+        })
+    } else {
+        None
+    };
     let mut name = String::new();
     let mut changed: Vec<&str> = Vec::new();
     let data = mutate(&app, |d| {
@@ -419,8 +661,6 @@ pub fn accounts_update(
             .position(|a| a.id == id)
             .ok_or_else(|| "not_found".to_string())?;
         let kind = d.accounts[pos].kind.clone();
-        let token = sanitize_token(&kind, &token)?;
-        let refresh_token = sanitize_refresh_token(refresh_token);
         // 改后的凭据与其它同类账户查重（排除自身）
         if is_duplicate_account(&d.accounts, &kind, &token, Some(id.as_str())) {
             return Err("duplicate_account".into());
@@ -444,14 +684,17 @@ pub fn accounts_update(
             changed.push("Refresh Token");
         }
         // 凭据发生变化时旧的状态摘要随之失效
-        if token != acc.token || refresh_token != acc.refresh_token {
+        if credentials_changed {
             acc.status = None;
             acc.last_refresh_at = None;
         }
         acc.note = new_note;
         acc.note_auto = new_note_auto;
-        acc.token = token;
-        acc.refresh_token = refresh_token;
+        acc.token = token.clone();
+        acc.refresh_token = refresh_token.clone();
+        if let Some(v) = &new_codex_auth {
+            set_codex_auth(acc, v)?;
+        }
         name = display_name(&acc.kind, &acc.note, &acc.token);
         Ok(())
     })?;
@@ -462,7 +705,7 @@ pub fn accounts_update(
     };
     audit::log(
         "account_update",
-        format!("编辑账户：{name}（{what}）"),
+        format!("编辑账户：{name}（{what}{exchange_note}）"),
         Some(serde_json::json!({ "id": id })),
     );
     Ok(view(&data))
@@ -632,6 +875,42 @@ fn to_status<T: Serialize>(payload: &T) -> Result<Value, String> {
     Ok(v)
 }
 
+/// 换票被拒的原因，按服务端错误码归类（与 Codex CLI 一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshDenial {
+    /// `refresh_token_expired`：refresh_token 已过期。
+    Expired,
+    /// `refresh_token_reused`：这个 refresh_token 已被使用过——被别处（如本机 Codex 客户端）
+    /// 轮换后又拿旧值来换，触发了重放检测。
+    Reused,
+    /// `refresh_token_invalidated`：refresh_token 已被吊销（登出 / 撤销授权）。
+    Revoked,
+    /// 401 或 400 `invalid_grant` 但没有细分子码：不可用，原因未知。
+    Other,
+}
+
+impl RefreshDenial {
+    /// 机器可读短码：写进状态摘要与切换错误码后缀。
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            RefreshDenial::Expired => "expired",
+            RefreshDenial::Reused => "reused",
+            RefreshDenial::Revoked => "revoked",
+            RefreshDenial::Other => "invalid",
+        }
+    }
+
+    /// 界面与审计用的说明。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            RefreshDenial::Expired => "Refresh Token 已过期",
+            RefreshDenial::Reused => "Refresh Token 已被使用过（已被别处轮换）",
+            RefreshDenial::Revoked => "Refresh Token 已被吊销",
+            RefreshDenial::Other => "Refresh Token 已失效",
+        }
+    }
+}
+
 pub(crate) enum RefreshOutcome {
     /// 2xx 且拿到了新 access_token。
     Success {
@@ -640,12 +919,44 @@ pub(crate) enum RefreshOutcome {
         /// 带 openid scope 时返回；写本机 auth.json 必需（Codex 反序列化要求该字段）。
         id_token: Option<String>,
     },
-    /// HTTP 4xx（如 invalid_grant）：refresh token 已失效，非致命。
-    Denied { body: String },
+    /// 永久失败：refresh token 不可用。detail 为服务端给出的说明（error_description 等）。
+    Denied { reason: RefreshDenial, detail: String },
+}
+
+/// 从 OAuth 错误响应体里取错误码：`error` 为字符串直接用；为对象取其 `code`；否则取顶层 `code`。
+fn refresh_error_code(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body.trim()).ok()?;
+    let map = v.as_object()?;
+    match map.get("error") {
+        Some(Value::String(code)) => return Some(code.clone()),
+        Some(Value::Object(obj)) => {
+            if let Some(code) = obj.get("code").and_then(Value::as_str) {
+                return Some(code.to_string());
+            }
+        }
+        _ => {}
+    }
+    map.get("code").and_then(Value::as_str).map(str::to_string)
+}
+
+/// 错误响应体里的可读说明：`error_description` / `error.message` / `message`，都没有就截断原文。
+fn refresh_error_detail(body: &str) -> String {
+    let parsed: Option<Value> = serde_json::from_str(body.trim()).ok();
+    let from_json = parsed.as_ref().and_then(|v| {
+        ["/error_description", "/error/message", "/message"]
+            .iter()
+            .find_map(|p| v.pointer(p).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    from_json.unwrap_or_else(|| http::truncate(body.trim(), 200))
 }
 
 /// 用 refresh_token 向 OpenAI OAuth 端点换取新 access_token。
-/// 传输错误与其余异常返回 Err（调用方保留旧 status）；4xx 返回 Denied。
+/// 与 Codex CLI 同一判定：401、带 expired / reused / invalidated 子码、或 400 `invalid_grant`
+/// 视为永久失败返回 Denied；网络错误、5xx、429 等其它失败视为临时失败返回 Err，
+/// 调用方保留旧状态、下次再试，不把账户标为失效。
 pub(crate) async fn request_codex_refresh(refresh_token: &str) -> Result<RefreshOutcome, String> {
     let body = json!({
         "client_id": OAUTH_CLIENT_ID,
@@ -663,13 +974,27 @@ pub(crate) async fn request_codex_refresh(refresh_token: &str) -> Result<Refresh
         .map_err(|e| e.to_string())?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| e.to_string())?;
-    if status.is_client_error() {
-        return Ok(RefreshOutcome::Denied {
-            body: http::truncate(&text, 200),
-        });
-    }
     if !status.is_success() {
-        return Err(format!("refresh_http_{}", status.as_u16()));
+        let code = refresh_error_code(&text).map(|c| c.to_ascii_lowercase());
+        let reason = match code.as_deref() {
+            Some("refresh_token_expired") => Some(RefreshDenial::Expired),
+            Some("refresh_token_reused") => Some(RefreshDenial::Reused),
+            Some("refresh_token_invalidated") => Some(RefreshDenial::Revoked),
+            _ => None,
+        };
+        let invalid_grant = status.as_u16() == 400 && code.as_deref() == Some("invalid_grant");
+        let permanent = status.as_u16() == 401 || reason.is_some() || invalid_grant;
+        if permanent {
+            return Ok(RefreshOutcome::Denied {
+                reason: reason.unwrap_or(RefreshDenial::Other),
+                detail: refresh_error_detail(&text),
+            });
+        }
+        return Err(format!(
+            "refresh_http_{}: {}",
+            status.as_u16(),
+            refresh_error_detail(&text)
+        ));
     }
     let v: Value =
         serde_json::from_str(&text).map_err(|_| "refresh_invalid_response".to_string())?;
@@ -696,48 +1021,174 @@ pub(crate) async fn request_codex_refresh(refresh_token: &str) -> Result<Refresh
     })
 }
 
-/// Codex 账户刷新：必要时先续期 access_token，再查询用量；401/403 时补一次续期重试。
+fn jwt_exp(token: &str) -> Option<i64> {
+    http::decode_jwt_payload(token).and_then(|c| c.get("exp").and_then(|x| x.as_i64()))
+}
+
+/// 与 Codex CLI 同一策略：access_token 距过期不足 5 分钟（含已过期）就该续期；
+/// 解析不出过期时刻时，距上次获取凭据超过 8 天就该续期。
+pub(crate) fn codex_token_needs_renewal(token: &str, last_refresh: Option<DateTime<Utc>>) -> bool {
+    match jwt_exp(token) {
+        Some(exp) => exp <= Utc::now().timestamp() + CODEX_RENEW_AHEAD_SECS,
+        None => last_refresh
+            .is_some_and(|t| t < Utc::now() - chrono::Duration::days(CODEX_RENEW_INTERVAL_DAYS)),
+    }
+}
+
+/// 定时同步入口：本机 auth.json 有变化时，把与之同账号的 ChatGPT 账户更新为本机更新的凭据
+///（判定与取回逻辑同 adopt_newer_local_codex）。返回是否有账户被更新。
+pub(crate) fn sync_codex_from_local(app: &AppHandle) -> Result<bool, String> {
+    let mut changed = false;
+    for acc in current().accounts.into_iter().filter(|a| a.kind == "codex") {
+        let name = display_name(&acc.kind, &acc.note, &acc.token);
+        let mut token = acc.token.clone();
+        let mut refresh_token = acc.refresh_token.clone();
+        if adopt_newer_local_codex(app, &acc.id, &name, &mut token, &mut refresh_token)? {
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// 本机 Codex 客户端会自行续期并轮换 refresh_token，账户里保存的那组随即作废。
+/// 刷新 / 切换前先看本机 auth.json：同一账号且其 access_token 过期时刻更晚（客户端在程序之后
+/// 续期过），就改用本机这组凭据并写回账户。返回是否发生了同步。
+pub(crate) fn adopt_newer_local_codex(
+    app: &AppHandle,
+    id: &str,
+    name: &str,
+    token: &mut String,
+    refresh_token: &mut Option<String>,
+) -> Result<bool, String> {
+    let Some(local) = codex_local::local_login_of_same_account(token) else {
+        return Ok(false);
+    };
+    if local.token == *token {
+        return Ok(false);
+    }
+    match (jwt_exp(&local.token), jwt_exp(token)) {
+        (Some(local_exp), Some(own_exp)) if local_exp > own_exp => {}
+        _ => return Ok(false),
+    }
+    *token = local.token.clone();
+    if local.refresh_token.is_some() {
+        *refresh_token = local.refresh_token.clone();
+    }
+    // 本机文件就是完整的 auth.json，整份存为副本；读不到原文时只更新 token 字段
+    let (new_token, new_rt) = (token.clone(), refresh_token.clone());
+    update_codex_auth(app, id, move |v| match local.raw {
+        Some(raw) => *v = raw,
+        None => apply_codex_tokens(v, &new_token, new_rt.as_deref(), None),
+    })?;
+    audit::log(
+        "codex_adopt_local",
+        format!("ChatGPT 凭据已从本机登录同步：{name}（客户端已自行续期）"),
+        Some(json!({ "id": id })),
+    );
+    Ok(true)
+}
+
+enum CodexRenewal {
+    Renewed,
+    NoRefreshToken,
+    /// refresh token 最终被拒绝（含本机凭据重试）：归类原因与服务端说明。
+    Denied(RefreshDenial, String),
+}
+
+/// 续期被拒后写入状态摘要的字段：alive=false，附归类原因（短码 + 说明）与服务端细节。
+fn denied_status(reason: RefreshDenial, detail: &str) -> Value {
+    json!({
+        "alive": false,
+        "refreshError": format!("{}（{detail}）", reason.label()),
+        "refreshErrorCode": reason.code(),
+    })
+}
+
+/// 用账户的 refresh_token 续期并换上新凭据、写回账户、回同步本机 auth.json。
+/// 被拒绝多半是本机客户端已自行续期并轮换了 refresh_token：本机同一账号持有不同的
+/// refresh_token 时改用它再试一次，再失败才判定失效。
+async fn renew_codex(
+    app: &AppHandle,
+    id: &str,
+    name: &str,
+    token: &mut String,
+    refresh_token: &mut Option<String>,
+) -> Result<CodexRenewal, String> {
+    let Some(own_rt) = refresh_token.clone() else {
+        return Ok(CodexRenewal::NoRefreshToken);
+    };
+    let mut used_rt = own_rt.clone();
+    let mut outcome = request_codex_refresh(&own_rt).await?;
+    if let RefreshOutcome::Denied { reason, detail } = &outcome {
+        let local_rt = codex_local::local_login_of_same_account(token)
+            .and_then(|l| l.refresh_token)
+            .filter(|l| *l != own_rt);
+        if let Some(local_rt) = local_rt {
+            audit::log(
+                "codex_renew_failed",
+                format!(
+                    "ChatGPT 续期被拒绝：{name}（{}：{detail}），改用本机登录的凭据重试",
+                    reason.label()
+                ),
+                Some(json!({ "id": id, "reason": reason.code() })),
+            );
+            used_rt = local_rt.clone();
+            outcome = request_codex_refresh(&local_rt).await?;
+        }
+    }
+    match outcome {
+        RefreshOutcome::Success {
+            access_token,
+            refresh_token: new_rt,
+            id_token,
+        } => {
+            *token = access_token;
+            // 轮换出的新值优先；接口未返回新值时保留本次实际使用的那个（可能是本机的）
+            *refresh_token = new_rt.or(Some(used_rt));
+            // 新凭据组整体写进副本（含 id_token），旧 refresh_token 已作废，必须先落盘
+            let (new_token, new_rt, new_idt) = (token.clone(), refresh_token.clone(), id_token.clone());
+            update_codex_auth(app, id, move |v| {
+                apply_codex_tokens(v, &new_token, new_rt.as_deref(), new_idt.as_deref())
+            })?;
+            audit::log(
+                "codex_renewed",
+                format!("ChatGPT access_token 已自动续期：{name}"),
+                Some(json!({ "id": id })),
+            );
+            // 本机 auth.json 若是同一账号则顺带同步新凭据（失败在函数内部消化，不影响刷新）
+            codex_local::sync_auth_json(token, refresh_token, id_token.as_deref());
+            Ok(CodexRenewal::Renewed)
+        }
+        RefreshOutcome::Denied { reason, detail } => {
+            audit::log(
+                "codex_renew_failed",
+                format!("ChatGPT 续期被拒绝：{name}（{}：{detail}）", reason.label()),
+                Some(json!({ "id": id, "reason": reason.code() })),
+            );
+            Ok(CodexRenewal::Denied(reason, detail))
+        }
+    }
+}
+
+/// Codex 账户刷新：先同步本机客户端更新过的凭据，必要时续期 access_token，再查询用量；
+/// 401/403 时补一次续期重试。
 async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Result<Account, String> {
     let name = display_name(&snap.kind, &snap.note, &snap.token);
     let mut token = snap.token;
     let mut refresh_token = snap.refresh_token;
     let mut refreshed = false;
 
-    // 1) access_token 临期（或已过期）且有 refresh_token 时先续期
-    let exp = http::decode_jwt_payload(&token).and_then(|c| c.get("exp").and_then(|x| x.as_i64()));
-    let near_expiry = exp
-        .map(|e| e - Utc::now().timestamp() < REFRESH_AHEAD_SECS)
-        .unwrap_or(false);
-    if near_expiry {
-        if let Some(rt) = refresh_token.clone() {
-            match request_codex_refresh(&rt).await? {
-                RefreshOutcome::Success {
-                    access_token,
-                    refresh_token: new_rt,
-                    id_token,
-                } => {
-                    token = access_token;
-                    if new_rt.is_some() {
-                        refresh_token = new_rt;
-                    }
-                    persist_tokens(app, id, &token, &refresh_token)?;
-                    refreshed = true;
-                    audit::log(
-                        "codex_renewed",
-                        format!("ChatGPT access_token 已自动续期：{name}"),
-                        Some(json!({ "id": id })),
-                    );
-                    // 本机 auth.json 若是同一账号则顺带同步新凭据（失败在函数内部消化，不影响刷新）
-                    codex_local::sync_auth_json(&token, &refresh_token, id_token.as_deref());
-                }
-                RefreshOutcome::Denied { body } => {
-                    audit::log(
-                        "codex_renew_failed",
-                        format!("ChatGPT 续期被拒绝：{name}（{body}）"),
-                        Some(json!({ "id": id })),
-                    );
-                    return finish(app, id, json!({ "alive": false, "refreshError": body }));
-                }
+    // 0) 本机客户端若在程序之后自行续期过，先换上它的那组凭据
+    adopt_newer_local_codex(app, id, &name, &mut token, &mut refresh_token)?;
+
+    // 1) 与 Codex CLI 同一策略判断是否续期（refresh_token 随之轮换）
+    let last_refresh = snapshot(id).ok().and_then(|a| codex_last_refresh(&a));
+    if codex_token_needs_renewal(&token, last_refresh) {
+        match renew_codex(app, id, &name, &mut token, &mut refresh_token).await? {
+            CodexRenewal::Renewed => refreshed = true,
+            CodexRenewal::NoRefreshToken => {}
+            CodexRenewal::Denied(reason, detail) => {
+                return finish(app, id, denied_status(reason, &detail));
             }
         }
     }
@@ -745,35 +1196,11 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
     // 2) 查询用量；token 失效（401/403）且本次尚未续期过则补一次续期并重试一次
     let mut usage = codex::codex_usage(token.clone()).await?;
     if !usage.alive && (usage.status == 401 || usage.status == 403) && !refreshed {
-        if let Some(rt) = refresh_token.clone() {
-            match request_codex_refresh(&rt).await? {
-                RefreshOutcome::Success {
-                    access_token,
-                    refresh_token: new_rt,
-                    id_token,
-                } => {
-                    token = access_token;
-                    if new_rt.is_some() {
-                        refresh_token = new_rt;
-                    }
-                    persist_tokens(app, id, &token, &refresh_token)?;
-                    audit::log(
-                        "codex_renewed",
-                        format!("ChatGPT access_token 已自动续期：{name}"),
-                        Some(json!({ "id": id })),
-                    );
-                    // 本机 auth.json 若是同一账号则顺带同步新凭据（失败在函数内部消化，不影响刷新）
-                    codex_local::sync_auth_json(&token, &refresh_token, id_token.as_deref());
-                    usage = codex::codex_usage(token.clone()).await?;
-                }
-                RefreshOutcome::Denied { body } => {
-                    audit::log(
-                        "codex_renew_failed",
-                        format!("ChatGPT 续期被拒绝：{name}（{body}）"),
-                        Some(json!({ "id": id })),
-                    );
-                    return finish(app, id, json!({ "alive": false, "refreshError": body }));
-                }
+        match renew_codex(app, id, &name, &mut token, &mut refresh_token).await? {
+            CodexRenewal::Renewed => usage = codex::codex_usage(token.clone()).await?,
+            CodexRenewal::NoRefreshToken => {}
+            CodexRenewal::Denied(reason, detail) => {
+                return finish(app, id, denied_status(reason, &detail));
             }
         }
     }
@@ -973,6 +1400,8 @@ pub struct LocalLogin {
     pub refresh_token: Option<String>,
     /// 备注提示（邮箱等可读身份），拿不到为空串。
     pub note_hint: String,
+    /// ChatGPT：本机 auth.json 的完整内容，导入 / 同步时整份存为账户副本；其它类型为 None。
+    pub raw: Option<Value>,
 }
 
 /// 本机登录凭据的读取结果：区分「从未登录」与「有文件但解析不出」。
@@ -1077,16 +1506,24 @@ pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<Impor
                     });
                     continue;
                 }
-                let entry = Account {
+                let mut entry = Account {
                     id: new_id(),
                     kind: login.kind,
                     note,
                     note_auto: true,
                     token,
                     refresh_token: login.refresh_token,
+                    codex_auth: None,
                     last_refresh_at: None,
                     status: None,
                 };
+                // ChatGPT：本机 auth.json 本身就是完整凭据组，整份存为副本
+                if entry.kind == "codex" {
+                    let v = login
+                        .raw
+                        .unwrap_or_else(|| skeleton_codex_auth(&entry.token, entry.refresh_token.as_deref()));
+                    set_codex_auth(&mut entry, &v)?;
+                }
                 let name = display_name(&entry.kind, &entry.note, &entry.token);
                 audit_names.push(name.clone());
                 added.push((entry.id.clone(), entry.kind.clone(), entry.token.clone(), name));
@@ -1131,6 +1568,9 @@ struct AccountExportItem {
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+    /// ChatGPT：加密的完整 auth.json 副本，随导出携带，导入时优先用它恢复（含 id_token）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_auth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1223,6 +1663,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
             } else {
                 a.refresh_token.clone()
             },
+            codex_auth: a.codex_auth.clone(),
         })
         .collect();
     if rows.is_empty() {
@@ -1335,16 +1776,21 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                 } else {
                     sanitize_refresh_token(item.refresh_token)
                 };
-                let entry = Account {
+                let mut entry = Account {
                     id: new_id(),
                     kind: kind.clone(),
                     note,
                     note_auto,
                     token,
                     refresh_token,
+                    // 文件里带的副本能解开就用它（含 id_token），否则由明文凭据组骨架副本
+                    codex_auth: if kind == "codex" { item.codex_auth } else { None },
                     last_refresh_at: None,
                     status: None,
                 };
+                if entry.kind == "codex" {
+                    hydrate_accounts(std::slice::from_mut(&mut entry));
+                }
                 let name = display_name(&entry.kind, &entry.note, &entry.token);
                 audit_names.push(name.clone());
                 added.push((entry.id.clone(), entry.kind.clone(), entry.token.clone(), name));
@@ -1402,6 +1848,7 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
         note_auto: true,
         token: result.access_token,
         refresh_token: result.refresh_token,
+        codex_auth: None,
         last_refresh_at: None,
         // 记录 token 过期时刻，刷新流程据此提前续期
         status: result
@@ -1428,4 +1875,29 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
         label,
         view: view(&data),
     })
+}
+
+#[cfg(test)]
+mod refresh_error_tests {
+    use super::*;
+
+    #[test]
+    fn error_code_extraction_matches_codex_cli() {
+        // RFC 6749 形态：error 为字符串，说明在 error_description
+        let rfc = r#"{"error":"invalid_grant","error_description":"refresh token expired"}"#;
+        assert_eq!(refresh_error_code(rfc).as_deref(), Some("invalid_grant"));
+        assert_eq!(refresh_error_detail(rfc), "refresh token expired");
+        // 旧形态：error 为对象，子码在 error.code
+        let legacy = r#"{"error":{"code":"refresh_token_reused","message":"already used"}}"#;
+        assert_eq!(refresh_error_code(legacy).as_deref(), Some("refresh_token_reused"));
+        assert_eq!(refresh_error_detail(legacy), "already used");
+        // 顶层 code
+        assert_eq!(
+            refresh_error_code(r#"{"code":"refresh_token_expired"}"#).as_deref(),
+            Some("refresh_token_expired")
+        );
+        // 非 JSON：没有错误码，说明取截断原文
+        assert!(refresh_error_code("Bad Gateway").is_none());
+        assert_eq!(refresh_error_detail("  Bad Gateway  "), "Bad Gateway");
+    }
 }

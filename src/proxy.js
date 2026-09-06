@@ -1,4 +1,4 @@
-import { el, invoke, copyText, resetError, fillStatus } from "./shared.js";
+import { el, invoke, copyText, resetError, fillStatus, toast } from "./shared.js";
 
 // 代理设置弹窗：跟随系统 / 直连 / 自定义（http、https、socks5，可带账号密码）。
 // 保存到用户目录 .xilore/myaiassistant/settings.json 的 proxy 字段，后端每次构建 HTTP 客户端时读取，保存后立即生效。
@@ -61,7 +61,8 @@ async function onTest() {
     const r = await invoke("proxy_test", { config: readForm() });
     if (r.ok) {
       result.className = "small test-ok";
-      result.textContent = `已连通 · 出口 IP ${r.ip || "未知"} · ${r.ms}ms`;
+      result.textContent =
+        `已连通 · IP：${r.ip || "未知"} · 地区：${r.region || "未知"} · ISP：${r.isp || "未知"} · ${r.ms}ms`;
     } else {
       result.className = "small test-bad";
       const reason = r.error ? r.error : r.status ? `HTTP ${r.status}` : "无响应";
@@ -85,8 +86,10 @@ async function onSave() {
     state.url = view.url;
     state.path = view.path;
     render();
+    // 保存成功即关闭弹窗，结果用右上角 toast 提示；失败时保留弹窗与状态条
     const label = state.mode === "custom" ? state.url : state.mode === "direct" ? "直连" : "跟随系统";
-    setStatus("ok", `已保存（${label}），后续请求立即生效。`);
+    closeModal();
+    toast("ok", `代理已保存（${label}），后续请求立即生效。`, { key: "proxy" });
   } catch (err) {
     setStatus("bad", `保存失败：${mapError(err)}`);
   } finally {

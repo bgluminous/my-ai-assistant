@@ -11,7 +11,8 @@
 图表使用 [Chart.js](https://www.chartjs.org/)，网络请求由 Rust 侧 `reqwest` 发出。
 当前面向 **Windows** 与 **macOS**。
 
-HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保存在本机，不经过第三方服务。
+HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表在线更新与代理测试所用的
+`inf.xil.to`。账户凭据保存在本机，不经过第三方服务。
 
 > 用量与账户状态依赖 Cursor、OpenAI、Anthropic 的非公开接口，字段与可用性可能随时变化。
 > 使用前请自行核对各服务条款。
@@ -51,8 +52,18 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名。账户凭据保�
   macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。
   客户端路径可手动指定，也可自动搜索常见安装位置。
   切换成功的结果弹窗 3 秒后自动关闭（按钮上倒计时，可手动关闭）；失败结果保留到手动关闭。
-- ChatGPT / Claude 账户可保存 `refresh_token`。access token 临近过期，或请求返回 401 / 403
-  时自动续期，并写回本机凭据（ChatGPT）/ 账户（Claude）。
+- ChatGPT / Claude 账户可保存 `refresh_token`，access token 到期前自动续期。
+  ChatGPT 的续期策略与 Codex CLI 一致：access token 距过期不足 5 分钟（或解析不出过期时刻且距
+  上次获取超过 8 天）就换新整组凭据，请求返回 401 / 403 时补一次；每次续期都会轮换
+  `refresh_token`（它本身不带可读的有效期）。Claude 在 access token 临期或 401 / 403 时续期。
+- ChatGPT 账户保存的是本机 Codex 客户端 `auth.json` 的完整副本（含 `id_token`），续期、切换、
+  从本机导入都整份写入；手动添加或编辑凭据时会立刻用 `refresh_token` 换取完整一组。
+  同步是双向的：程序续期后写回本机 `auth.json`；后台按设置的间隔（默认 5 分钟，可选 1 分钟到
+  1 天）检查本机 `auth.json` 的修改时间，ChatGPT Desktop / Codex CLI 自行续期后，同账号账户的副本
+  会跟着更新（不联网，与定时刷新无关），刷新和切换前也会再取回一次；续期被拒绝时用本机同一账号的
+  凭据重试一次。
+  切换账号时，副本完整且 access token 未到续期窗口就直接写入本机，不换票；否则先换票再写入。
+  若 `refresh_token` 已失效，结果弹窗提供「强制写入并启动」，直接把保存的副本写入本机。
 
 ### 用量统计
 
@@ -198,8 +209,10 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 `settings.json` 以临时文件写入后原子替换。启动时若读取失败（例如文件被短暂占用）会重试，
 不会用空数据覆盖原文件；JSON 解析失败时先备份为 `settings.json.bad`。
 
-**凭据以明文 JSON 存放在本机。** 不要把该目录提交到版本库，也不要分享 `settings.json`。
-审计日志只记录备注或打码后的 token，不含完整凭据。
+**凭据存放在本机。** Cursor / Claude 的 token 为明文；ChatGPT 账户只保存加密的 `auth.json`
+副本（AES-256-GCM，密钥内置于程序，只能防止被直接读出，不能防御反编译），token 在运行时由副本
+解出，旧版本的明文凭据会在首次启动时自动迁移。不要把该目录提交到版本库，也不要分享
+`settings.json`。审计日志只记录备注或打码后的 token，不含完整凭据。
 
 主题与 token 显示单位保存在 WebView 的 `localStorage` 中，不进入 `settings.json`；
 全量备份导出时会把这两项界面偏好一并写入备份文件。
@@ -216,9 +229,10 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
   分发方的售价；Cursor 的账单只用来核对上报的模型名能否命中。只在 Cursor 提供的模型（Composer）
   以 Cursor 官方价目为厂商价。
 - Fast 条目只收录厂商官方设有 Fast 档的模型（OpenAI Fast mode、Anthropic fast mode 的 Opus 5 / 4.8、
-  Cursor Composer 2.5 Fast），键为「基础模型键 + `-fast`」（如 `gpt-5-fast`、`claude-opus-5-fast`），
-  上报名末尾的 `-fast` 会归到对应条目。厂商没有 Fast 档的模型（如 xAI Grok，Cursor 对其 Fast 的
-  加价属 Cursor 自身定价），其 Fast 用量独立成行、按标准价折算并在价格标签里显示套用的基础键。
+  Cursor Composer 2.5 Fast），键为「基础模型键 + `-fast`」（如 `gpt-5-fast`、
+  `claude-opus-5-fast`），上报名末尾的 `-fast` 会归到对应条目。厂商没有 Fast 档的模型
+  （如 xAI Grok，Cursor 对其 Fast 的加价属 Cursor 自身定价），其 Fast 用量独立成行、按标准价折算并在
+  价格标签里显示套用的基础键。
   Max 是 effort 等级而非计费档，按基础模型计价。
 - 默认价格为折算参考，使用前请对照 Anthropic、OpenAI、Google、xAI、Cursor 等厂商的现行价目。
   部分厂商对超长上下文的加价规则未写入默认表。

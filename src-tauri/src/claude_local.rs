@@ -165,6 +165,7 @@ pub fn read_local_login() -> accounts::LocalLoginRead {
                     token: access,
                     refresh_token: refresh,
                     note_hint: String::new(),
+                    raw: None,
                 });
             }
         }
@@ -179,6 +180,7 @@ pub fn read_local_login() -> accounts::LocalLoginRead {
                         token: access,
                         refresh_token: refresh,
                         note_hint: String::new(),
+                        raw: None,
                     });
                 }
             }

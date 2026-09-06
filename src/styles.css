@@ -965,7 +965,8 @@ td.account-actions { white-space: nowrap; }
 .quota-bar.q-low .quota-bar-pct { color: var(--bad); }
 
 .seg:disabled { opacity: 0.55; cursor: not-allowed; }
-.modal-foot .modal-actions:only-child { margin-left: auto; }
+/* 主操作组始终靠右：左侧的备选按钮（从本机导入 / 清除本地数据 / 强制写入并启动）按需隐藏时不影响布局 */
+.modal-foot .modal-actions { margin-left: auto; }
 
 /* ---------- 用量统计：筛选工具栏、数据源选择与总览 ---------- */
 

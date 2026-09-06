@@ -11,6 +11,7 @@ mod cursor_local;
 mod http;
 mod launch;
 mod local_client;
+mod local_crypto;
 mod main_window;
 mod model_match;
 mod paths;
@@ -93,6 +94,8 @@ pub fn run() {
             let silent = autostart_launch && settings::read(|s| s.autostart_silent).unwrap_or(false);
             launch::set_silent_launch(silent);
             tray::setup(app.handle())?;
+            // 本机 Codex 客户端改写 auth.json 后，把同账号账户的凭据副本跟上（每分钟看一次修改时间）
+            codex_local::start_local_sync(app.handle().clone());
             // 最小窗口尺寸运行时兜底（与 tauri.conf.json 的 minWidth/minHeight 一致），
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
             if let Some(win) = app.get_webview_window(main_window::LABEL) {
@@ -147,6 +150,9 @@ pub fn run() {
             cursor_local::cursor_client_launch,
             codex::codex_scan_sessions,
             codex_local::codex_switch_local,
+            codex_local::codex_force_write_local,
+            codex_local::local_sync_get,
+            codex_local::local_sync_set,
             codex_local::codex_client_get,
             codex_local::codex_client_set,
             codex_local::codex_client_detect,

@@ -1,4 +1,4 @@
-import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml } from "./shared.js";
+import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml, toast } from "./shared.js";
 import { notifyPricingChanged } from "./usage_data.js";
 
 // 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
@@ -165,7 +165,9 @@ async function onSave() {
     await load();
     render();
     setChip(status.models);
-    setStatus("ok", `已保存，共 ${status.models} 个模型生效，用量统计已按新价重算。`);
+    // 保存成功即关闭弹窗，结果用右上角 toast 提示；失败时保留弹窗与状态条
+    closeModal();
+    toast("ok", `价格表已保存，共 ${status.models} 个模型生效，用量统计已按新价重算。`, { key: "pricing" });
   } catch (err) {
     setStatus("bad", `保存失败：${resetError(err)}`);
   } finally {

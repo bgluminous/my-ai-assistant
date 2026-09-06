@@ -81,17 +81,31 @@ pub fn proxy_set(config: ProxyConfig) -> Result<ProxyView, String> {
     Ok(view(&cfg))
 }
 
+/// 代理测试的出口探测地址：返回 `{"code":0,"data":{"ip","country","province","city","isp",...}}`。
+const PROXY_TEST_URL: &str = "https://inf.xil.to/ip";
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyTestResult {
     pub ok: bool,
     pub ms: u64,
     pub ip: Option<String>,
+    /// 出口 IP 的地区（国家 / 省 / 市，空段与重复段已去掉）。
+    pub region: Option<String>,
+    pub isp: Option<String>,
     pub status: Option<u16>,
     pub error: Option<String>,
 }
 
-/// 用给定（可能尚未保存的）配置试连一次，返回出口 IP 与耗时，便于用户确认代理可用。
+fn json_str(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 用给定（可能尚未保存的）配置试连一次，返回出口 IP、地区、ISP 与耗时，便于用户确认代理可用。
 #[tauri::command]
 pub async fn proxy_test(config: ProxyConfig) -> Result<ProxyTestResult, String> {
     let cfg = sanitize(config);
@@ -99,7 +113,7 @@ pub async fn proxy_test(config: ProxyConfig) -> Result<ProxyTestResult, String> 
     let client = crate::http::build_client(&cfg);
     let started = Instant::now();
     let resp = client
-        .get("https://api.ipify.org?format=json")
+        .get(PROXY_TEST_URL)
         .timeout(Duration::from_secs(15))
         .send()
         .await;
@@ -107,15 +121,32 @@ pub async fn proxy_test(config: ProxyConfig) -> Result<ProxyTestResult, String> 
     match resp {
         Ok(r) => {
             let status = r.status().as_u16();
-            let ip = r
+            let data = r
                 .json::<serde_json::Value>()
                 .await
                 .ok()
-                .and_then(|v| v.get("ip").and_then(|x| x.as_str()).map(str::to_string));
+                .and_then(|v| v.get("data").cloned());
+            let (ip, region, isp) = match &data {
+                Some(d) => {
+                    let mut parts: Vec<String> = Vec::new();
+                    for key in ["country", "province", "city"] {
+                        if let Some(s) = json_str(d, key) {
+                            if !parts.contains(&s) {
+                                parts.push(s);
+                            }
+                        }
+                    }
+                    let region = (!parts.is_empty()).then(|| parts.join(" "));
+                    (json_str(d, "ip"), region, json_str(d, "isp"))
+                }
+                None => (None, None, None),
+            };
             Ok(ProxyTestResult {
                 ok: (200..300).contains(&status),
                 ms,
                 ip,
+                region,
+                isp,
                 status: Some(status),
                 error: None,
             })
@@ -124,6 +155,8 @@ pub async fn proxy_test(config: ProxyConfig) -> Result<ProxyTestResult, String> 
             ok: false,
             ms,
             ip: None,
+            region: None,
+            isp: None,
             status: None,
             error: Some(e.to_string()),
         }),

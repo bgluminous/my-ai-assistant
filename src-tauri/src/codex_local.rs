@@ -70,8 +70,8 @@ fn write_auth_json(path: &Path, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 从新 access_token 的 JWT 里解析 chatgpt_account_id（可能缺失）。
-fn account_id_from_token(access_token: &str) -> Option<String> {
+/// 从 access_token 的 JWT 里解析 chatgpt_account_id（可能缺失）。
+pub(crate) fn account_id_from_token(access_token: &str) -> Option<String> {
     http::decode_jwt_payload(access_token)
         .and_then(|c| {
             c.get("https://api.openai.com/auth")
@@ -131,7 +131,21 @@ pub fn read_local_login() -> accounts::LocalLoginRead {
         token: access_token,
         refresh_token,
         note_hint,
+        raw: Some(v),
     })
+}
+
+/// 本机 auth.json 里的登录若与给定 access_token 属同一账号（account_id 均非空且一致），返回其凭据；
+/// 未登录、文件无法解析或不是同一账号都返回 None。供账户刷新 / 切换时把客户端自行续期后的
+/// 新凭据同步回账户（与 sync_auth_json 相反的方向）。
+pub fn local_login_of_same_account(account_token: &str) -> Option<accounts::LocalLogin> {
+    let accounts::LocalLoginRead::Found(local) = read_local_login() else {
+        return None;
+    };
+    match (account_id_from_token(&local.token), account_id_from_token(account_token)) {
+        (Some(local_id), Some(account_id)) if local_id == account_id => Some(local),
+        _ => None,
+    }
 }
 
 /// 账户续期成功后，best-effort 把新凭据回同步进本机 auth.json——仅当本机登录与
@@ -603,20 +617,50 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         return Err("account_not_verified".into());
     }
 
-    let rt = match acc.refresh_token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let name = accounts::short_display_name(&acc);
+    // 本机若正登录着同一账号且客户端已自行续期，先换上它的凭据，避免拿已作废的 refresh_token 去换
+    let mut current_token = acc.token.clone();
+    let mut current_rt = acc.refresh_token.clone();
+    accounts::adopt_newer_local_codex(&app, &id, &name, &mut current_token, &mut current_rt)?;
+
+    // 副本完整且 access_token 还没进续期窗口时直接写入，不换票：每次换票都会轮换 refresh_token，
+    // 能少一次就少一次与本机客户端脱节的机会
+    let fresh_copy = accounts::account_snapshot(&id).ok().and_then(|a| {
+        let copy = accounts::codex_auth_json(&a)?;
+        let renew =
+            accounts::codex_token_needs_renewal(&current_token, accounts::codex_last_refresh(&a));
+        (copy_is_complete(&copy) && !renew).then_some(copy)
+    });
+    if let Some(copy) = fresh_copy {
+        if is_desktop_running() {
+            return Err("codex_running".into());
+        }
+        write_local_auth(copy)?;
+        audit::log(
+            "codex_switch_local",
+            format!("切换本机 ChatGPT 登录：{name}（写入保存的凭据副本，未换票）"),
+            Some(json!({ "id": id, "exchanged": false })),
+        );
+        return Ok(SwitchResult {
+            switched: true,
+            message: "已写入本地登录。".into(),
+        });
+    }
+
+    let rt = match current_rt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(rt) => rt.to_string(),
         None => return Err("codex_no_refresh_token".into()),
     };
 
-    let name = accounts::short_display_name(&acc);
     let (token, new_rt, id_token) = match accounts::request_codex_refresh(&rt).await? {
-        accounts::RefreshOutcome::Denied { body } => {
+        accounts::RefreshOutcome::Denied { reason, detail } => {
             audit::log(
                 "codex_renew_failed",
-                format!("ChatGPT 续期被拒绝：{name}（{body}）"),
-                Some(json!({ "id": id })),
+                format!("ChatGPT 续期被拒绝：{name}（{}：{detail}）", reason.label()),
+                Some(json!({ "id": id, "reason": reason.code() })),
             );
-            return Err("codex_refresh_denied".into());
+            // 错误码带归类后缀（expired / reused / revoked / invalid），前端据此给出针对性提示
+            return Err(format!("codex_refresh_denied:{}", reason.code()));
         }
         accounts::RefreshOutcome::Success {
             access_token,
@@ -625,23 +669,132 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         } => (access_token, refresh_token, id_token),
     };
 
-    // 轮换后旧 refresh_token 已作废，无论后续成败先把新凭据写回账户。
+    // 轮换后旧 refresh_token 已作废，无论后续成败先把新凭据组（含 id_token）写进账户副本。
     let refresh_token = new_rt.or(Some(rt));
-    accounts::persist_tokens(&app, &id, &token, &refresh_token)?;
+    {
+        let (t, r, i) = (token.clone(), refresh_token.clone(), id_token.clone());
+        accounts::update_codex_auth(&app, &id, move |v| {
+            accounts::apply_codex_tokens(v, &t, r.as_deref(), i.as_deref())
+        })?;
+    }
     let Some(id_token) = id_token else {
         return Err("codex_id_token_missing".into());
     };
-
-    let account_id = account_id_from_token(&token);
 
     if is_desktop_running() {
         return Err("codex_running".into());
     }
 
+    let value = json!({
+        "OPENAI_API_KEY": Value::Null,
+        "tokens": {
+            "id_token": id_token,
+            "access_token": token,
+            "refresh_token": refresh_token,
+            "account_id": account_id_from_token(&token),
+        },
+        "last_refresh": Utc::now().to_rfc3339(),
+    });
+    write_local_auth(value)?;
+
+    audit::log(
+        "codex_switch_local",
+        format!("切换本机 ChatGPT 登录：{name}（已换取新凭据）"),
+        Some(json!({ "id": id, "exchanged": true })),
+    );
+
+    Ok(SwitchResult {
+        switched: true,
+        message: "已写入本地登录。".into(),
+    })
+}
+
+/// 副本是否具备写成本机 auth.json 的三要素（id_token / access_token / refresh_token 均非空）。
+fn copy_is_complete(v: &Value) -> bool {
+    ["id_token", "access_token", "refresh_token"].iter().all(|key| {
+        v.pointer(&format!("/tokens/{key}"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    })
+}
+
+/// 本机 auth.json 的修改时间（文件不存在为 None），供定时同步判断是否有变化。
+fn auth_json_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(auth_json_path()?).ok()?.modified().ok()
+}
+
+/// 后台定时同步：ChatGPT Desktop / Codex CLI 运行时会自行续期并改写 auth.json，这里按设置的间隔
+///（默认 5 分钟）看一次文件修改时间，变了就把同账号账户的凭据副本更新过来（不联网，与定时刷新
+/// 是否开启无关）。每 30 秒醒一次判断是否到点，改间隔后无需重启即生效。
+/// 与刷新 / 切换共用同一把队列锁，不会与正在进行的换票交错。
+pub fn start_local_sync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut seen = auth_json_mtime();
+        let mut last_check = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let interval = std::time::Duration::from_secs(u64::from(settings::local_sync_minutes()) * 60);
+            if last_check.elapsed() < interval {
+                continue;
+            }
+            last_check = std::time::Instant::now();
+            let now = auth_json_mtime();
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            if now.is_none() {
+                continue;
+            }
+            let _queued = accounts::refresh_queue().lock().await;
+            if let Err(e) = accounts::sync_codex_from_local(&app) {
+                audit::log(
+                    "codex_sync_failed",
+                    format!("从本机 auth.json 同步 ChatGPT 凭据失败：{e}"),
+                    None,
+                );
+            }
+        }
+    });
+}
+
+/// 读取本机同步间隔（分钟）。
+#[tauri::command]
+pub fn local_sync_get() -> Result<u32, String> {
+    settings::ensure_loaded()?;
+    Ok(settings::local_sync_minutes())
+}
+
+/// 设置本机同步间隔（分钟），只接受设置弹窗提供的几档。
+#[tauri::command]
+pub fn local_sync_set(minutes: u32) -> Result<u32, String> {
+    if !settings::LOCAL_SYNC_CHOICES.contains(&minutes) {
+        return Err("invalid_interval".into());
+    }
+    settings::mutate(|s| {
+        s.codex_local_sync_minutes = minutes;
+        Ok(())
+    })?;
+    let text = if minutes >= 60 && minutes % 60 == 0 {
+        format!("{} 小时", minutes / 60)
+    } else {
+        format!("{minutes} 分钟")
+    };
+    audit::log(
+        "local_sync_interval_set",
+        format!("本机 ChatGPT 凭据同步间隔设为每 {text}"),
+        None,
+    );
+    Ok(minutes)
+}
+
+/// 把一组完整凭据写成本机 auth.json：先备份原文件为 auth.json.bak；副本里没有 OPENAI_API_KEY 时
+/// 保留原文件里的值，避免覆盖用户配置的 API Key。
+fn write_local_auth(mut value: Value) -> Result<(), String> {
     let Some(path) = auth_json_path() else {
         return Err("codex_auth_write_failed: home_dir_unavailable".into());
     };
-    let mut api_key = Value::Null;
+    let mut existing_api_key = Value::Null;
     if path.exists() {
         let backup = path.with_extension("json.bak");
         std::fs::copy(&path, &backup)
@@ -649,32 +802,69 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = serde_json::from_str::<Value>(&text) {
                 if let Some(k) = v.get("OPENAI_API_KEY") {
-                    api_key = k.clone();
+                    existing_api_key = k.clone();
                 }
             }
         }
     }
+    if let Some(obj) = value.as_object_mut() {
+        let keep_existing = obj
+            .get("OPENAI_API_KEY")
+            .is_none_or(|k| k.is_null() || k.as_str().is_some_and(|s| s.trim().is_empty()));
+        if keep_existing {
+            obj.insert("OPENAI_API_KEY".into(), existing_api_key);
+        }
+    }
+    write_auth_json(&path, &value)
+}
 
-    let value = json!({
-        "OPENAI_API_KEY": api_key,
-        "tokens": {
-            "id_token": id_token,
-            "access_token": token,
-            "refresh_token": refresh_token,
-            "account_id": account_id,
-        },
-        "last_refresh": Utc::now().to_rfc3339(),
-    });
-    write_auth_json(&path, &value)?;
+/// 「强制写入并启动」的写入步骤：不向 OpenAI 换新凭据，直接用账户里保存的 auth.json 副本覆盖
+/// 本机文件。供切换时 refresh_token 已失效、拿不到新 access_token 的场景兜底；副本不完整
+///（缺 id_token / access_token / refresh_token）时报 codex_auth_incomplete。
+#[tauri::command]
+pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String> {
+    if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
+        return Err("unsupported_platform".into());
+    }
+    let acc = accounts::account_snapshot(&id)?;
+    if acc.kind != "codex" {
+        return Err("not_codex_account".into());
+    }
+    let Some(mut value) = accounts::codex_auth_json(&acc) else {
+        return Err("codex_auth_missing".into());
+    };
+    if !copy_is_complete(&value) {
+        return Err("codex_auth_incomplete".into());
+    }
+    // 副本缺 account_id 时由 access_token 补上（Codex 反序列化需要该字段）
+    if let Some(tokens) = value.get_mut("tokens").and_then(Value::as_object_mut) {
+        let missing = tokens
+            .get("account_id")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.trim().is_empty());
+        if missing {
+            if let Some(account_id) = tokens
+                .get("access_token")
+                .and_then(Value::as_str)
+                .and_then(account_id_from_token)
+            {
+                tokens.insert("account_id".into(), json!(account_id));
+            }
+        }
+    }
+    if is_desktop_running() {
+        return Err("codex_running".into());
+    }
+    write_local_auth(value)?;
 
+    let name = accounts::short_display_name(&acc);
     audit::log(
-        "codex_switch_local",
-        format!("切换本机 ChatGPT 登录：{name}"),
+        "codex_force_write",
+        format!("强制写入本机 ChatGPT 登录：{name}（未换新凭据，直接写入保存的副本）"),
         Some(json!({ "id": id })),
     );
-
     Ok(SwitchResult {
         switched: true,
-        message: "已写入本地登录。".into(),
+        message: "已写入本地登录（未换新凭据）。".into(),
     })
 }

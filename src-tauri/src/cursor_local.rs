@@ -290,6 +290,7 @@ pub fn read_local_login() -> accounts::LocalLoginRead {
         token: format!("{user_id}::{jwt}"),
         refresh_token: None,
         note_hint,
+        raw: None,
     })
 }
 

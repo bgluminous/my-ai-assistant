@@ -1267,7 +1267,7 @@ const SWITCH_ERRORS = {
   codex_exe_not_found: "未找到 ChatGPT，请在主窗口设置路径。",
   codex_exe_invalid: "ChatGPT 路径无效，请在主窗口设置。",
   codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
-  codex_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
+  // codex_refresh_denied 带归类后缀，见 switchErrorText
   codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
   not_claude_account: "该账户不是 Claude 账户。",
   claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
@@ -1457,8 +1457,8 @@ async function doSwitch(id) {
         return;
       }
       trayModal.toSteps(st.running
-        ? ["关闭 ChatGPT", "换取登录凭证并写入", "启动 ChatGPT"]
-        : ["换取登录凭证并写入", "启动 ChatGPT"]);
+        ? ["关闭 ChatGPT", "写入登录凭证", "启动 ChatGPT"]
+        : ["写入登录凭证", "启动 ChatGPT"]);
       if (st.running) {
         trayModal.stepStart();
         const c = await invoke("codex_client_close");
@@ -1558,10 +1558,18 @@ async function doSwitch(id) {
   } catch (error) {
     const code = resetError(error);
     // 写登录文件失败的错误码带冒号细节（codex_auth_write_failed:…），按前缀匹配
+    const deniedWhy = {
+      expired: "Refresh Token 已过期",
+      reused: "Refresh Token 已被使用过（已被别处轮换）",
+      revoked: "Refresh Token 已被吊销",
+      invalid: "Refresh Token 已失效",
+    };
     const text = code.startsWith("codex_auth_write_failed")
       ? "写入本机 ChatGPT 登录文件失败，请检查文件权限后重试。"
       : code.startsWith("claude_creds_write_failed")
       ? "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。"
+      : code.startsWith("codex_refresh_denied")
+      ? `${deniedWhy[code.split(":")[1]] || deniedWhy.invalid}，请在主窗口编辑账户更新凭据，或用「强制写入并启动」。`
       : SWITCH_ERRORS[code] || code;
     trayModal.stepFail();
     trayModal.finish(false, `切换失败：${text}`);

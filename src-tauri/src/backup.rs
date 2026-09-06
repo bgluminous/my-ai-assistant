@@ -197,8 +197,10 @@ pub async fn backup_export(
     settings::ensure_loaded()?;
     let password = normalize_password(password);
     let encrypted = password.is_some();
-    let settings_value =
-        settings::read(|s| serde_json::to_value(s.clone()).map_err(|e| e.to_string()))??;
+    // 与落盘形态一致：ChatGPT 账户只带加密副本，不带明文 token
+    let settings_value = settings::read(|s| {
+        serde_json::to_value(settings::persisted_form(s)).map_err(|e| e.to_string())
+    })??;
     let account_count = settings_value
         .get("accounts")
         .and_then(Value::as_array)
@@ -378,8 +380,10 @@ pub async fn backup_import_apply(
                 skipped_exists += 1;
                 continue;
             }
-            // 重新生成 id，避免与本机现有账号冲突；状态摘要与刷新时间随备份保留
+            // 重新生成 id，避免与本机现有账号冲突；状态摘要与刷新时间随备份保留。
+            // ChatGPT 的加密副本已在 sanitize_loaded 里解出 token，这里连副本一起带过来
             let refresh_token = if kind == "cursor" { None } else { acc.refresh_token };
+            let codex_auth = if kind == "codex" { acc.codex_auth } else { None };
             let entry = Account {
                 id: accounts::new_id(),
                 kind,
@@ -387,6 +391,7 @@ pub async fn backup_import_apply(
                 note_auto: acc.note_auto,
                 token,
                 refresh_token,
+                codex_auth,
                 last_refresh_at: acc.last_refresh_at,
                 status: acc.status,
             };
@@ -408,6 +413,8 @@ pub async fn backup_import_apply(
         s.codex_client = incoming.codex_client;
         s.claude_client = incoming.claude_client;
         s.autostart_silent = incoming.autostart_silent;
+        // 旧备份没有该字段时反序列化为默认值，直接覆盖即可
+        s.codex_local_sync_minutes = incoming.codex_local_sync_minutes;
         // 合并后仍在用的 Cursor 账户身份：备份里同身份的已删除统计数据不再恢复
         Ok(s
             .accounts
