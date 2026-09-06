@@ -307,11 +307,25 @@ function cursorSummaryNodes(status) {
   if (sand && sand.included) {
     let usedPct = Number(sand.usagePercent);
     if (sand.hasAvailableUsage === false) usedPct = 100;
-    const reset = sand.nextResetAt ? `重置 ${shortDate(sand.nextResetAt)}` : "";
+    const reset = sand.nextResetAt ? resetCountdownText(Date.parse(sand.nextResetAt)) : "";
     const bar = quotaBar("Sand", usedPct, reset);
     if (bar) bars.push(bar);
   }
   return { bars, meta };
+}
+
+/**
+ * 额度重置时刻的紧凑文案（额度条右侧小字，空间有限）：距重置不足 24 小时显示时刻（HH:mm），
+ * 24 小时以上显示日期（MM-DD）；时刻已过说明数据陈旧，显示「已重置」。
+ * Cursor 的 Sand 周额度与 ChatGPT / Claude 的额度窗口共用。
+ */
+function resetCountdownText(resetAtMs) {
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return "";
+  const inSec = Math.round((resetAtMs - Date.now()) / 1000);
+  if (inSec <= 0) return "已重置";
+  const d = new Date(resetAtMs);
+  if (inSec >= 86400) return `重置 ${shortDate(d)}`;
+  return `重置 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** 超额列（Cursor）：超出套餐的按需消费金额 + 可选的上限小字；未开启或无数据为 —。 */

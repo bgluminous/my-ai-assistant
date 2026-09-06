@@ -473,14 +473,14 @@ async function refreshAll() {
 
 /* ---------- 总览：今天 / 昨天 token 用量（与主窗口用量页共用 usage_data 缓存） ---------- */
 
-function overviewTip(text) {
+function overviewTip(text, statAtMs = 0) {
   teardownOverview();
   const tip = document.createElement("div");
   tip.className = "tray-empty";
   tip.textContent = text;
   el("#tray-ov-body").replaceChildren(tip);
-  // 没有数据可展示时也没有对应的数据时间
-  setOverviewUpdated(0);
+  // 「暂无用量数据」同样是一次统计结果，带上数据时间；确实没有任何数据（首次统计中）时为 0，隐藏
+  setOverviewUpdated(statAtMs);
   syncOverviewLoading();
 }
 
@@ -902,7 +902,7 @@ function renderOverview(data, statAtMs, scope) {
     || (data.modelTokenShares || []).some((m) => m && m.tokens > 0)
     || (data.modelCostShares || []).some((m) => m && m.usd > 0);
   if (!data.rows.length && !hasChart) {
-    overviewTip("暂无用量数据");
+    overviewTip("暂无用量数据", statAtMs);
     return;
   }
   ensureOverviewDom();
@@ -1001,8 +1001,8 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
   const peek = dayPeekers(scope);
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const entries = []; // { row, hourlySource, modelSource }
-  // 数据时间只统计本轮拉取成功的来源：失败 / 失效账户的缓存时间永远不再前进，
-  // 计入会把「更新于」拖回很久以前，与实际刷新不符
+  // 数据时间取所有拿到数据的来源（与当天有没有用量无关），但不计本轮拉取失败与已失效的账户：
+  // 它们的缓存时间永远不再前进，计入会把「更新于」拖回很久以前，与实际刷新不符
   const ats = [];
   const noteAt = (id, at) => {
     if (!fetchErrors.has(id) && Number.isFinite(at)) ats.push(at);
@@ -1016,12 +1016,12 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
     const seriesHit = peek.aggSeries(a.id);
     if (!dayHit && !seriesHit) continue;
     const hit = dayHit || seriesHit;
+    if (!(a.status && a.status.alive === false)) noteAt(a.id, hit.entry.at);
     const sliceAgg = hit.entry.agg;
     const sliceKey = hit.rangeKey;
     const slice = sliceDay(sliceAgg, ymd, sliceKey);
     // 所选日没有用量的账户不占行（拉取失败的由 applyOverviewErrors 补一行错误提示）
     if (!(slice.tokens > 0)) continue;
-    noteAt(a.id, hit.entry.at);
     totalTokens += slice.tokens;
     totalUsd += slice.usd;
     entries.push({
@@ -1038,10 +1038,10 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
   const pushScanEntry = (id, name, scanDay, scanSeries) => {
     if (!scanDay && !scanSeries) return;
     const hit = scanDay || scanSeries;
+    noteAt(id, hit.entry.at);
     const agg = hit.entry.scan.aggregate;
     const slice = sliceDay(agg, ymd, hit.rangeKey);
     if (!(slice.tokens > 0)) return;
-    noteAt(id, hit.entry.at);
     totalTokens += slice.tokens;
     totalUsd += slice.usd;
     entries.push({
@@ -1155,12 +1155,12 @@ async function loadOverviewInner(force) {
   }
 
   if (cached.data.rows.length) renderOverview(cached.data, cached.at, scope);
-  else if (!jobs.length) overviewTip("暂无用量数据");
+  else if (!jobs.length) overviewTip("暂无用量数据", cached.at);
 
   if (!jobs.length) return;
   overviewLoading = true;
   syncHeaderRefresh();
-  if (!cached.data.rows.length && !overviewDom) overviewTip(`正在统计${scope.word}用量…`);
+  if (!cached.data.rows.length && !overviewDom) overviewTip(`正在统计${scope.word}用量…`, cached.at);
   try {
     await Promise.allSettled(jobs);
     if (!stillCurrent()) return;
