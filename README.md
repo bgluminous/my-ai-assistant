@@ -276,6 +276,7 @@ my-ai-assistant/
     ├── capabilities/
     ├── resources/pricing.default.json
     └── src/                  # 账户、用量、审计、托盘、代理、价格、本机客户端
+        └── tests/            # 各模块的单元测试，文件名与被测源文件同名（源文件末尾以 #[path] 挂载）
 ```
 
 ## 声明

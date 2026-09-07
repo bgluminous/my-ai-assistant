@@ -507,31 +507,5 @@ pub async fn exchange_web_to_session(session_token: &str) -> Result<SessionToken
 }
 
 #[cfg(test)]
-mod parse_timestamp_tests {
-    use super::parse_timestamp_ms;
-    use serde_json::json;
-
-    #[test]
-    fn millis_string() {
-        assert_eq!(
-            parse_timestamp_ms(&json!({ "timestamp": "1775418973898" })),
-            Some(1_775_418_973_898)
-        );
-    }
-
-    #[test]
-    fn millis_number() {
-        assert_eq!(
-            parse_timestamp_ms(&json!({ "timestamp": 1_750_979_225_854_i64 })),
-            Some(1_750_979_225_854)
-        );
-    }
-
-    #[test]
-    fn seconds_promoted_to_millis() {
-        assert_eq!(
-            parse_timestamp_ms(&json!({ "timestamp": 1_750_979_225 })),
-            Some(1_750_979_225_000)
-        );
-    }
-}
+#[path = "tests/cursor.rs"]
+mod tests;
