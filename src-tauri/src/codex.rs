@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use walkdir::WalkDir;
@@ -434,29 +435,82 @@ fn codex_roots(home: Option<String>) -> Vec<PathBuf> {
     roots
 }
 
+/// token_count 事件里累计计数器（info.total_token_usage）的快照。它在一个线程内单调递增，
+/// 因此同一会话谱系里两条快照相同的记录必然指向同一次消耗——要么是重复上报，要么是分叉时复制的历史。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct UsageKey {
+    input: i64,
+    cached: i64,
+    output: i64,
+    reasoning: i64,
+    total: i64,
+}
+
+fn usage_key(total: &Value) -> Option<UsageKey> {
+    if !total.is_object() {
+        return None;
+    }
+    let n = |key: &str| {
+        total
+            .get(key)
+            .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
+            .unwrap_or(0)
+    };
+    Some(UsageKey {
+        input: n("input_tokens"),
+        cached: n("cached_input_tokens"),
+        output: n("output_tokens"),
+        reasoning: n("reasoning_output_tokens"),
+        total: n("total_tokens"),
+    })
+}
+
 /// 已解析的单条记录（保留时间戳，扫描时再按范围过滤，缓存因此与时间范围无关）。
 #[derive(Clone)]
 struct CachedRow {
     ts: Option<DateTime<Utc>>,
+    /// 累计计数器快照；老版本日志没有 total_token_usage 时为 None，这类记录不参与去重。
+    key: Option<UsageKey>,
     row: TokenRow,
 }
 
-/// 每个会话文件的解析结果：token 记录 + 是否含会话元信息（用于计会话数）。
-type ParsedFile = (Vec<CachedRow>, bool);
+/// 单个会话文件的解析结果。
+#[derive(Clone, Default)]
+struct ParsedFile {
+    /// 文件首条 session_meta 的线程 id。文件里后续的 session_meta 要么是恢复会话时追加的（同 id），
+    /// 要么是分叉时随历史一起复制进来的父任务 meta（异 id），都不代表本文件的身份。
+    thread_id: Option<String>,
+    /// 分叉来源线程 id。子 Agent（thread_spawn）与手动分叉都带此字段，且日志开头是父任务
+    /// 全部历史的复制件；guardian 等未分叉的子线程只有 parent_thread_id，不复制历史。
+    forked_from_id: Option<String>,
+    /// 首条 session_meta 的时间，用于保证父任务先于它的分叉被处理。
+    created: Option<DateTime<Utc>>,
+    /// 是否含会话元信息（用于计会话数）。
+    had_meta: bool,
+    rows: Vec<CachedRow>,
+}
 
 fn scan_cache() -> &'static FileCache<ParsedFile> {
     static CACHE: OnceLock<FileCache<ParsedFile>> = OnceLock::new();
     CACHE.get_or_init(FileCache::new)
 }
 
+fn json_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn parse_file(path: &std::path::Path) -> ParsedFile {
+    let mut file = ParsedFile::default();
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return (Vec::new(), false),
+        Err(_) => return file,
     };
     let mut current_model = String::new();
-    let mut had_meta = false;
-    let mut rows = Vec::new();
+    let mut identity_taken = false;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -470,7 +524,15 @@ fn parse_file(path: &std::path::Path) -> ParsedFile {
         let payload = v.get("payload").cloned().unwrap_or(Value::Null);
         match typ {
             "session_meta" | "turn_context" => {
-                had_meta = true;
+                file.had_meta = true;
+                if typ == "session_meta" && !identity_taken {
+                    identity_taken = true;
+                    file.thread_id = json_str(&payload, "id");
+                    file.forked_from_id = json_str(&payload, "forked_from_id");
+                    file.created = json_str(&v, "timestamp")
+                        .or_else(|| json_str(&payload, "timestamp"))
+                        .and_then(|s| session_scan::parse_ts(&s));
+                }
                 if let Some(m) = payload.get("model").and_then(|x| x.as_str()) {
                     if !m.is_empty() {
                         current_model = m.to_string();
@@ -489,6 +551,8 @@ fn parse_file(path: &std::path::Path) -> ParsedFile {
                     let input_total = session_scan::json_f64(last, "input_tokens");
                     let cached = session_scan::json_f64(last, "cached_input_tokens");
                     let output = session_scan::json_f64(last, "output_tokens");
+                    // 上下文压缩 / 回滚后 Codex 会上报一条输入输出皆 0、仅 total_tokens 为当前上下文
+                    // 体积的记录，不是真实消耗
                     if input_total == 0.0 && output == 0.0 && cached == 0.0 {
                         continue;
                     }
@@ -498,8 +562,11 @@ fn parse_file(path: &std::path::Path) -> ParsedFile {
                     } else {
                         current_model.clone()
                     };
-                    rows.push(CachedRow {
+                    file.rows.push(CachedRow {
                         ts,
+                        key: payload
+                            .pointer("/info/total_token_usage")
+                            .and_then(usage_key),
                         row: TokenRow {
                             model,
                             input: non_cached,
@@ -515,7 +582,61 @@ fn parse_file(path: &std::path::Path) -> ParsedFile {
             _ => {}
         }
     }
-    (rows, had_meta)
+    file
+}
+
+/// 沿 forked_from_id 追溯到谱系根的线程 id。父文件不存在（已删除）时以找不到的那个 id 为根，
+/// 同一父任务的多个分叉仍落在同一谱系内互相去重；没有 session_meta 的文件自成一系。
+fn lineage_root(files: &[ParsedFile], by_id: &HashMap<&str, usize>, start: usize) -> String {
+    let mut idx = start;
+    let mut hops = 0usize;
+    loop {
+        let Some(parent) = files[idx].forked_from_id.as_deref() else {
+            break;
+        };
+        hops += 1;
+        match by_id.get(parent) {
+            // hops 上限只是防御畸形日志里的引用环
+            Some(&p) if p != idx && hops < 64 => idx = p,
+            _ => return parent.to_string(),
+        }
+    }
+    files[idx]
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| format!("file#{idx}"))
+}
+
+/// 跨文件去重后按时间范围过滤。Codex 会把同一次消耗写进日志多遍：
+/// - 同一文件内重复上报：额度信息更新、恢复会话、上下文压缩 / 回滚时再发一条 token_count，
+///   累计值与上一条相同；
+/// - 分叉 / 子 Agent：新线程日志的开头是父任务全部历史的复制件（含全部 token_count），
+///   时间戳改写为分叉时刻，累计值与父任务逐条相同，之后子任务自己的消耗在此基础上继续累加。
+///
+/// 因此以「谱系根 + 累计值快照」为记录身份，每个身份只计第一次出现的那条。文件按创建时间先后处理，
+/// 父任务总在分叉之前，保留的是父任务里带真实时间戳的那条；父任务日志已删除时，复制件按最早的分叉
+/// 计一次（时间只能落在分叉时刻）。去重必须先于时间过滤，否则范围外的父记录挡不住范围内的复制件。
+fn dedupe_rows(mut files: Vec<ParsedFile>, range: &TimeRange) -> Vec<TokenRow> {
+    files.sort_by_key(|f| (f.created.is_none(), f.created));
+    let by_id: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| f.thread_id.as_deref().map(|id| (id, i)))
+        .collect();
+    let mut seen: HashMap<String, HashSet<UsageKey>> = HashMap::new();
+    let mut rows = Vec::new();
+    for (i, file) in files.iter().enumerate() {
+        let lineage = seen.entry(lineage_root(&files, &by_id, i)).or_default();
+        for cr in &file.rows {
+            if cr.key.is_some_and(|key| !lineage.insert(key)) {
+                continue;
+            }
+            if range.contains(cr.ts) {
+                rows.push(cr.row.clone());
+            }
+        }
+    }
+    rows
 }
 
 /// 扫描本地会话并折算等价费用。时间范围语义见 [`TimeRange`]（since_ms 优先于 days，
@@ -543,9 +664,7 @@ fn scan_sessions_blocking(
     let table = pricing::load();
     let roots = codex_roots(home);
     let range = TimeRange::new(days, since_ms, until_ms);
-    let mut rows: Vec<TokenRow> = Vec::new();
-    let mut files_scanned = 0usize;
-    let mut sessions = 0usize;
+    let mut files: Vec<ParsedFile> = Vec::new();
     let mut scanned_roots: Vec<String> = Vec::new();
 
     for root in &roots {
@@ -560,18 +679,17 @@ fn scan_sessions_blocking(
                 if !session_scan::is_jsonl_file(&entry) {
                     continue;
                 }
-                files_scanned += 1;
-                let (file_rows, had_meta) = scan_cache().get_or_parse(&entry, parse_file);
-                if had_meta {
-                    sessions += 1;
-                }
-                rows.extend(file_rows.into_iter().filter(|cr| range.contains(cr.ts)).map(|cr| cr.row));
+                files.push(scan_cache().get_or_parse(&entry, parse_file));
             }
         }
         if root_used {
             scanned_roots.push(root.to_string_lossy().to_string());
         }
     }
+
+    let files_scanned = files.len();
+    let sessions = files.iter().filter(|f| f.had_meta).count();
+    let rows = dedupe_rows(files, &range);
 
     // until_ms 为开区间终点，按小时聚合的日期按闭区间末毫秒推算
     let hourly_dates = pricing::hourly_dates_for(since_ms, until_ms.map(|u| u - 1));
@@ -583,6 +701,190 @@ fn scan_sessions_blocking(
         roots: scanned_roots,
         days,
     })
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::*;
+
+    fn key(n: i64) -> UsageKey {
+        UsageKey {
+            input: n,
+            cached: 0,
+            output: 1,
+            reasoning: 0,
+            total: n + 1,
+        }
+    }
+
+    fn row(ts_ms: i64, key: Option<UsageKey>, input: f64) -> CachedRow {
+        let ts = DateTime::from_timestamp_millis(ts_ms);
+        CachedRow {
+            ts,
+            key,
+            row: TokenRow {
+                model: "gpt-5".into(),
+                input,
+                output: 1.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+                actual_cents: 0.0,
+                timestamp_ms: Some(ts_ms),
+            },
+        }
+    }
+
+    fn file(id: &str, forked_from: Option<&str>, created_ms: i64, rows: Vec<CachedRow>) -> ParsedFile {
+        ParsedFile {
+            thread_id: Some(id.into()),
+            forked_from_id: forked_from.map(str::to_string),
+            created: DateTime::from_timestamp_millis(created_ms),
+            had_meta: true,
+            rows,
+        }
+    }
+
+    fn all() -> TimeRange {
+        TimeRange::new(None, None, None)
+    }
+
+    fn inputs(rows: &[TokenRow]) -> Vec<f64> {
+        rows.iter().map(|r| r.input).collect()
+    }
+
+    #[test]
+    fn repeated_report_in_same_file_counted_once() {
+        // 累计值没变的第二条是重复上报，哪怕中间隔着别的记录
+        let f = file(
+            "a",
+            None,
+            0,
+            vec![
+                row(1, Some(key(100)), 100.0),
+                row(2, Some(key(100)), 100.0),
+                row(3, Some(key(250)), 150.0),
+                row(4, Some(key(100)), 100.0),
+            ],
+        );
+        assert_eq!(inputs(&dedupe_rows(vec![f], &all())), vec![100.0, 150.0]);
+    }
+
+    #[test]
+    fn fork_copies_skipped_and_parent_timestamps_kept() {
+        let parent = file(
+            "p",
+            None,
+            0,
+            vec![row(10, Some(key(100)), 100.0), row(20, Some(key(300)), 200.0)],
+        );
+        // 分叉复制件时间戳被改写到分叉时刻，之后是子任务自己的消耗
+        let child = file(
+            "c",
+            Some("p"),
+            1_000,
+            vec![
+                row(1_000, Some(key(100)), 100.0),
+                row(1_000, Some(key(300)), 200.0),
+                row(1_500, Some(key(350)), 50.0),
+            ],
+        );
+        // 目录遍历顺序不保证父先于子
+        let rows = dedupe_rows(vec![child, parent], &all());
+        assert_eq!(inputs(&rows), vec![100.0, 200.0, 50.0]);
+        assert_eq!(rows[0].timestamp_ms, Some(10));
+        assert_eq!(rows[1].timestamp_ms, Some(20));
+    }
+
+    #[test]
+    fn dedupe_happens_before_range_filter() {
+        let parent = file("p", None, 0, vec![row(10, Some(key(100)), 100.0)]);
+        let child = file(
+            "c",
+            Some("p"),
+            5_000,
+            vec![row(5_000, Some(key(100)), 100.0), row(6_000, Some(key(140)), 40.0)],
+        );
+        // 范围只覆盖分叉之后：父记录不在范围内，它的复制件也不得被算进来
+        let range = TimeRange::new(None, Some(4_000), None);
+        assert_eq!(inputs(&dedupe_rows(vec![parent, child], &range)), vec![40.0]);
+    }
+
+    #[test]
+    fn siblings_of_missing_parent_share_copy_once() {
+        let a = file(
+            "a",
+            Some("gone"),
+            1_000,
+            vec![row(1_000, Some(key(100)), 100.0), row(1_100, Some(key(130)), 30.0)],
+        );
+        let b = file(
+            "b",
+            Some("gone"),
+            2_000,
+            vec![row(2_000, Some(key(100)), 100.0), row(2_100, Some(key(170)), 70.0)],
+        );
+        assert_eq!(inputs(&dedupe_rows(vec![b, a], &all())), vec![100.0, 30.0, 70.0]);
+    }
+
+    #[test]
+    fn nested_fork_resolves_to_same_lineage() {
+        let root = file("r", None, 0, vec![row(10, Some(key(100)), 100.0)]);
+        let child = file(
+            "c",
+            Some("r"),
+            1_000,
+            vec![row(1_000, Some(key(100)), 100.0), row(1_100, Some(key(130)), 30.0)],
+        );
+        let grandchild = file(
+            "g",
+            Some("c"),
+            2_000,
+            vec![
+                row(2_000, Some(key(100)), 100.0),
+                row(2_000, Some(key(130)), 30.0),
+                row(2_100, Some(key(150)), 20.0),
+            ],
+        );
+        assert_eq!(
+            inputs(&dedupe_rows(vec![grandchild, child, root], &all())),
+            vec![100.0, 30.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn unrelated_threads_with_equal_counters_both_counted() {
+        let a = file("a", None, 0, vec![row(10, Some(key(100)), 100.0)]);
+        let b = file("b", None, 1, vec![row(20, Some(key(100)), 100.0)]);
+        assert_eq!(inputs(&dedupe_rows(vec![a, b], &all())), vec![100.0, 100.0]);
+    }
+
+    #[test]
+    fn rows_without_counter_not_deduped() {
+        let f = file("a", None, 0, vec![row(1, None, 100.0), row(2, None, 100.0)]);
+        assert_eq!(inputs(&dedupe_rows(vec![f], &all())), vec![100.0, 100.0]);
+    }
+
+    #[test]
+    fn usage_key_reads_integers_and_floats() {
+        let v = serde_json::json!({
+            "input_tokens": 17305,
+            "cached_input_tokens": 9984.0,
+            "output_tokens": 227,
+            "reasoning_output_tokens": 98,
+            "total_tokens": 17532
+        });
+        assert_eq!(
+            usage_key(&v),
+            Some(UsageKey {
+                input: 17305,
+                cached: 9984,
+                output: 227,
+                reasoning: 98,
+                total: 17532
+            })
+        );
+        assert_eq!(usage_key(&Value::Null), None);
+    }
 }
 
 #[cfg(test)]

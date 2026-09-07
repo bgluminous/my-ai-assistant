@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -403,13 +403,18 @@ function accountRow(account) {
   return row;
 }
 
+/** 某一类型的账户按主窗口账户页同款套餐顺序排列（不改动 accounts 本身的存储顺序）。 */
+function sortedAccounts(kind) {
+  return accounts.filter((a) => a.kind === kind).sort(compareAccounts);
+}
+
 function render() {
   // 总览 tab 下列表隐藏，无需重建行（切回账户 tab 时会重新渲染）
   if (trayTab !== "overview") {
     const list = el("#tray-list");
     list.replaceChildren();
     const kind = trayTab === "codex" ? "codex" : trayTab === "claude" ? "claude" : "cursor";
-    const subset = accounts.filter((a) => a.kind === kind);
+    const subset = sortedAccounts(kind);
     if (!subset.length) {
       const empty = document.createElement("div");
       empty.className = "tray-empty";
@@ -464,10 +469,8 @@ async function refreshAll() {
   refreshing = true;
   render();
   // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
-  // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按存储顺序，不在类型间来回跳
-  const ids = ["cursor", "codex", "claude"].flatMap((kind) =>
-    accounts.filter((a) => a.kind === kind).map((a) => a.id)
-  );
+  // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按套餐排序，不在类型间来回跳
+  const ids = ["cursor", "codex", "claude"].flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
   let failed = 0;
   for (let i = 0; i < ids.length; i += 1) {
     setStatus("", `正在刷新账户 ${i + 1}/${ids.length}…`);

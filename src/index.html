@@ -344,13 +344,22 @@
       <section id="audit-panel" class="panel" role="tabpanel" hidden>
         <div class="surface">
           <div class="row wrap">
-            <label class="inline">类型
-              <select id="audit-filter">
+            <label class="inline">级别
+              <select id="audit-level">
                 <option value="all" selected>全部</option>
-                <option value="account">账户变更</option>
+                <option value="info">信息</option>
+                <option value="warn">警告</option>
+                <option value="error">错误</option>
+              </select>
+            </label>
+            <label class="inline">分类
+              <select id="audit-category">
+                <option value="all" selected>全部</option>
+                <option value="account">账户管理</option>
                 <option value="state">状态与刷新</option>
-                <option value="renew">凭据续期</option>
-                <option value="settings">设置变更</option>
+                <option value="credential">凭据与同步</option>
+                <option value="usage">用量数据</option>
+                <option value="settings">设置与系统</option>
               </select>
             </label>
             <button id="audit-refresh" class="secondary" type="button">刷新</button>
@@ -363,7 +372,7 @@
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th>时间</th><th>类型</th><th>内容</th></tr>
+                <tr><th>时间</th><th>级别</th><th>分类</th><th>事件</th><th>内容</th></tr>
               </thead>
               <tbody id="audit-body"></tbody>
             </table>

@@ -1046,40 +1046,95 @@ pub(crate) fn codex_token_needs_renewal(token: &str, last_refresh: Option<DateTi
     }
 }
 
+/// 定时同步一次的结果，供 codex_local::start_local_sync 写审计日志。
+pub(crate) enum LocalSyncOutcome {
+    /// 已换上本机凭据的账户数（每个账户另有一条 codex_adopt_local 记录）。
+    Adopted(usize),
+    /// 本机 auth.json 无法读取或解析。
+    LocalUnreadable,
+    /// 本机登录的账号没有添加为账户；附本机登录的邮箱（解析不出为空串）。
+    NoMatchingAccount(String),
+    /// 有同账号的账户，但本机凭据与账户一致或不比账户新。
+    NotNewer,
+}
+
+impl LocalSyncOutcome {
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            LocalSyncOutcome::Adopted(n) => format!("已将本机更新的凭据同步到 {n} 个账户"),
+            LocalSyncOutcome::LocalUnreadable => "文件无法读取或解析，未同步".to_string(),
+            LocalSyncOutcome::NoMatchingAccount(email) if email.is_empty() => {
+                "本机登录的账号未添加为账户，未同步".to_string()
+            }
+            LocalSyncOutcome::NoMatchingAccount(email) => {
+                format!("本机登录的 {email} 未添加为账户，未同步")
+            }
+            LocalSyncOutcome::NotNewer => "同账号账户的凭据已是最新，无需同步".to_string(),
+        }
+    }
+}
+
 /// 定时同步入口：本机 auth.json 有变化时，把与之同账号的 ChatGPT 账户更新为本机更新的凭据
-///（判定与取回逻辑同 adopt_newer_local_codex）。返回是否有账户被更新。
-pub(crate) fn sync_codex_from_local(app: &AppHandle) -> Result<bool, String> {
-    let mut changed = false;
+///（判定与取回逻辑同 adopt_newer_local_codex）。
+pub(crate) fn sync_codex_from_local(app: &AppHandle) -> Result<LocalSyncOutcome, String> {
+    let LocalLoginRead::Found(local) = codex_local::read_local_login() else {
+        return Ok(LocalSyncOutcome::LocalUnreadable);
+    };
+    let mut adopted = 0usize;
+    let mut same_account = false;
     for acc in current().accounts.into_iter().filter(|a| a.kind == "codex") {
         let name = display_name(&acc.kind, &acc.note, &acc.token);
         let mut token = acc.token.clone();
         let mut refresh_token = acc.refresh_token.clone();
-        if adopt_newer_local_codex(app, &acc.id, &name, &mut token, &mut refresh_token)? {
-            changed = true;
+        match adopt_newer_local_codex(app, &acc.id, &name, &mut token, &mut refresh_token)? {
+            LocalAdopt::Adopted => {
+                adopted += 1;
+                same_account = true;
+            }
+            LocalAdopt::SameToken | LocalAdopt::NotNewer => same_account = true,
+            LocalAdopt::NotSameAccount => {}
         }
     }
-    Ok(changed)
+    Ok(if adopted > 0 {
+        LocalSyncOutcome::Adopted(adopted)
+    } else if same_account {
+        LocalSyncOutcome::NotNewer
+    } else {
+        LocalSyncOutcome::NoMatchingAccount(local.note_hint)
+    })
+}
+
+/// adopt_newer_local_codex 的判定结果。
+pub(crate) enum LocalAdopt {
+    /// 已换上本机凭据并写回账户。
+    Adopted,
+    /// 本机未登录、文件无法解析，或登录的不是这个账号。
+    NotSameAccount,
+    /// 同一账号且凭据完全一致（多半是本程序自己写入的）。
+    SameToken,
+    /// 同一账号，但本机 access_token 的过期时刻不比账户的晚。
+    NotNewer,
 }
 
 /// 本机 Codex 客户端会自行续期并轮换 refresh_token，账户里保存的那组随即作废。
 /// 刷新 / 切换前先看本机 auth.json：同一账号且其 access_token 过期时刻更晚（客户端在程序之后
-/// 续期过），就改用本机这组凭据并写回账户。返回是否发生了同步。
+/// 续期过），就改用本机这组凭据并写回账户。
 pub(crate) fn adopt_newer_local_codex(
     app: &AppHandle,
     id: &str,
     name: &str,
     token: &mut String,
     refresh_token: &mut Option<String>,
-) -> Result<bool, String> {
+) -> Result<LocalAdopt, String> {
     let Some(local) = codex_local::local_login_of_same_account(token) else {
-        return Ok(false);
+        return Ok(LocalAdopt::NotSameAccount);
     };
     if local.token == *token {
-        return Ok(false);
+        return Ok(LocalAdopt::SameToken);
     }
     match (jwt_exp(&local.token), jwt_exp(token)) {
         (Some(local_exp), Some(own_exp)) if local_exp > own_exp => {}
-        _ => return Ok(false),
+        _ => return Ok(LocalAdopt::NotNewer),
     }
     *token = local.token.clone();
     if local.refresh_token.is_some() {
@@ -1096,7 +1151,7 @@ pub(crate) fn adopt_newer_local_codex(
         format!("ChatGPT 凭据已从本机登录同步：{name}（客户端已自行续期）"),
         Some(json!({ "id": id })),
     );
-    Ok(true)
+    Ok(LocalAdopt::Adopted)
 }
 
 enum CodexRenewal {
@@ -1135,7 +1190,9 @@ async fn renew_codex(
             .and_then(|l| l.refresh_token)
             .filter(|l| *l != own_rt);
         if let Some(local_rt) = local_rt {
-            audit::log(
+            // 还有本机凭据可以重试，尚未失败，只记 warn；重试结果另有记录
+            audit::log_at(
+                audit::Level::Warn,
                 "codex_renew_failed",
                 format!(
                     "ChatGPT 续期被拒绝：{name}（{}：{detail}），改用本机登录的凭据重试",
@@ -1373,7 +1430,14 @@ async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, Str
                 .and_then(|s| s.get("alive"))
                 .and_then(Value::as_bool);
             if new_alive != prev_alive {
-                audit::log(
+                // 变为失效需要留意（warn），恢复有效或首次验证只是信息
+                let level = if new_alive == Some(false) {
+                    audit::Level::Warn
+                } else {
+                    audit::Level::Info
+                };
+                audit::log_at(
+                    level,
                     "account_state_changed",
                     format!(
                         "账户状态变化：{name} {} → {}",

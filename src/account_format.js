@@ -80,6 +80,31 @@ export function cursorIdentity(account) {
   return { primary, email: email && email !== primary ? email : "" };
 }
 
+/**
+ * 账户排序键：付费套餐按到期时间升序（临期 / 已到期靠前），没有到期信息的付费套餐居中，
+ * 尚无状态的其次，Free 垫底；同一档保持原有顺序（sort 稳定）。
+ */
+function planSortKey(account) {
+  const status = account.status || null;
+  const rawPlan = account.kind === "cursor" ? status && status.membershipType : status && status.plan;
+  const plan = String(rawPlan ?? "").trim().toLowerCase();
+  if (plan === "free") return { rank: 3, end: 0 };
+  // Claude 接口不提供订阅起止；Cursor 取本期计费周期截止，Codex 取订阅到期
+  const endIso = !status || account.kind === "claude"
+    ? null
+    : account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd;
+  const end = endIso ? Date.parse(endIso) : NaN;
+  if (Number.isFinite(end)) return { rank: 0, end };
+  return { rank: plan ? 1 : 2, end: 0 };
+}
+
+/** 同一类型账户的组内排序比较器，主窗口账户页与托盘面板共用，保证两处顺序一致。 */
+export function compareAccounts(a, b) {
+  const ka = planSortKey(a);
+  const kb = planSortKey(b);
+  return ka.rank - kb.rank || ka.end - kb.end || 0;
+}
+
 /** 保留两端、中间省略的打码 token（列表与托盘展示用）。 */
 export function maskToken(token) {
   const t = String(token || "").trim();

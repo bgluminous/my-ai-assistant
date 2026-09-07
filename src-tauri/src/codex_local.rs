@@ -200,7 +200,11 @@ pub fn sync_auth_json(access_token: &str, refresh_token: &Option<String>, id_tok
         );
         return;
     }
-    audit::log("codex_sync", "已同步本机 ChatGPT 登录凭据".to_string(), None);
+    audit::log(
+        "codex_sync",
+        "续期后的新凭据已回写本机 auth.json（本机登录为同一账号）".to_string(),
+        None,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +733,8 @@ fn auth_json_mtime() -> Option<std::time::SystemTime> {
 ///（默认 5 分钟）看一次文件修改时间，变了就把同账号账户的凭据副本更新过来（不联网，与定时刷新
 /// 是否开启无关）。每 30 秒醒一次判断是否到点，改间隔后无需重启即生效。
 /// 与刷新 / 切换共用同一把队列锁，不会与正在进行的换票交错。
+/// 每次检测到文件变化都记一条审计日志说明结果（同步了几个账户 / 为什么没同步），
+/// 便于对照本机客户端的动作；文件没变时不记录。
 pub fn start_local_sync(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut seen = auth_json_mtime();
@@ -746,15 +752,32 @@ pub fn start_local_sync(app: AppHandle) {
             }
             seen = now;
             if now.is_none() {
+                audit::log(
+                    "codex_local_changed",
+                    "检测到本机 auth.json 已被删除（本机 ChatGPT 已登出），未同步".to_string(),
+                    None,
+                );
                 continue;
             }
             let _queued = accounts::refresh_queue().lock().await;
-            if let Err(e) = accounts::sync_codex_from_local(&app) {
-                audit::log(
-                    "codex_sync_failed",
+            match accounts::sync_codex_from_local(&app) {
+                Ok(outcome) => {
+                    let level = match outcome {
+                        accounts::LocalSyncOutcome::LocalUnreadable => audit::Level::Warn,
+                        _ => audit::Level::Info,
+                    };
+                    audit::log_at(
+                        level,
+                        "codex_local_changed",
+                        format!("检测到本机 auth.json 变化：{}", outcome.describe()),
+                        None,
+                    );
+                }
+                Err(e) => audit::log(
+                    "codex_adopt_failed",
                     format!("从本机 auth.json 同步 ChatGPT 凭据失败：{e}"),
                     None,
-                );
+                ),
             }
         }
     });

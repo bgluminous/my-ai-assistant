@@ -1,45 +1,24 @@
 import { el, invoke, fmtDateMs, resetError, toast, dismissToast } from "./shared.js";
 import { onAccountsChanged } from "./accounts.js";
 
-// 审计日志：展示后端记录的账户增删改、状态变化、Codex / Claude 续期、设置变更等事件。
+// 审计日志：展示后端记录的账户增删改、状态变化、Codex / Claude 续期与本机同步、设置变更等事件。
 // 日志由后端写入 {用户目录}/.xilore/myaiassistant/audit.jsonl，这里只读展示 + 清空。
+// 每条记录带级别（信息 / 警告 / 错误）与分类，事件标签也由后端（audit.rs 的事件登记表）给出，
+// 这里只维护级别与分类的展示文案，并按两者筛选。
 
-const EVENT_META = {
-  account_add: { label: "添加账户", cls: "ok", group: "account" },
-  account_update: { label: "编辑账户", cls: "accent", group: "account" },
-  account_delete: { label: "删除账户", cls: "bad", group: "account" },
-  account_import: { label: "本机导入", cls: "ok", group: "account" },
-  account_import_file: { label: "导入账户", cls: "ok", group: "account" },
-  account_export: { label: "导出账户", cls: "accent", group: "account" },
-  usage_snapshot: { label: "用量快照", cls: "accent", group: "account" },
-  usage_data_delete: { label: "删除统计数据", cls: "bad", group: "account" },
-  usage_data_clear: { label: "清除本地数据", cls: "bad", group: "account" },
-  usage_events_export: { label: "导出原始账单", cls: "accent", group: "account" },
-  usage_data_adopt: { label: "沿用统计数据", cls: "ok", group: "account" },
-  account_state_changed: { label: "状态变化", cls: "warn", group: "state" },
-  account_refresh_failed: { label: "刷新失败", cls: "bad", group: "state" },
-  codex_renewed: { label: "自动续期", cls: "ok", group: "renew" },
-  codex_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
-  codex_sync: { label: "同步本机登录", cls: "ok", group: "renew" },
-  codex_sync_failed: { label: "同步本机失败", cls: "bad", group: "renew" },
-  codex_adopt_local: { label: "同步本机凭据", cls: "ok", group: "renew" },
-  codex_force_write: { label: "强制写入登录", cls: "warn", group: "account" },
-  codex_auth_migrated: { label: "凭据存储迁移", cls: "accent", group: "settings" },
-  claude_renewed: { label: "自动续期", cls: "ok", group: "renew" },
-  claude_renew_failed: { label: "续期失败", cls: "bad", group: "renew" },
-  cursor_switch_local: { label: "切换登录", cls: "accent", group: "account" },
-  codex_switch_local: { label: "切换登录", cls: "accent", group: "account" },
-  claude_switch_local: { label: "切换登录", cls: "accent", group: "account" },
-  settings_load_failed: { label: "设置载入失败", cls: "bad", group: "settings" },
-  interval_set: { label: "定时设置", cls: "accent", group: "settings" },
-  local_sync_interval_set: { label: "同步间隔设置", cls: "accent", group: "settings" },
-  autostart_set: { label: "开机启动", cls: "accent", group: "settings" },
-  pricing_update: { label: "价格表更新", cls: "accent", group: "settings" },
-  backup_export: { label: "导出备份", cls: "accent", group: "settings" },
-  backup_import: { label: "导入备份", cls: "ok", group: "settings" },
-  // 【过渡期临时代码，到期删除】旧用户目录迁移事件，随 paths.rs 的迁移逻辑一起删除
-  data_dir_migrated: { label: "目录迁移", cls: "ok", group: "settings" },
-  data_dir_migrate_failed: { label: "目录迁移失败", cls: "bad", group: "settings" },
+const LEVEL_META = {
+  info: { label: "信息", cls: "" },
+  warn: { label: "警告", cls: "warn" },
+  error: { label: "错误", cls: "bad" },
+};
+
+// 与 index.html 里 #audit-category 的选项一致
+const CATEGORY_LABELS = {
+  account: "账户管理",
+  state: "状态与刷新",
+  credential: "凭据与同步",
+  usage: "用量数据",
+  settings: "设置与系统",
 };
 
 let entries = [];
@@ -56,29 +35,39 @@ function clearStatus() {
   dismissToast("audit");
 }
 
-function metaFor(event) {
-  return EVENT_META[event] || { label: event || "事件", cls: "", group: "other" };
+function levelMeta(level) {
+  return LEVEL_META[level] || LEVEL_META.info;
 }
 
 function render() {
-  const filter = el("#audit-filter").value;
-  const rows = filter === "all" ? entries : entries.filter((e) => metaFor(e.event).group === filter);
+  const level = el("#audit-level").value;
+  const category = el("#audit-category").value;
+  const rows = entries.filter(
+    (e) => (level === "all" || e.level === level) && (category === "all" || e.category === category)
+  );
   el("#audit-body").replaceChildren(
     ...rows.map((entry) => {
       const tr = document.createElement("tr");
+      tr.className = `audit-row level-${entry.level || "info"}`;
       const timeTd = document.createElement("td");
       timeTd.className = "audit-time";
       timeTd.textContent = fmtDateMs(entry.ts);
-      const typeTd = document.createElement("td");
-      const meta = metaFor(entry.event);
+      const levelTd = document.createElement("td");
+      const meta = levelMeta(entry.level);
       const tag = document.createElement("span");
       tag.className = `tag${meta.cls ? ` ${meta.cls}` : ""}`;
       tag.textContent = meta.label;
-      typeTd.append(tag);
+      levelTd.append(tag);
+      const categoryTd = document.createElement("td");
+      categoryTd.className = "audit-category";
+      categoryTd.textContent = CATEGORY_LABELS[entry.category] || entry.category || "";
+      const eventTd = document.createElement("td");
+      eventTd.className = "audit-event";
+      eventTd.textContent = entry.label || entry.event || "事件";
       const msgTd = document.createElement("td");
       msgTd.className = "audit-message";
       msgTd.textContent = entry.message || "";
-      tr.append(timeTd, typeTd, msgTd);
+      tr.append(timeTd, levelTd, categoryTd, eventTd, msgTd);
       return tr;
     })
   );
@@ -138,7 +127,8 @@ export function initAudit() {
   el("#audit-refresh").addEventListener("click", () => {
     void load();
   });
-  el("#audit-filter").addEventListener("change", render);
+  el("#audit-level").addEventListener("change", render);
+  el("#audit-category").addEventListener("change", render);
   el("#audit-clear").addEventListener("click", () => {
     void onClearClick();
   });

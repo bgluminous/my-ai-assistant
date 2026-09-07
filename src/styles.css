@@ -1141,7 +1141,12 @@ td.account-actions { white-space: nowrap; }
 /* ---------- 审计日志 ---------- */
 
 .audit-time { white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.audit-category { white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.audit-event { white-space: nowrap; }
 .audit-message { word-break: break-all; }
+/* 警告 / 错误行的内容随级别着色，扫一眼就能分开正常记录与需要处理的记录 */
+.audit-row.level-warn .audit-message { color: var(--warn); }
+.audit-row.level-error .audit-message { color: var(--bad); }
 .tag.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
 .tag.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
 .tag.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }

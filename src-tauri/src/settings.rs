@@ -163,7 +163,8 @@ fn attempt_load() -> Result<(), String> {
                 "ChatGPT 账户凭据已改为加密副本存储，settings.json 中不再保留明文".to_string(),
                 None,
             ),
-            Err(e) => audit::log(
+            Err(e) => audit::log_at(
+                audit::Level::Warn,
                 "codex_auth_migrated",
                 format!("ChatGPT 账户凭据已在内存中改为加密副本，但重写 settings.json 失败：{e}"),
                 None,

@@ -67,7 +67,14 @@ pub fn run() {
                         .as_deref()
                         .map(|e| format!("；旧目录删除失败，请手动清理：{e}"))
                         .unwrap_or_default();
-                    audit::log(
+                    // 迁移本身成功；旧目录没删干净需要用户动手，记 warn
+                    let level = if m.leftover_error.is_some() {
+                        audit::Level::Warn
+                    } else {
+                        audit::Level::Info
+                    };
+                    audit::log_at(
+                        level,
                         "data_dir_migrated",
                         format!(
                             "用户数据目录已从 {} 迁移到 {}（{}）{leftover}",

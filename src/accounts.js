@@ -23,6 +23,7 @@ import {
   parseCreditsUsd,
   resetCreditsBrief,
   cursorIdentity,
+  compareAccounts,
 } from "./account_format.js";
 import { clearCursorLocalData } from "./usage_data.js";
 
@@ -320,7 +321,7 @@ function cursorSummaryNodes(status) {
   if (sand && sand.included) {
     let usedPct = Number(sand.usagePercent);
     if (sand.hasAvailableUsage === false) usedPct = 100;
-    const reset = sand.nextResetAt ? resetCountdownText(Date.parse(sand.nextResetAt)) : "";
+    const reset = sand.nextResetAt ? resetTimeText(Date.parse(sand.nextResetAt)) : "";
     const bar = quotaBar("Sand", usedPct, reset);
     if (bar) bars.push(bar);
   }
@@ -328,11 +329,11 @@ function cursorSummaryNodes(status) {
 }
 
 /**
- * 额度重置时刻的紧凑文案（额度条右侧小字，空间有限）：距重置不足 24 小时显示时刻（HH:mm），
- * 24 小时以上显示日期（MM-DD）；时刻已过说明数据陈旧，显示「已重置」。
- * Cursor 的 Sand 周额度与 ChatGPT / Claude 的额度窗口共用。
+ * 额度重置时刻的紧凑文案（额度条右侧小字，空间有限）：一律显示具体时刻而非倒计时——
+ * 距重置不足 24 小时显示时刻（HH:mm），24 小时以上显示日期（MM-DD）；
+ * 时刻已过说明数据陈旧，显示「已重置」。Cursor 的 Sand 周额度与 ChatGPT / Claude 的额度窗口共用。
  */
-function resetCountdownText(resetAtMs) {
+function resetTimeText(resetAtMs) {
   if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return "";
   const inSec = Math.round((resetAtMs - Date.now()) / 1000);
   if (inSec <= 0) return "已重置";
@@ -404,20 +405,10 @@ function windowResetAtMs(w, anchorSec) {
   return anchorMs + rel * 1000;
 }
 
-/** Codex 额度窗口的重置时间：天级窗口显示日期，小时级窗口显示倒计时。 */
+/** ChatGPT / Claude 额度窗口的重置时间文案：与 Sand 同一口径，显示具体时刻而非倒计时。 */
 function windowResetText(w, anchorSec) {
-  const seconds = Number(w.limitWindowSeconds);
   const resetAtMs = windowResetAtMs(w, anchorSec);
-  if (!resetAtMs) return "";
-  if (Number.isFinite(seconds) && seconds >= 86400) {
-    const d = new Date(resetAtMs);
-    return `重置 ${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  }
-  const inSec = Math.max(0, Math.round((resetAtMs - Date.now()) / 1000));
-  const h = Math.floor(inSec / 3600);
-  const m = Math.floor((inSec % 3600) / 60);
-  // 紧凑倒计时（如 3h24m 后重置），额度条单行空间有限
-  return `重置 ${h > 0 ? `${h}h` : ""}${m}m`;
+  return resetAtMs ? resetTimeText(resetAtMs) : "";
 }
 
 // 与 cursorSummaryNodes 结构对齐：bars 为额度窗口进度条（Token 到期倒计时见套餐列），
@@ -622,31 +613,7 @@ function updateHeadingActions() {
   }
 }
 
-/**
- * 账户表排序键：付费套餐按到期时间升序（临期 / 已到期靠前），没有到期信息的付费套餐居中，
- * 尚无状态的其次，Free 垫底；同一档保持原有顺序（sort 稳定）。
- */
-function planSortKey(account) {
-  const status = account.status || null;
-  const rawPlan = account.kind === "cursor" ? status && status.membershipType : status && status.plan;
-  const plan = String(rawPlan ?? "").trim().toLowerCase();
-  if (plan === "free") return { rank: 3, end: 0 };
-  // Claude 接口不提供订阅起止；Cursor 取本期计费周期截止，Codex 取订阅到期
-  const endIso = !status || account.kind === "claude"
-    ? null
-    : account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd;
-  const end = endIso ? Date.parse(endIso) : NaN;
-  if (Number.isFinite(end)) return { rank: 0, end };
-  return { rank: plan ? 1 : 2, end: 0 };
-}
-
-function compareAccounts(a, b) {
-  const ka = planSortKey(a);
-  const kb = planSortKey(b);
-  return ka.rank - kb.rank || ka.end - kb.end || 0;
-}
-
-/** 组内按排序键排好的账户列表（不改动 accounts 本身的存储顺序）。 */
+/** 组内按套餐排序键排好的账户列表（不改动 accounts 本身的存储顺序）；排序键见 account_format.js。 */
 function sortedAccounts(kind) {
   return accounts.filter((a) => a.kind === kind).sort(compareAccounts);
 }
