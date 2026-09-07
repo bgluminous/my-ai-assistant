@@ -126,4 +126,8 @@ pub struct LaunchResult {
 pub struct SwitchResult {
     pub switched: bool,
     pub message: String,
+    /// ChatGPT：本次是否向 OpenAI 换取了新凭据（true），还是直接写入账户保存的 auth.json 副本（false）。
+    /// Cursor / Claude 不区分，为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchanged: Option<bool>,
 }

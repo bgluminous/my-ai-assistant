@@ -533,5 +533,6 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
     Ok(SwitchResult {
         switched: true,
         message: "已写入本地登录。".into(),
+        exchanged: None,
     })
 }

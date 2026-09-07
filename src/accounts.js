@@ -470,6 +470,25 @@ function fillSummaryCell(cell, account) {
 
 // 操作列的图标按钮助手 iconAction 见 shared.js（用量页总览表同款）
 
+/**
+ * 「上次刷新」列：主行为账户状态刷新时间；ChatGPT 账户再加一行凭据组（access / refresh token）
+ * 最后换新时间，精确时刻放悬停提示。定时重算相对时间时也走这里，整格重填。
+ */
+function fillTimeCell(cell, account) {
+  cell.replaceChildren();
+  const main = document.createElement("div");
+  main.textContent = relativeFromUnixSeconds(account.lastRefreshAt);
+  cell.append(main);
+  const credAt = Number(account.codexAuthRefreshedAt);
+  if (account.kind === "codex" && Number.isFinite(credAt) && credAt > 0) {
+    const cred = document.createElement("div");
+    cred.className = "cred-refreshed";
+    cred.textContent = `凭据 ${relativeFromMs(credAt)}`;
+    cred.title = `凭据组（access / refresh token）最后换新：${fmtDateMs(credAt)}`;
+    cell.append(cred);
+  }
+}
+
 function accountRow(account) {
   const tr = document.createElement("tr");
   tr.dataset.id = account.id;
@@ -528,7 +547,7 @@ function accountRow(account) {
 
   const timeCell = document.createElement("td");
   timeCell.className = "account-time";
-  timeCell.textContent = relativeFromUnixSeconds(account.lastRefreshAt);
+  fillTimeCell(timeCell, account);
 
   const actionsCell = document.createElement("td");
   actionsCell.className = "account-actions";
@@ -603,8 +622,37 @@ function updateHeadingActions() {
   }
 }
 
+/**
+ * 账户表排序键：付费套餐按到期时间升序（临期 / 已到期靠前），没有到期信息的付费套餐居中，
+ * 尚无状态的其次，Free 垫底；同一档保持原有顺序（sort 稳定）。
+ */
+function planSortKey(account) {
+  const status = account.status || null;
+  const rawPlan = account.kind === "cursor" ? status && status.membershipType : status && status.plan;
+  const plan = String(rawPlan ?? "").trim().toLowerCase();
+  if (plan === "free") return { rank: 3, end: 0 };
+  // Claude 接口不提供订阅起止；Cursor 取本期计费周期截止，Codex 取订阅到期
+  const endIso = !status || account.kind === "claude"
+    ? null
+    : account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd;
+  const end = endIso ? Date.parse(endIso) : NaN;
+  if (Number.isFinite(end)) return { rank: 0, end };
+  return { rank: plan ? 1 : 2, end: 0 };
+}
+
+function compareAccounts(a, b) {
+  const ka = planSortKey(a);
+  const kb = planSortKey(b);
+  return ka.rank - kb.rank || ka.end - kb.end || 0;
+}
+
+/** 组内按排序键排好的账户列表（不改动 accounts 本身的存储顺序）。 */
+function sortedAccounts(kind) {
+  return accounts.filter((a) => a.kind === kind).sort(compareAccounts);
+}
+
 function renderGroup(kind, bodyId, emptyId) {
-  const rows = accounts.filter((a) => a.kind === kind);
+  const rows = sortedAccounts(kind);
   el(bodyId).replaceChildren(...rows.map(accountRow));
   el(emptyId).hidden = rows.length > 0;
   updateGroupMeta(kind);
@@ -636,9 +684,18 @@ function updateRow(id) {
     return;
   }
   const bodyId = bodyIdFor(acc.kind);
-  const old = el(bodyId).querySelector(`tr[data-id="${CSS.escape(id)}"]`);
+  const body = el(bodyId);
+  const old = body.querySelector(`tr[data-id="${CSS.escape(id)}"]`);
   if (!old) {
     render();
+    return;
+  }
+  // 刷新后套餐 / 到期时间变了会改变排序位置：位置不再匹配时整组重排，否则只换这一行
+  const expectedIndex = sortedAccounts(acc.kind).findIndex((a) => a.id === id);
+  const currentIndex = [...body.children].indexOf(old);
+  if (expectedIndex !== currentIndex) {
+    renderGroup(acc.kind, bodyId, `#accounts-empty-${acc.kind}`);
+    updateHeadingActions();
     return;
   }
   old.replaceWith(accountRow(acc));
@@ -751,7 +808,7 @@ export async function refreshAccounts(ids) {
 /** 刷新单组（卡片标题栏的刷新按钮）：组内账户排队逐个刷新。 */
 async function refreshGroup(kind) {
   if (groupRefreshing.has(kind) || refreshAllRunning || switching || importing) return;
-  const ids = accounts.filter((a) => a.kind === kind).map((a) => a.id);
+  const ids = sortedAccounts(kind).map((a) => a.id);
   if (!ids.length) return;
   groupRefreshing.add(kind);
   clearStatus();
@@ -766,9 +823,9 @@ async function refreshGroup(kind) {
 /** 账户类型在页面上的分组顺序（Cursor → ChatGPT → Claude），刷新全部时按此顺序逐组进行。 */
 const KIND_ORDER = ["cursor", "codex", "claude"];
 
-/** 全部账户按界面显示顺序排列的 id：先按类型分组、组内保持存储顺序，与 render 的分组一致。 */
+/** 全部账户按界面显示顺序排列的 id：先按类型分组、组内按套餐排序，与 render 的顺序一致。 */
 function displayOrderIds() {
-  return KIND_ORDER.flatMap((kind) => accounts.filter((a) => a.kind === kind).map((a) => a.id));
+  return KIND_ORDER.flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
 }
 
 /**
@@ -1038,13 +1095,21 @@ const switchModal = {
     if (step) step.className = "switch-step running";
   },
 
-  /** 结算当前执行中的步骤（无执行中步骤时安全空操作，便于 catch 里无脑调用）。 */
-  settleStep(state) {
+  /**
+   * 结算当前执行中的步骤（无执行中步骤时安全空操作，便于 catch 里无脑调用）。
+   * detail 为可选的补充说明，追加在步骤文案之后（如「写入登录凭证 · 已换取新凭据」）。
+   */
+  settleStep(state, detail) {
     const step = el("#switch-steps").children[this.stepIndex];
-    if (step && step.classList.contains("running")) step.className = `switch-step ${state}`;
+    if (!step || !step.classList.contains("running")) return;
+    step.className = `switch-step ${state}`;
+    if (detail) {
+      const text = step.lastElementChild;
+      if (text) text.textContent = `${text.textContent} · ${detail}`;
+    }
   },
-  stepDone() {
-    this.settleStep("done");
+  stepDone(detail) {
+    this.settleStep("done", detail);
   },
   stepFail() {
     this.settleStep("fail");
@@ -1265,7 +1330,13 @@ async function onSwitchAccount(id) {
   }
 }
 
-// ChatGPT 切换：检测客户端 ->（必要时确认并关闭）-> 换票写入 auth.json -> 启动，
+/** 切换结果里的凭据来源文案：换了新凭据 / 直接写入保存的副本；后端未标注时为空。 */
+function codexSwitchModeText(result) {
+  if (!result || typeof result.exchanged !== "boolean") return "";
+  return result.exchanged ? "已换取新凭据（AT / RT 已更新）" : "直接写入保存的凭据副本，未换票";
+}
+
+// ChatGPT 切换：检测客户端 ->（必要时确认并关闭）-> 写入 auth.json（副本可用直接写，否则先换票）-> 启动，
 // 确认、分步进度与结果全程在切换弹窗内展示。
 async function onSwitchCodexAccount(id) {
   if (switching) return;
@@ -1311,15 +1382,23 @@ async function onSwitchCodexAccount(id) {
       switchModal.stepDone();
     }
     switchModal.stepStart();
-    await invoke("codex_switch_local", { id });
-    switchModal.stepDone();
+    const sw = await invoke("codex_switch_local", { id });
+    // 体现本次是向 OpenAI 换了新凭据，还是直接写入了账户保存的 auth.json 副本
+    const how = codexSwitchModeText(sw);
+    switchModal.stepDone(how);
     const view = await invoke("accounts_list");
     applyView(view);
     render();
     switchModal.stepStart();
     const l = await invoke("codex_client_launch");
     switchModal.stepDone();
-    switchModal.finish(true, l.launched ? "已切换账户并启动 ChatGPT。" : "已切换账户，但自动启动失败，请手动启动 ChatGPT。");
+    const note = how ? `（${how}）` : "";
+    switchModal.finish(
+      true,
+      l.launched
+        ? `已切换账户并启动 ChatGPT${note}。`
+        : `已切换账户${note}，但自动启动失败，请手动启动 ChatGPT。`
+    );
   } catch (error) {
     switchModal.stepFail();
     // Refresh Token 已失效换不到新凭据：提供兜底——直接把账户里保存的 auth.json 副本写入本机并启动
@@ -1826,7 +1905,7 @@ export function initAccounts() {
       const cell = el(bodyIdFor(account.kind)).querySelector(
         `tr[data-id="${CSS.escape(account.id)}"] .account-time`
       );
-      if (cell) cell.textContent = relativeFromUnixSeconds(account.lastRefreshAt);
+      if (cell) fillTimeCell(cell, account);
     }
     updateGroupMeta("cursor");
     updateGroupMeta("codex");

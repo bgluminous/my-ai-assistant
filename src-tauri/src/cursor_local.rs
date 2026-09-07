@@ -687,5 +687,6 @@ pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
     Ok(SwitchResult {
         switched: true,
         message: "已写入本地登录。".into(),
+        exchanged: None,
     })
 }

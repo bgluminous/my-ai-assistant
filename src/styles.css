@@ -740,6 +740,7 @@ tbody tr:hover { background: var(--surface-2); }
   font-weight: 550;
   padding: 2px 9px;
   border-radius: 999px;
+  white-space: nowrap;
   background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -849,6 +850,9 @@ tbody tr:hover { background: var(--surface-2); }
 .expired { color: var(--bad); }
 /* 套餐列第二行：套餐 / 计费周期到期倒计时，周期详情放 title 悬停 */
 .plan-expiry { margin-top: 2px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* 上次刷新列第二行（ChatGPT）：凭据组最后换新时间，精确时刻放 title 悬停 */
+td.account-time { white-space: nowrap; }
+.cred-refreshed { margin-top: 2px; font-size: 11px; color: var(--muted); cursor: help; }
 .plan-expiry.expired { color: var(--bad); }
 
 /* 用量摘要：进度条排两列网格，补充信息合并为一行小字 */
@@ -1432,7 +1436,10 @@ input.price-input {
 .modal-body > label:first-child { margin-top: 0; }
 .segmented-full { display: flex; width: 100%; margin-bottom: 4px; }
 .segmented-full .seg { flex: 1; text-align: center; padding: 8px 12px; }
-.proxy-test-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+/* 测试按钮定宽不收缩，长结果文案在右侧自行折行 */
+.proxy-test-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 16px; }
+.proxy-test-row #proxy-test { flex: none; white-space: nowrap; }
+.proxy-test-row #proxy-test-result { flex: 1 1 auto; min-width: 0; line-height: 1.5; padding-top: 6px; }
 #proxy-test-result.test-ok { color: var(--ok); }
 #proxy-test-result.test-bad { color: var(--bad); }
 #proxy-status { margin-top: 14px; }

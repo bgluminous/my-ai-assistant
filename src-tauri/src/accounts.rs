@@ -273,27 +273,38 @@ pub(crate) fn broadcast_changed(app: &AppHandle) {
 // 视图与入参
 // ---------------------------------------------------------------------------
 
+/// 发给前端的账户：与 Account 同一 JSON 形态，但去掉加密副本，附上副本记录的凭据换新时刻。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountView {
+    #[serde(flatten)]
+    pub account: Account,
+    /// ChatGPT：凭据组（access / refresh token）最后一次换新的时刻（unix 毫秒），来自副本的 last_refresh；
+    /// 无副本或副本没记时间为 None。
+    pub codex_auth_refreshed_at: Option<i64>,
+}
+
+pub(crate) fn account_view(acc: &Account) -> AccountView {
+    let codex_auth_refreshed_at = codex_last_refresh(acc).map(|t| t.timestamp_millis());
+    let mut account = acc.clone();
+    account.codex_auth = None;
+    AccountView {
+        account,
+        codex_auth_refreshed_at,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountsView {
-    pub accounts: Vec<Account>,
+    pub accounts: Vec<AccountView>,
     pub interval_minutes: u32,
     pub path: String,
 }
 
 fn view(data: &AccountsFile) -> AccountsView {
-    // 加密副本只在后端使用，不发给前端；token / refresh_token 已由副本解出，前端照常展示与编辑
-    let accounts = data
-        .accounts
-        .iter()
-        .cloned()
-        .map(|mut a| {
-            a.codex_auth = None;
-            a
-        })
-        .collect();
     AccountsView {
-        accounts,
+        accounts: data.accounts.iter().map(account_view).collect(),
         interval_minutes: data.interval_minutes,
         path: settings::path_display(),
     }
@@ -1326,11 +1337,11 @@ pub(crate) fn refresh_queue() -> &'static tokio::sync::Mutex<()> {
 /// 开始（含排队等待）与结束时广播 account-refreshing，主窗口与托盘据此同步行内「刷新中」状态，
 /// 不论刷新由哪个窗口发起。
 #[tauri::command]
-pub async fn account_refresh(app: AppHandle, id: String) -> Result<Account, String> {
+pub async fn account_refresh(app: AppHandle, id: String) -> Result<AccountView, String> {
     let _ = app.emit("account-refreshing", json!({ "id": id, "active": true }));
     let result = refresh_account_inner(&app, &id).await;
     let _ = app.emit("account-refreshing", json!({ "id": id, "active": false }));
-    result
+    result.map(|acc| account_view(&acc))
 }
 
 async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, String> {

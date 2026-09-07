@@ -643,7 +643,8 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         );
         return Ok(SwitchResult {
             switched: true,
-            message: "已写入本地登录。".into(),
+            message: "已写入保存的凭据副本（未换票）。".into(),
+            exchanged: Some(false),
         });
     }
 
@@ -705,7 +706,8 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
 
     Ok(SwitchResult {
         switched: true,
-        message: "已写入本地登录。".into(),
+        message: "已换取新凭据并写入本地登录。".into(),
+        exchanged: Some(true),
     })
 }
 
@@ -866,5 +868,6 @@ pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String>
     Ok(SwitchResult {
         switched: true,
         message: "已写入本地登录（未换新凭据）。".into(),
+        exchanged: Some(false),
     })
 }

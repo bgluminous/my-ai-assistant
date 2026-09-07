@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -339,6 +339,12 @@ function accountRow(account) {
     titles.push(resets.title);
   }
   parts.push(`刷新于 ${relativeFromUnixSeconds(account.lastRefreshAt)}`);
+  // ChatGPT：凭据组最后换新时间（来自账户保存的 auth.json 副本）
+  const credAt = Number(account.codexAuthRefreshedAt);
+  if (account.kind === "codex" && Number.isFinite(credAt) && credAt > 0) {
+    parts.push(`凭据 ${relativeFromMs(credAt)}`);
+    titles.push(`凭据组（access / refresh token）最后换新：${new Date(credAt).toLocaleString("zh-CN", { hour12: false })}`);
+  }
   const info = document.createElement("span");
   info.textContent = parts.join(" · ");
   if (titles.length) info.title = titles.join("\n");
@@ -1384,7 +1390,13 @@ const trayModal = (() => {
     setIcon("running");
   }
 
-  function stepDone() { setIcon("done"); }
+  /** detail 为可选补充说明，追加在当前步骤文案之后（如「写入登录凭证 · 已换取新凭据」）。 */
+  function stepDone(detail) {
+    setIcon("done");
+    const icon = icons[current];
+    const text = icon && icon.nextElementSibling;
+    if (detail && text) text.textContent = `${text.textContent} · ${detail}`;
+  }
 
   // 仅当有进行中的步骤时标红；检测 / 确认阶段出错则无步骤可标，静默跳过
   function stepFail() {
@@ -1470,13 +1482,18 @@ async function doSwitch(id) {
         trayModal.stepDone();
       }
       trayModal.stepStart();
-      await invoke("codex_switch_local", { id });
-      trayModal.stepDone();
+      const sw = await invoke("codex_switch_local", { id });
+      // 体现本次是换了新凭据还是直接写入保存的副本
+      const how = typeof (sw && sw.exchanged) === "boolean"
+        ? (sw.exchanged ? "已换取新凭据" : "直接写入保存的副本，未换票")
+        : "";
+      trayModal.stepDone(how);
       await load();
       trayModal.stepStart();
       const l = await invoke("codex_client_launch");
       trayModal.stepDone();
-      trayModal.finish(true, l.launched ? "已切换账户并启动 ChatGPT。" : "已切换，请手动启动 ChatGPT。");
+      const note = how ? `（${how}）` : "";
+      trayModal.finish(true, l.launched ? `已切换账户并启动 ChatGPT${note}。` : `已切换${note}，请手动启动 ChatGPT。`);
       return;
     }
     if (account && account.kind === "claude") {
