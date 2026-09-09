@@ -29,6 +29,7 @@ import {
   fetchArchivedAggregate,
   listDeletedUsage,
   removeDeletedUsage,
+  setDeletedUsageNote,
   fetchCodexScan,
   fetchClaudeScan,
   purgeAccountCache,
@@ -55,6 +56,7 @@ import {
   refreshAccounts,
   getRefreshIntervalMinutes,
   confirmDialog,
+  promptDialog,
 } from "./accounts.js";
 import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
@@ -1222,6 +1224,34 @@ async function onDeleteUsageData(record) {
 }
 
 /**
+ * 总览行「编辑备注」：修改已删除账户保留记录的备注。非空为手填备注（显示时优先于用户名 / 邮箱），
+ * 留空恢复自动备注（邮箱，其次账号 ID）。保存后就地替换记录并重绘账单表与合并结果
+ * （名称只影响展示，数据不变，不重新切片）。
+ */
+async function onEditDeletedNote(record) {
+  const current = record.noteAuto === false ? String(record.note || "").trim() : "";
+  const value = await promptDialog({
+    title: "编辑备注",
+    body: `修改已删除账户“${deletedLabel(record)}”在统计页的显示名。留空则恢复自动备注（邮箱，其次账号 ID）。`,
+    confirmText: "保存",
+    input: { label: "备注", value: current, placeholder: "给账户起个名字，便于区分（选填）" },
+  });
+  if (value == null || value.trim() === current) return;
+  let updated;
+  try {
+    updated = await setDeletedUsageNote(record.accountId, value);
+  } catch (error) {
+    setStatus("bad", `修改备注失败：${resetError(error)}`);
+    return;
+  }
+  deletedRecords = deletedRecords.map((r) => (r.accountId === updated.accountId ? updated : r));
+  toast("ok", `备注已保存，现显示为“${deletedLabel(updated)}”。`, { key: "usage-deleted" });
+  if (!isMergedView() || !activeSources().includeDeleted) return;
+  renderOverviewTable();
+  renderOverviewMerged();
+}
+
+/**
  * 打开某个 Cursor 账户（在用或已删除保留的数据）在当前时间范围内的原始账单弹窗。
  * 在用账户在弹窗里清除本地数据后，由 USAGE_LOCAL_CLEARED_EVENT 统一触发视图重载。
  */
@@ -1326,7 +1356,7 @@ function renderOverviewTable() {
   // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
   // 统计中 / 更新中的来源状态格带旋转指示并用强调色，避免与「完成」等静态文案混在一起看不出来。
   // Cursor 账户行：状态格放「原始账单」按钮；已删除账户行：名称旁标「已删除」，
-  // 状态格放「原始账单」与「删除统计数据」按钮（actions）。
+  // 状态格放「原始账单」「编辑备注」与「删除统计数据」按钮（actions）。
   const sourceRow = ({
     kind,
     label,
@@ -1511,6 +1541,12 @@ function renderOverviewTable() {
             label: "原始账单",
             title: "原始账单：查看该账户保留数据在当前时间范围内的逐笔用量事件",
             onClick: () => openRawBill({ accountId: record.accountId, label: deletedLabel(record), deleted: true }),
+          },
+          {
+            icon: "edit",
+            label: "编辑备注",
+            title: "编辑备注：修改该已删除账户在统计页的显示名（留空恢复自动备注）",
+            onClick: () => void onEditDeletedNote(record),
           },
           {
             icon: "delete",

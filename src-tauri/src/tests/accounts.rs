@@ -21,3 +21,29 @@ fn error_code_extraction_matches_codex_cli() {
     assert!(refresh_error_code("Bad Gateway").is_none());
     assert_eq!(refresh_error_detail("  Bad Gateway  "), "Bad Gateway");
 }
+
+#[test]
+fn dead_cursor_status_keeps_previous_identity() {
+    let prev = json!({ "alive": true, "name": "Alice", "email": "alice@example.com" });
+
+    // 会话失效：接口不返回身份，沿用上一次缓存的用户名与邮箱，失效标记不受影响
+    let mut dead = json!({ "alive": false, "name": null, "email": null, "membershipType": null });
+    carry_cursor_identity(&mut dead, Some(&prev));
+    assert_eq!(dead["alive"], json!(false));
+    assert_eq!(dead["name"], json!("Alice"));
+    assert_eq!(dead["email"], json!("alice@example.com"));
+    assert_eq!(dead["membershipType"], Value::Null);
+
+    // 接口返回了新值时以新值为准
+    let mut fresh = json!({ "alive": true, "name": "Alice B", "email": "alice@example.com" });
+    carry_cursor_identity(&mut fresh, Some(&prev));
+    assert_eq!(fresh["name"], json!("Alice B"));
+
+    // 首次刷新（没有历史状态）或历史里也没有身份：保持原样
+    let mut first = json!({ "alive": false, "name": null, "email": null });
+    carry_cursor_identity(&mut first, None);
+    assert_eq!(first["name"], Value::Null);
+    carry_cursor_identity(&mut first, Some(&json!({ "alive": false, "name": "  " })));
+    assert_eq!(first["name"], Value::Null);
+    assert_eq!(first["email"], Value::Null);
+}

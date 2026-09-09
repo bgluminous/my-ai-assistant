@@ -41,7 +41,7 @@ pub enum Category {
     State,
     /// access_token 续期、与本机客户端登录文件的双向同步、凭据存储迁移。
     Credential,
-    /// 用量快照、原始账单导出、本地用量数据的删除 / 沿用 / 清除。
+    /// 用量快照、原始账单导出、本地用量数据的删除 / 沿用 / 清除、已删除账户备注修改。
     Usage,
     /// 各项设置变更、价格表更新、备份导入导出、启动期的系统事件。
     Settings,
@@ -79,6 +79,7 @@ const EVENTS: &[(&str, Level, Category, &str)] = &[
     ("usage_events_export", Info, Usage, "导出原始账单"),
     ("usage_data_adopt", Info, Usage, "沿用统计数据"),
     ("usage_data_delete", Info, Usage, "删除统计数据"),
+    ("usage_data_note", Info, Usage, "修改备注"),
     ("usage_data_clear", Info, Usage, "清除本地数据"),
     ("interval_set", Info, Settings, "定时设置"),
     ("local_sync_interval_set", Info, Settings, "同步间隔设置"),

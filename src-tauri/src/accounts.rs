@@ -886,6 +886,26 @@ fn to_status<T: Serialize>(payload: &T) -> Result<Value, String> {
     Ok(v)
 }
 
+/// Cursor 会话失效（401 / 未认证）时接口不再返回用户名与邮箱，新状态里这两项为空。
+/// 沿用上一次刷新缓存的值：账户页 / 托盘 / 用量页以及删除后保留的统计数据仍按原用户名显示，
+/// 自动备注也不会从邮箱退化成 user_id。接口返回了新值时以新值为准。
+fn carry_cursor_identity(status: &mut Value, prev: Option<&Value>) {
+    let Some(prev) = prev else {
+        return;
+    };
+    for key in ["name", "email"] {
+        let pointer = format!("/{key}");
+        if json_str_at(status, &pointer).is_some() {
+            continue;
+        }
+        if let Some(value) = json_str_at(prev, &pointer) {
+            if let Some(obj) = status.as_object_mut() {
+                obj.insert(key.to_string(), Value::String(value));
+            }
+        }
+    }
+}
+
 /// 换票被拒的原因，按服务端错误码归类（与 Codex CLI 一致）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshDenial {
@@ -1414,7 +1434,10 @@ async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, Str
 
     let result: Result<Account, String> = match kind.as_str() {
         "cursor" => match cursor::cursor_inspect_token(snap.token).await {
-            Ok(payload) => to_status(&payload).and_then(|status| finish(app, id, status)),
+            Ok(payload) => to_status(&payload).and_then(|mut status| {
+                carry_cursor_identity(&mut status, snap.status.as_ref());
+                finish(app, id, status)
+            }),
             Err(e) => Err(e),
         },
         "codex" => refresh_codex_account(app, id, snap).await,

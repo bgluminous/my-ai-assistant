@@ -837,6 +837,11 @@
             <span class="toggle-track" aria-hidden="true"></span>
             <span id="switch-modal-option-text" class="toggle-text"></span>
           </label>
+          <!-- 确认阶段可选的单行文本输入（如修改已删除账户的备注），由 JS 按需显示 -->
+          <div id="switch-modal-input-field" class="modal-input-field" hidden>
+            <label id="switch-modal-input-label" for="switch-modal-input"></label>
+            <input id="switch-modal-input" type="text" spellcheck="false" />
+          </div>
           <div id="switch-steps" class="switch-steps" hidden></div>
           <p id="switch-modal-status" class="status" hidden></p>
         </div>

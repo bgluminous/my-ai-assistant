@@ -948,6 +948,19 @@ export async function confirmDialog({ title, body, confirmText, danger = true })
   return ok;
 }
 
+/**
+ * 供其它页面复用的单行文本输入弹窗（如用量统计页修改已删除账户的备注）。
+ * input = { label, value, placeholder }。确认返回输入的文本（可为空串）；
+ * 取消 / Esc，或弹窗正被切换 / 删除流程占用时返回 null。
+ */
+export async function promptDialog({ title, body, confirmText, input }) {
+  if (switchModal.phase !== "hidden") return null;
+  const ok = await switchModal.toConfirm({ title, body, confirmText, danger: false, input });
+  const value = ok ? switchModal.inputValue() : null;
+  switchModal.close();
+  return value;
+}
+
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
 
 /** 切换成功的结果弹窗停留秒数，到点自动关闭（按钮上倒计时，期间可手动关闭）。 */
@@ -973,6 +986,7 @@ const switchModal = {
     body.hidden = false;
     body.textContent = text;
     this.setOption(null);
+    this.setInput(null);
     const steps = el("#switch-steps");
     steps.hidden = true;
     steps.replaceChildren();
@@ -988,9 +1002,10 @@ const switchModal = {
   /**
    * 切到确认阶段：显示正文与取消 / 确认按钮，返回用户选择（Esc / 关闭 / 取消 = false）。
    * option = { label, checked } 时在正文下方显示一个勾选项（如删除 Cursor 账户的「保留统计数据」），
-   * 确认后由调用方经 optionChecked() 读取。
+   * 确认后由调用方经 optionChecked() 读取；input = { label, value, placeholder } 时显示一个
+   * 单行文本输入（如修改已删除账户的备注），焦点落在输入框、回车即确认，确认后经 inputValue() 读取。
    */
-  toConfirm({ title, body, confirmText, danger, option }) {
+  toConfirm({ title, body, confirmText, danger, option, input }) {
     return new Promise((resolve) => {
       this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
@@ -998,6 +1013,7 @@ const switchModal = {
       text.hidden = false;
       text.textContent = body || "";
       this.setOption(option || null);
+      this.setInput(input || null);
       el("#switch-steps").hidden = true;
       el("#switch-modal-status").hidden = true;
       el("#switch-modal .modal-foot").hidden = false;
@@ -1009,8 +1025,35 @@ const switchModal = {
       this.phase = "confirm";
       this.confirmResolve = resolve;
       el("#switch-modal").hidden = false;
-      ok.focus();
+      if (input) {
+        const field = el("#switch-modal-input");
+        field.focus();
+        field.select();
+      } else {
+        ok.focus();
+      }
     });
+  },
+
+  /** 显示 / 隐藏确认阶段的单行文本输入。 */
+  setInput(input) {
+    const box = el("#switch-modal-input-field");
+    const field = el("#switch-modal-input");
+    if (!input) {
+      box.hidden = true;
+      field.value = "";
+      field.placeholder = "";
+      return;
+    }
+    el("#switch-modal-input-label").textContent = input.label || "";
+    field.placeholder = input.placeholder || "";
+    field.value = input.value || "";
+    box.hidden = false;
+  },
+
+  /** 确认阶段文本输入的当前值（未显示输入框时为空串）。 */
+  inputValue() {
+    return el("#switch-modal-input-field").hidden ? "" : el("#switch-modal-input").value;
   },
 
   /** 显示 / 隐藏确认阶段的勾选项。 */
@@ -1036,6 +1079,7 @@ const switchModal = {
   toSteps(labels) {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
+    this.setInput(null);
     el("#switch-modal .modal-foot").hidden = true;
     const box = el("#switch-steps");
     box.replaceChildren(
@@ -1090,6 +1134,7 @@ const switchModal = {
   finish(ok, message, alt = null) {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
+    this.setInput(null);
     const status = el("#switch-modal-status");
     status.hidden = false;
     status.className = `status ${ok ? "ok" : "bad"}`;
@@ -1153,6 +1198,7 @@ const switchModal = {
     el("#switch-modal").hidden = true;
     el("#switch-modal-body").hidden = false;
     this.setOption(null);
+    this.setInput(null);
     el("#switch-steps").hidden = true;
     el("#switch-modal-status").hidden = true;
     el("#switch-alt").hidden = true;
@@ -1846,6 +1892,12 @@ export function initAccounts() {
   el("#switch-close").addEventListener("click", () => switchModal.requestClose());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !el("#switch-modal").hidden) switchModal.requestClose();
+  });
+  // 确认阶段的文本输入：回车等同于点主按钮
+  el("#switch-modal-input").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    switchModal.onOk();
   });
 
   // 订阅后端广播：托盘面板等其他入口改动账户数据后，本表实时同步

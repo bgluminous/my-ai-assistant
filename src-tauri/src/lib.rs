@@ -144,6 +144,7 @@ pub fn run() {
             usage_archive::cursor_usage_slice,
             usage_archive::cursor_usage_deleted_list,
             usage_archive::cursor_usage_deleted_remove,
+            usage_archive::cursor_usage_deleted_set_note,
             usage_archive::cursor_usage_events,
             usage_archive::cursor_usage_clear,
             usage_archive::usage_events_export,

@@ -1495,6 +1495,9 @@ input.price-input {
 .toggle:has(input:disabled) { cursor: not-allowed; }
 /* 确认弹窗正文下方的勾选项（如删除 Cursor 账户时的「保留统计数据」） */
 .modal-option { display: flex; margin: 4px 0 8px; font-size: 13px; }
+/* 确认弹窗正文下方的单行文本输入（如修改已删除账户的备注） */
+.modal-input-field { margin: 4px 0 8px; }
+.modal-input-field label { margin-top: 0; }
 
 /* 确认弹窗的危险确认键（如「删除」「关闭并切换」） */
 button.primary.danger { background: var(--bad); box-shadow: none; }

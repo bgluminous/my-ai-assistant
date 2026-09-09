@@ -324,6 +324,32 @@ fn deleted_label(meta: &DeletedMeta) -> String {
     }
 }
 
+/// 已删除账户的自动备注，与在用账户的兜底口径一致：优先保留的邮箱，其次账户身份里的账号 ID
+/// （`cursor:user_xxx` → `user_xxx`），都没有为空串。
+fn deleted_auto_note(meta: &DeletedMeta, identity: Option<&str>) -> String {
+    if let Some(email) = meta.email.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return email.to_string();
+    }
+    identity
+        .and_then(|s| s.strip_prefix("cursor:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+/// 应用备注修改：非空为手填备注（显示时优先于用户名 / 邮箱），留空恢复自动备注。
+fn apply_deleted_note(meta: &mut DeletedMeta, identity: Option<&str>, note: &str) {
+    let trimmed = note.trim();
+    if trimmed.is_empty() {
+        meta.note = deleted_auto_note(meta, identity);
+        meta.note_auto = true;
+    } else {
+        meta.note = trimmed.to_string();
+        meta.note_auto = false;
+    }
+}
+
 fn deleted_record(archive: &UsageArchive) -> Option<DeletedUsageRecord> {
     let meta = archive.deleted.as_ref()?;
     let stamps = || archive.events.iter().filter_map(|e| e.6);
@@ -450,6 +476,38 @@ pub async fn cursor_usage_deleted_remove(account_id: String) -> Result<(), Strin
         Some(json!({ "id": account_id, "events": archive.events.len() })),
     );
     Ok(())
+}
+
+/// 修改一份已删除账户保留记录的备注：非空为手填备注（显示时优先于用户名 / 邮箱），
+/// 留空恢复自动备注（邮箱，其次账号 ID）。返回更新后的记录，前端据此就地刷新。
+#[tauri::command]
+pub async fn cursor_usage_deleted_set_note(
+    account_id: String,
+    note: String,
+) -> Result<DeletedUsageRecord, String> {
+    let lock = account_lock(&account_id);
+    let _guard = lock.lock().await;
+    let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let identity = archive.identity.clone();
+    let Some(meta) = archive.deleted.as_mut() else {
+        return Err("not_deleted_account".into());
+    };
+    let before = deleted_label(meta);
+    apply_deleted_note(meta, identity.as_deref(), &note);
+    let after = deleted_label(meta);
+    let auto = meta.note_auto;
+    save(&archive)?;
+    let message = if auto {
+        format!("已删除账户「{before}」的备注恢复为自动备注，现显示为「{after}」")
+    } else {
+        format!("已删除账户「{before}」的备注改为「{after}」")
+    };
+    audit::log(
+        "usage_data_note",
+        message,
+        Some(json!({ "id": account_id, "auto": auto })),
+    );
+    deleted_record(&archive).ok_or_else(|| "not_deleted_account".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -875,3 +933,7 @@ pub async fn usage_snapshot_save(
         path: shown,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/usage_archive.rs"]
+mod tests;
