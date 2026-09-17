@@ -20,6 +20,11 @@ on:
 permissions:
   contents: write
 
+# 同一引用（同一标签或同一分支的手动触发）的重复运行排队执行，避免并发创建或上传同一个 Release。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   APP_NAME: my-ai-assistant
   GH_REPO: ${{ github.repository }}
