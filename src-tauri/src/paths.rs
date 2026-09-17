@@ -44,7 +44,11 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 /// 本应用用户数据目录：`{home_dir}/.xilore/myaiassistant`。
+/// 设置 `MYAI_ASSISTANT_HOME` 时改用该目录（独立数据，不读写默认用户目录）。
 pub fn app_dir() -> Option<PathBuf> {
+    if let Some(p) = env_nonempty("MYAI_ASSISTANT_HOME") {
+        return Some(p);
+    }
     home_dir().map(|h| h.join(".xilore").join("myaiassistant"))
 }
 
@@ -79,6 +83,9 @@ pub struct LegacyMigration {
 ///   最后删除旧目录——中途崩溃只会留下临时目录，下次启动清掉重来，不会出现半份新目录；
 /// - 旧目录搬走后其父目录 `xilore` 若已空则一并删除。
 pub fn migrate_legacy_app_dir() -> Result<Option<LegacyMigration>, String> {
+    if env_nonempty("MYAI_ASSISTANT_HOME").is_some() {
+        return Ok(None);
+    }
     let (Some(from), Some(to)) = (legacy_app_dir(), app_dir()) else {
         return Ok(None);
     };

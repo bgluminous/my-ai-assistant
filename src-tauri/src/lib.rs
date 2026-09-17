@@ -44,12 +44,15 @@ fn app_info() -> AppInfo {
 pub fn run() {
     // 是否由开机自启动拉起（注册自启动项时写入 --autostart 参数）
     let autostart_launch = launch::launched_by_autostart();
-    tauri::Builder::default()
-        // 单实例：重复启动不再新开进程（多实例会并发读写 settings.json，
-        // 撞上写入瞬间的实例会以空数据运行），改为唤出并聚焦已有主窗口。
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    // 指向独立数据目录时跳过单实例：否则会唤出已在跑的默认实例，改不到隔离数据。
+    let isolated = paths::env_nonempty("MYAI_ASSISTANT_HOME").is_some();
+    let mut builder = tauri::Builder::default();
+    if !isolated {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             main_window::show(app);
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,

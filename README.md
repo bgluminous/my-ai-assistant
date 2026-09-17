@@ -22,6 +22,7 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表�
 ## 目录
 
 - [功能](#功能)
+- [界面](#界面)
 - [运行要求](#运行要求)
 - [构建](#构建)
 - [配置](#配置)
@@ -29,6 +30,20 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表�
 - [数据来源](#数据来源)
 - [仓库布局](#仓库布局)
 - [声明](#声明)
+
+## 界面
+
+账户管理、用量总览与托盘账户面板（图中为示例数据）：
+
+<p align="center">
+  <img src="docs/screenshots/accounts.png" alt="账户管理" width="880">
+</p>
+<p align="center">
+  <img src="docs/screenshots/usage.png" alt="用量统计" width="880">
+</p>
+<p align="center">
+  <img src="docs/screenshots/tray.png" alt="托盘账户面板" width="280">
+</p>
 
 ## 功能
 
@@ -228,6 +243,7 @@ Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 my-ai-assistant/
 ├── package.json              # npm 脚本与 @tauri-apps/cli、chart.js
 ├── app-icon.png              # 图标源图（AI 生成，四角透明；`npm run icons` 由它生成各平台图标）
+├── docs/screenshots/         # README 界面示例图
 ├── scripts/                  # JS 语法检查、Windows 本地打包
 ├── src/                      # 前端（Tauri frontendDist）
 │   ├── index.html            # 主窗口
