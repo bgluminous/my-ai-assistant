@@ -2,13 +2,15 @@
 #
 # Usage:
 #   npm run release:windows        # full build + pack
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild] [-KeepTarget]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild] [-KeepTarget] [-SkipArchive]
 #
 # Options:
-#   -SkipBuild   Reuse existing build output under src-tauri/target/release,
-#                only re-collect artifacts and recreate the 7z archive.
-#   -KeepTarget  Do not delete src-tauri/target afterwards (CI uses this so the
-#                Rust build cache can pick up the compiled dependencies).
+#   -SkipBuild    Reuse existing build output under src-tauri/target/release,
+#                 only re-collect artifacts and recreate the 7z archive.
+#   -KeepTarget   Do not delete src-tauri/target afterwards (CI uses this so the
+#                 Rust build cache can pick up the compiled dependencies).
+#   -SkipArchive  Collect portable / NSIS / MSI only; do not create the 7z
+#                 (CI uses this — GitHub Release 上按文件单独下载).
 #
 # Output (kept after the script finishes):
 #   release/my-ai-assistant-v<version>-windows-x64/      portable exe, NSIS, MSI
@@ -23,7 +25,8 @@
 
 param(
     [switch]$SkipBuild,
-    [switch]$KeepTarget
+    [switch]$KeepTarget,
+    [switch]$SkipArchive
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,28 +77,33 @@ Write-Host "==> Staged artifacts:"
 Get-ChildItem $stageDir | ForEach-Object { Write-Host ("    {0}  ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
 
 # --- 4. Pack with 7-Zip --------------------------------------------------------
-$sevenZip = $null
-$bundled7za = "$root/tools/7zip/7za.exe"
-if (Test-Path $bundled7za) {
-    $sevenZip = $bundled7za
+$archiveItem = $null
+if ($SkipArchive) {
+    Write-Host "==> SkipArchive: not creating 7z"
 } else {
-    $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
-    if (-not $sevenZip) {
-        foreach ($candidate in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
-            if (Test-Path $candidate) { $sevenZip = $candidate; break }
+    $sevenZip = $null
+    $bundled7za = "$root/tools/7zip/7za.exe"
+    if (Test-Path $bundled7za) {
+        $sevenZip = $bundled7za
+    } else {
+        $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+        if (-not $sevenZip) {
+            foreach ($candidate in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
+                if (Test-Path $candidate) { $sevenZip = $candidate; break }
+            }
         }
     }
+    if (-not $sevenZip) { throw "7z executable not found: expected $bundled7za or a system 7-Zip install." }
+    Write-Host "==> Using 7-Zip: $sevenZip"
+
+    $archive = "$releaseDir/$stageName.7z"
+    if (Test-Path $archive) { Remove-Item $archive -Force }
+    & $sevenZip a -t7z -mx=9 $archive $stageDir | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "7z compression failed (exit=$LASTEXITCODE)" }
+
+    $archiveItem = Get-Item $archive
+    Write-Host ("==> Archive: {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
 }
-if (-not $sevenZip) { throw "7z executable not found: expected $bundled7za or a system 7-Zip install." }
-Write-Host "==> Using 7-Zip: $sevenZip"
-
-$archive = "$releaseDir/$stageName.7z"
-if (Test-Path $archive) { Remove-Item $archive -Force }
-& $sevenZip a -t7z -mx=9 $archive $stageDir | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "7z compression failed (exit=$LASTEXITCODE)" }
-
-$archiveItem = Get-Item $archive
-Write-Host ("==> Archive: {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
 
 # --- 5. Remove Cargo/Tauri build intermediates --------------------------------
 $cargoTarget = "$root/src-tauri/target"
@@ -109,5 +117,7 @@ if ($KeepTarget) {
 
 Write-Host "==> Kept:"
 Get-ChildItem $stageDir | ForEach-Object { Write-Host ("    {0}  ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB)) }
-Write-Host ("    {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
+if ($archiveItem) {
+    Write-Host ("    {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveItem.Length / 1MB))
+}
 Write-Host "==> Done"

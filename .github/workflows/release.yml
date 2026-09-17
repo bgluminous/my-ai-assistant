@@ -1,10 +1,16 @@
 # 构建 Windows x64 与 macOS（Apple Silicon）的发布包并发布 GitHub Release。
 #
 # 触发方式：
-#   - 推送 v<版本> 标签：校验版本号后创建 draft Release，两个平台各自构建并上传产物，
-#     全部成功后自动把 Release 标记为已发布；任一平台失败则保持 draft。
+#   - 推送 Release-<版本> 分支（如 Release-1.2.3）：校验分支名与版本号一致后创建 draft Release
+#     v<版本>，两个平台各自构建并上传产物，全部成功后自动发布；发布时 GitHub 在该分支的提交上
+#     创建 v<版本> 标签。任一平台失败则保持 draft，重跑复用同一个 draft。
+#     同一版本已发布过则直接失败，不覆盖已发布产物。
 #   - 手动触发（workflow_dispatch）：只构建，产物作为 workflow artifact 保留 7 天，
 #     不创建 Release，用于试跑。
+#   - 推送 master 或其它分支不触发。
+#
+# Release 说明 = 固定的下载指引 + 自动生成的变更列表（上一个 v* 标签以来的提交标题，
+# 按 Conventional Commits 类型分组）。发布后仍可在 GitHub 的 Release 页面手动编辑。
 #
 # 不覆盖 Intel Mac 与 Linux。prepare / publish 两个协调 job 跑在 ubuntu 上只是因为最便宜，
 # 不产出 Linux 包。
@@ -13,14 +19,14 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - 'Release-*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# 同一引用（同一标签或同一分支的手动触发）的重复运行排队执行，避免并发创建或上传同一个 Release。
+# 同一分支的重复运行排队执行，避免并发创建或上传同一个 Release。
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -38,10 +44,13 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       publish: ${{ steps.meta.outputs.publish }}
     steps:
+      # 完整历史与标签用于生成变更列表。
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       # 与 scripts/build-release-windows.ps1 相同的一致性校验，另外核对 package-lock.json
-      # 与触发标签，尽早失败以免白跑两个平台的编译。
+      # 与触发分支名，尽早失败以免白跑两个平台的编译。
       - name: Read and verify version
         id: meta
         env:
@@ -60,8 +69,8 @@ jobs:
           fi
           publish=false
           if [ "$EVENT_NAME" = "push" ]; then
-            if [ "$REF_NAME" != "v$conf" ]; then
-              echo "::error::Tag $REF_NAME does not match version v$conf in src-tauri/tauri.conf.json"
+            if [ "$REF_NAME" != "Release-$conf" ]; then
+              echo "::error::Branch $REF_NAME does not match version $conf in src-tauri/tauri.conf.json (expected Release-$conf)"
               exit 1
             fi
             publish=true
@@ -72,17 +81,14 @@ jobs:
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create draft release
+      # 说明 = 下载指引 + 变更列表。变更列表取「当前提交可达的最近一个 v* 标签」到当前提交
+      # 之间的非合并提交标题，按 Conventional Commits 类型分组；没有历史标签时写「首个发布版本」。
+      - name: Write release notes
         if: steps.meta.outputs.publish == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, reusing it"
-            exit 0
-          fi
           cat > notes.md <<EOF
           ## 下载
 
@@ -90,17 +96,61 @@ jobs:
             - \`${APP_NAME}_${VERSION}_x64-setup.exe\`：NSIS 安装包（推荐）
             - \`${APP_NAME}_${VERSION}_x64_en-US.msi\`：MSI 安装包
             - \`${APP_NAME}.exe\`：便携版，需要系统已安装 WebView2
-            - \`${APP_NAME}-v${VERSION}-windows-x64.7z\`：以上三个文件的合集
           - macOS（Apple Silicon）
             - \`${APP_NAME}_${VERSION}_aarch64.dmg\`
 
           安装包未做代码签名：Windows SmartScreen 可能提示「未知发布者」；macOS 首次打开若提示
           「已损坏」或「无法验证开发者」，在终端执行 \`xattr -cr /Applications/${APP_NAME}.app\` 后再打开。
+
+          ## 变更
+
           EOF
-          gh release create "$TAG" --draft --verify-tag \
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
+          if [ "$prev" = "$TAG" ]; then
+            prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || true)
+          fi
+          if [ -z "$prev" ]; then
+            echo "首个发布版本。" >> notes.md
+          else
+            range="$prev..HEAD"
+            subjects=$(git log --no-merges --format='%s' "$range")
+            group() {
+              local items
+              items=$(printf '%s\n' "$subjects" | grep -E "^($2)(\([^)]*\))?!?:" \
+                | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*/- /' || true)
+              if [ -n "$items" ]; then printf '### %s\n\n%s\n\n' "$1" "$items" >> notes.md; fi
+            }
+            group '新增' 'feat'
+            group '修复' 'fix'
+            group '性能与重构' 'perf|refactor'
+            group '其他' 'docs|ci|chore|build|test|style'
+            rest=$(printf '%s\n' "$subjects" | grep -vE '^[a-z]+(\([^)]*\))?!?:' | sed 's/^/- /' || true)
+            if [ -n "$rest" ]; then printf '### 未分类\n\n%s\n\n' "$rest" >> notes.md; fi
+            echo "完整对比：https://github.com/$GH_REPO/compare/$prev...$TAG" >> notes.md
+          fi
+          echo "--- notes.md ---"; cat notes.md
+
+      # 已发布的同版本不允许覆盖；上次失败遗留的 draft 则复用并更新指向的提交与说明。
+      # Release 以 --target 指向当前提交，正式发布时 GitHub 会在该提交上创建 v<版本> 标签。
+      - name: Create or reuse draft release
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG is already published; bump the version instead of re-releasing"
+              exit 1
+            fi
+            echo "Draft release $TAG already exists, updating it"
+            gh release edit "$TAG" --target "$GITHUB_SHA" --title "$APP_NAME v$VERSION" --notes-file notes.md
+            exit 0
+          fi
+          gh release create "$TAG" --draft --target "$GITHUB_SHA" \
             --title "$APP_NAME v$VERSION" \
-            --notes-file notes.md \
-            --generate-notes
+            --notes-file notes.md
 
   build:
     name: Build ${{ matrix.name }}
@@ -142,17 +192,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # Windows 复用仓库脚本：版本校验 + tauri build + 收集便携版 / NSIS / MSI + 7z。
+      # Windows 复用仓库脚本：版本校验 + tauri build + 收集便携版 / NSIS / MSI。
       # -KeepTarget 保留 src-tauri/target 供 rust-cache 缓存依赖编译产物。
+      # -SkipArchive 不打 7z，Release / artifact 按文件单独下载。
       - name: Build Windows release
         if: runner.os == 'Windows'
-        run: npm run release:windows -- -KeepTarget
+        run: npm run release:windows -- -KeepTarget -SkipArchive
 
       - name: Collect Windows artifacts
         if: runner.os == 'Windows'
         run: |
           mkdir -p dist
-          cp "release/$APP_NAME-v$VERSION-windows-x64.7z" dist/
           cp "release/$APP_NAME-v$VERSION-windows-x64"/* dist/
 
       - name: Build macOS release
@@ -174,12 +224,38 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/* --clobber
 
-      - name: Upload workflow artifacts (manual run)
-        if: needs.prepare.outputs.publish != 'true'
+      # Actions artifact 每个 step 仍会打成 zip，但每个 zip 里只有一个文件，
+      # 试跑时可按安装包分别下载。正式 Release 由上一步按文件上传，不是 zip。
+      - name: Upload NSIS (manual run)
+        if: needs.prepare.outputs.publish != 'true' && runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.APP_NAME }}-v${{ env.VERSION }}-${{ matrix.name }}
-          path: dist/*
+          name: ${{ env.APP_NAME }}_${{ env.VERSION }}_x64-setup.exe
+          path: dist/${{ env.APP_NAME }}_${{ env.VERSION }}_x64-setup.exe
+          retention-days: 7
+
+      - name: Upload MSI (manual run)
+        if: needs.prepare.outputs.publish != 'true' && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}_${{ env.VERSION }}_x64_en-US.msi
+          path: dist/${{ env.APP_NAME }}_${{ env.VERSION }}_x64_en-US.msi
+          retention-days: 7
+
+      - name: Upload portable exe (manual run)
+        if: needs.prepare.outputs.publish != 'true' && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}.exe
+          path: dist/${{ env.APP_NAME }}.exe
+          retention-days: 7
+
+      - name: Upload dmg (manual run)
+        if: needs.prepare.outputs.publish != 'true' && runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}_${{ env.VERSION }}_aarch64.dmg
+          path: dist/*.dmg
           retention-days: 7
 
   publish:
@@ -188,9 +264,12 @@ jobs:
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
+      # 发布时 GitHub 在 Release 指向的提交上创建 v<版本> 标签。
       # 想保留为 draft 由人工发布，删掉这一步即可。
       - name: Mark release as published
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh release edit "$TAG" --draft=false
+        run: |
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json url,tagName,targetCommitish --jq '"published \(.tagName) at \(.targetCommitish): \(.url)"'

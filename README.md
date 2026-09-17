@@ -11,7 +11,7 @@
 图表使用 [Chart.js](https://www.chartjs.org/)，网络请求由 Rust 侧 `reqwest` 发出。
 当前面向 **Windows** 与 **macOS**。安装包见
 [GitHub Releases](https://github.com/bgluminous/my-ai-assistant/releases)
-（Windows x64 与 macOS Apple Silicon）。
+（Windows x64 与 macOS Apple Silicon）；安装包未做代码签名。
 
 HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表在线更新与代理测试所用的
 `inf.xil.to`。账户凭据保存在本机，不经过第三方服务。
@@ -143,9 +143,7 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表�
 - [Node.js](https://nodejs.org/) 18 或更高（用于 `@tauri-apps/cli`）。
 - [Rust](https://rustup.rs/) 工具链（`rustup`）。
 - 平台链接器：
-  - **Windows（推荐）**：Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」
-    （MSVC 与 Windows SDK）。默认目标为 `stable-x86_64-pc-windows-msvc`。
-  - **Windows（GNU）**：见下文 [Windows GNU 工具链](#windows-gnu-工具链)。
+  - **Windows**：Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」（MSVC 与 Windows SDK）。
   - **macOS**：`xcode-select --install`。
 - **Windows** 需要 [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) 运行时。
   Windows 11 通常已预装。
@@ -158,51 +156,6 @@ npm run tauri dev      # 开发运行
 npm run tauri build    # 打包当前平台安装包
 ```
 
-Windows 发布归档（校验 `package.json` / `tauri.conf.json` / `Cargo.toml` 版本一致后构建，
-收集便携版 / NSIS / MSI 并打成 7z，随后删除 `src-tauri/target`；加 `-- -KeepTarget` 可保留）：
-
-```powershell
-npm run release:windows
-```
-
-### GitHub Actions 发布
-
-推送 `v<版本>` 标签（须与 `src-tauri/tauri.conf.json` 的 `version` 一致）会触发
-`.github/workflows/release.yml`：在 GitHub 托管 runner 上分别构建 Windows x64
-（便携版 / NSIS / MSI / 7z）与 macOS Apple Silicon（dmg），上传到
-[同名 Release](https://github.com/bgluminous/my-ai-assistant/releases) 并在两个平台都成功后
-自动发布。手动触发只构建、不发 Release，产物作为 workflow artifact 保留 7 天。
-产物未做代码签名；不构建 Intel Mac 与 Linux 包。
-
-重新生成应用图标：
-
-```bash
-npm run icons          # 等价于 tauri icon app-icon.png
-```
-
-前端 JS 语法检查（对 `src/*.js` 逐个执行 `node --check`）：
-
-```bash
-npm run check:js
-```
-
-### Windows GNU 工具链
-
-在不便安装 MSVC 时，可使用 `stable-x86_64-pc-windows-gnu`。需要另备 MinGW-w64，
-并保证 `dlltool.exe`、`gcc.exe`、`windres.exe` 在 `PATH` 中
-（仅安装 rustup 的 GNU 工具链不够：`windows-sys` 等 crate 会调用 `dlltool`）。
-
-PowerShell 示例（MinGW 路径按实际解压位置修改）：
-
-```powershell
-$env:Path = "$env:LOCALAPPDATA\mingw64\bin;$env:USERPROFILE\.cargo\bin;$env:Path"
-$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
-npm run tauri dev      # 或 npm run tauri build
-```
-
-GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifests`，
-一般不影响生成可执行文件。MSVC 工具链无此告警。
-
 ## 配置
 
 用户数据目录：
@@ -213,8 +166,7 @@ GNU 链接阶段可能出现 `.rsrc merge failure: multiple non-default manifest
 | macOS / 其它 | `~/.xilore/myaiassistant/`             |
 
 旧版本使用不带点号的 `xilore/myaiassistant/`。启动时若旧目录存在而新目录不存在，
-会自动把旧目录整体移动到新位置（并记一条审计日志）；两者都存在时以新目录为准、旧目录不动。
-该迁移逻辑为过渡期临时代码，见 `src-tauri/src/paths.rs` 中的标注。
+会自动把旧目录整体移动到新位置；两者都存在时以新目录为准、旧目录不动。
 
 | 文件                          | 内容                                                                                                               |
 |-------------------------------|--------------------------------------------------------------------------------------------------------------------|
@@ -276,8 +228,7 @@ Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 my-ai-assistant/
 ├── package.json              # npm 脚本与 @tauri-apps/cli、chart.js
 ├── app-icon.png              # 图标源图（AI 生成，四角透明；`npm run icons` 由它生成各平台图标）
-├── .github/workflows/        # GitHub Actions：打标签构建 Windows / macOS 并发布 Release
-├── scripts/                  # JS 语法检查、Windows 发布打包
+├── scripts/                  # JS 语法检查、Windows 本地打包
 ├── src/                      # 前端（Tauri frontendDist）
 │   ├── index.html            # 主窗口
 │   ├── tray.html             # 托盘面板
