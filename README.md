@@ -241,6 +241,7 @@ Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 
 ```
 my-ai-assistant/
+├── LICENSE                   # GNU GPLv3
 ├── package.json              # npm 脚本与 @tauri-apps/cli、chart.js
 ├── app-icon.png              # 图标源图（AI 生成，四角透明；`npm run icons` 由它生成各平台图标）
 ├── docs/screenshots/         # README 界面示例图
@@ -259,6 +260,12 @@ my-ai-assistant/
 ```
 
 ## 声明
+
+本程序采用 [GNU GPLv3](https://www.gnu.org/licenses/gpl-3.0.html)。
+可以复制、修改和再分发（含商用）；再分发时必须保留版权声明、提供对应源码，
+并以 GPLv3 授权。参考或衍生请写明作者 BGLuminous
+与项目出处（https://github.com/bgluminous/my-ai-assistant）。
+完整条款见 [LICENSE](LICENSE)。
 
 本程序调用 Cursor、OpenAI 与 Anthropic 的非公开接口，仅供在本机查询自己的账户与用量。
 接口变更、账号限制或服务条款冲突导致的任何后果由使用者自行承担。
