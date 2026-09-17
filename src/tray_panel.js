@@ -3,6 +3,7 @@ import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSecon
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
+  USAGE_CACHE_ORIGIN,
   DEFAULT_USAGE_TTL_MS,
   setUsageCacheTtlMs,
   isUsageCacheFresh,
@@ -1218,7 +1219,11 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const jobs = [];
   const fetchErrors = new Map();
   for (const a of cursorAccounts) {
-    if (!needsDayFetch(peek.agg(a.id), rule)) continue;
+    const peeked = peek.agg(a.id);
+    // 已失效账户无法再同步事件库，syncedAt 停在最后一次成功时间，按有效期会永远过期。
+    // 有缓存就直接用，避免拉取后写缓存广播再把总览打进下一轮加载。
+    if (peeked && a.status && a.status.alive === false) continue;
+    if (!needsDayFetch(peeked, rule)) continue;
     jobs.push(
       fetchCursorAggregate(a, scope.aggKey, { ...aggRange, force: fetchForce }).catch((error) => {
         fetchErrors.set(a.id, resetError(error));
@@ -1667,8 +1672,11 @@ window.addEventListener("storage", (event) => {
   scheduleOverviewFromCache(event.key);
 });
 listen(USAGE_CACHE_EVENT, (event) => {
-  const key = event.payload && event.payload.key;
-  scheduleOverviewFromCache(key);
+  const payload = event.payload || {};
+  // 事件会回送到写入窗口；不过滤自己的写入时，失效账户（缓存时间戳不再前进）
+  // 会把「写缓存 → 当作外部更新再加载」打成总览循环刷新。
+  if (payload.origin && payload.origin === USAGE_CACHE_ORIGIN) return;
+  scheduleOverviewFromCache(payload.key);
 }).catch(() => {
   /* 非 Tauri 环境无事件桥，仍靠 storage / 获焦 */
 });

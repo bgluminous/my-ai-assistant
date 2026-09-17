@@ -972,6 +972,7 @@ function renderChartsInner(agg, dailySources) {
       formatter: (value, share) => [share, compactTokens(value)],
     };
   }
+  bindChartHoverLeave(tokenChart);
   renderPieLegend("legend-tokens", tokenChart, tokenLabels, tokenColors, fmtTokens);
 
   // 各模型等价费用饼图：Top 8 + 其他；仅统计已定价（费用 > 0）的模型
@@ -1006,6 +1007,7 @@ function renderChartsInner(agg, dailySources) {
       formatter: (value, share) => [share, fmtUsd(value)],
     };
   }
+  bindChartHoverLeave(modelChart);
   renderPieLegend("legend-models", modelChart, modelLabels, modelColors, fmtUsd);
 
   const sums = agg.models.reduce(
@@ -1046,6 +1048,7 @@ function renderChartsInner(agg, dailySources) {
       formatter: (value, share) => [share, compactTokens(value)],
     };
   }
+  bindChartHoverLeave(doughnutChart);
   renderPieLegend("legend-doughnut", doughnutChart, doughnutLabels, doughnutColors, fmtTokens);
 }
 

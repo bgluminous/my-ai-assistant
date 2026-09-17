@@ -390,21 +390,48 @@ export function applyChartHoverDim(chart, hit, opts = {}) {
   chart.options.animations = prevAnims;
 }
 
-/** 命中目标未变则跳过，避免 mousemove 反复 update。 */
+/** 收起 Chart.js 画布 tooltip，避免随后的 update 按上次命中重绘出来。 */
+function hideChartTooltip(chart) {
+  if (!chart) return false;
+  const active = typeof chart.getActiveElements === "function" ? chart.getActiveElements() : [];
+  const tip = chart.tooltip;
+  const tipActive = tip && typeof tip.getActiveElements === "function" ? tip.getActiveElements() : [];
+  const on = (active && active.length > 0) || (tipActive && tipActive.length > 0) || (tip && tip.opacity > 0);
+  if (typeof chart.setActiveElements === "function") chart.setActiveElements([]);
+  if (tip && typeof tip.setActiveElements === "function") {
+    tip.setActiveElements([], { x: 0, y: 0 });
+  }
+  return !!on;
+}
+
+/** 命中目标未变则跳过，避免 mousemove 反复 update。hit 为空时同时收起 tooltip。 */
 export function setChartHoverHit(chart, hit, opts) {
   if (!chart) return;
   if (opts) chart.$hoverOpts = opts;
   const key = hit ? `${hit.datasetIndex}:${hit.index}` : "";
   if (chart.$hoverKey === key) return;
+  if (!hit) hideChartTooltip(chart);
   chart.$hoverKey = key;
   applyChartHoverDim(chart, hit, chart.$hoverOpts || {});
 }
 
-/** 指针离开画布时取消高亮（每个 chart 只绑一次）。 */
+/** 指针离开画布时取消高亮并收起 tooltip（每个 chart 只绑一次）。 */
 export function bindChartHoverLeave(chart) {
   if (!chart || chart.$hoverBound) return;
   chart.$hoverBound = true;
-  chart.canvas.addEventListener("mouseleave", () => setChartHoverHit(chart, null));
+  const onLeave = () => {
+    const tipOn = hideChartTooltip(chart);
+    if (chart.$hoverKey) setChartHoverHit(chart, null);
+    else if (tipOn) chart.update("none");
+  };
+  chart.canvas.addEventListener("pointerleave", onLeave);
+  // 托盘窗口失焦即隐藏，WebView 有时不派发 pointerleave，不在这里收掉下次打开还会留着
+  window.addEventListener("blur", onLeave);
+  const destroy = chart.destroy.bind(chart);
+  chart.destroy = function destroyAndUnbindHover() {
+    window.removeEventListener("blur", onLeave);
+    destroy();
+  };
 }
 
 // ---------- Chart.js 数据标注插件（主窗口 / 托盘共用） ----------
