@@ -8,6 +8,9 @@
 # Release artifacts (scripts/build-release-windows.ps1)
 /release
 
+# Coding rules: local standalone clone, never committed (see AGENTS.md)
+/coding-rule/
+
 # OS
 .DS_Store
 Thumbs.db

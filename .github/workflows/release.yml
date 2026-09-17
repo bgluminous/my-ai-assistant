@@ -1,0 +1,191 @@
+# 构建 Windows x64 与 macOS（Apple Silicon）的发布包并发布 GitHub Release。
+#
+# 触发方式：
+#   - 推送 v<版本> 标签：校验版本号后创建 draft Release，两个平台各自构建并上传产物，
+#     全部成功后自动把 Release 标记为已发布；任一平台失败则保持 draft。
+#   - 手动触发（workflow_dispatch）：只构建，产物作为 workflow artifact 保留 7 天，
+#     不创建 Release，用于试跑。
+#
+# 不覆盖 Intel Mac 与 Linux。prepare / publish 两个协调 job 跑在 ubuntu 上只是因为最便宜，
+# 不产出 Linux 包。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: my-ai-assistant
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Check version and create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # 与 scripts/build-release-windows.ps1 相同的一致性校验，另外核对 package-lock.json
+      # 与触发标签，尽早失败以免白跑两个平台的编译。
+      - name: Read and verify version
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          conf=$(jq -r .version src-tauri/tauri.conf.json)
+          pkg=$(jq -r .version package.json)
+          lock=$(jq -r .version package-lock.json)
+          lock_pkg=$(jq -r '.packages[""].version' package-lock.json)
+          cargo=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n 1)
+          echo "tauri.conf.json=$conf package.json=$pkg package-lock.json=$lock/$lock_pkg Cargo.toml=$cargo"
+          if [ "$conf" != "$pkg" ] || [ "$conf" != "$lock" ] || [ "$conf" != "$lock_pkg" ] || [ "$conf" != "$cargo" ]; then
+            echo "::error::Version mismatch between tauri.conf.json / package.json / package-lock.json / Cargo.toml"
+            exit 1
+          fi
+          publish=false
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ "$REF_NAME" != "v$conf" ]; then
+              echo "::error::Tag $REF_NAME does not match version v$conf in src-tauri/tauri.conf.json"
+              exit 1
+            fi
+            publish=true
+          fi
+          {
+            echo "version=$conf"
+            echo "tag=v$conf"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, reusing it"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          ## 下载
+
+          - Windows x64
+            - \`${APP_NAME}_${VERSION}_x64-setup.exe\`：NSIS 安装包（推荐）
+            - \`${APP_NAME}_${VERSION}_x64_en-US.msi\`：MSI 安装包
+            - \`${APP_NAME}.exe\`：便携版，需要系统已安装 WebView2
+            - \`${APP_NAME}-v${VERSION}-windows-x64.7z\`：以上三个文件的合集
+          - macOS（Apple Silicon）
+            - \`${APP_NAME}_${VERSION}_aarch64.dmg\`
+
+          安装包未做代码签名：Windows SmartScreen 可能提示「未知发布者」；macOS 首次打开若提示
+          「已损坏」或「无法验证开发者」，在终端执行 \`xattr -cr /Applications/${APP_NAME}.app\` 后再打开。
+          EOF
+          gh release create "$TAG" --draft --verify-tag \
+            --title "$APP_NAME v$VERSION" \
+            --notes-file notes.md \
+            --generate-notes
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Windows 复用仓库脚本：版本校验 + tauri build + 收集便携版 / NSIS / MSI + 7z。
+      # -KeepTarget 保留 src-tauri/target 供 rust-cache 缓存依赖编译产物。
+      - name: Build Windows release
+        if: runner.os == 'Windows'
+        run: npm run release:windows -- -KeepTarget
+
+      - name: Collect Windows artifacts
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp "release/$APP_NAME-v$VERSION-windows-x64.7z" dist/
+          cp "release/$APP_NAME-v$VERSION-windows-x64"/* dist/
+
+      - name: Build macOS release
+        if: runner.os == 'macOS'
+        run: npm run build -- --target ${{ matrix.rust_target }}
+
+      - name: Collect macOS artifacts
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg dist/
+
+      - name: List artifacts
+        run: ls -l dist
+
+      - name: Upload artifacts to release
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+      - name: Upload workflow artifacts (manual run)
+        if: needs.prepare.outputs.publish != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}-v${{ env.VERSION }}-${{ matrix.name }}
+          path: dist/*
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # 想保留为 draft 由人工发布，删掉这一步即可。
+      - name: Mark release as published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false

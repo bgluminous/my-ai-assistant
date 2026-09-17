@@ -9,7 +9,9 @@
 
 程序基于 [Tauri](https://tauri.app/) 2，前端为原生 HTML / CSS / JavaScript，
 图表使用 [Chart.js](https://www.chartjs.org/)，网络请求由 Rust 侧 `reqwest` 发出。
-当前面向 **Windows** 与 **macOS**。
+当前面向 **Windows** 与 **macOS**。安装包见
+[GitHub Releases](https://github.com/bgluminous/my-ai-assistant/releases)
+（Windows x64 与 macOS Apple Silicon）。
 
 HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表在线更新与代理测试所用的
 `inf.xil.to`。账户凭据保存在本机，不经过第三方服务。
@@ -157,11 +159,20 @@ npm run tauri build    # 打包当前平台安装包
 ```
 
 Windows 发布归档（校验 `package.json` / `tauri.conf.json` / `Cargo.toml` 版本一致后构建，
-收集便携版 / NSIS / MSI 并打成 7z，随后删除 `src-tauri/target`）：
+收集便携版 / NSIS / MSI 并打成 7z，随后删除 `src-tauri/target`；加 `-- -KeepTarget` 可保留）：
 
 ```powershell
 npm run release:windows
 ```
+
+### GitHub Actions 发布
+
+推送 `v<版本>` 标签（须与 `src-tauri/tauri.conf.json` 的 `version` 一致）会触发
+`.github/workflows/release.yml`：在 GitHub 托管 runner 上分别构建 Windows x64
+（便携版 / NSIS / MSI / 7z）与 macOS Apple Silicon（dmg），上传到
+[同名 Release](https://github.com/bgluminous/my-ai-assistant/releases) 并在两个平台都成功后
+自动发布。手动触发只构建、不发 Release，产物作为 workflow artifact 保留 7 天。
+产物未做代码签名；不构建 Intel Mac 与 Linux 包。
 
 重新生成应用图标：
 
@@ -265,6 +276,7 @@ Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 my-ai-assistant/
 ├── package.json              # npm 脚本与 @tauri-apps/cli、chart.js
 ├── app-icon.png              # 图标源图（AI 生成，四角透明；`npm run icons` 由它生成各平台图标）
+├── .github/workflows/        # GitHub Actions：打标签构建 Windows / macOS 并发布 Release
 ├── scripts/                  # JS 语法检查、Windows 发布打包
 ├── src/                      # 前端（Tauri frontendDist）
 │   ├── index.html            # 主窗口

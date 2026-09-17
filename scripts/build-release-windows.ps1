@@ -2,24 +2,28 @@
 #
 # Usage:
 #   npm run release:windows        # full build + pack
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild] [-KeepTarget]
 #
 # Options:
 #   -SkipBuild   Reuse existing build output under src-tauri/target/release,
 #                only re-collect artifacts and recreate the 7z archive.
+#   -KeepTarget  Do not delete src-tauri/target afterwards (CI uses this so the
+#                Rust build cache can pick up the compiled dependencies).
 #
 # Output (kept after the script finishes):
 #   release/my-ai-assistant-v<version>-windows-x64/      portable exe, NSIS, MSI
 #   release/my-ai-assistant-v<version>-windows-x64.7z    archive of the staged folder
 #
-# After a successful pack, src-tauri/target is deleted (build intermediates).
+# After a successful pack, src-tauri/target is deleted (build intermediates)
+# unless -KeepTarget is given.
 #
 # Requirements: Node.js + npm deps installed, Rust MSVC toolchain.
 # 7-Zip: uses the repo-bundled tools/7zip/7za.exe by default; falls back to
 # a system-installed 7z (PATH or Program Files) if the bundled one is missing.
 
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$KeepTarget
 )
 
 $ErrorActionPreference = "Stop"
@@ -95,7 +99,9 @@ Write-Host ("==> Archive: {0}  ({1:N1} MB)" -f $archiveItem.FullName, ($archiveI
 
 # --- 5. Remove Cargo/Tauri build intermediates --------------------------------
 $cargoTarget = "$root/src-tauri/target"
-if (Test-Path $cargoTarget) {
+if ($KeepTarget) {
+    Write-Host "==> KeepTarget: leaving $cargoTarget in place"
+} elseif (Test-Path $cargoTarget) {
     Write-Host "==> Removing $cargoTarget"
     Remove-Item -LiteralPath $cargoTarget -Recurse -Force
     if (Test-Path $cargoTarget) { throw "Failed to remove $cargoTarget" }
