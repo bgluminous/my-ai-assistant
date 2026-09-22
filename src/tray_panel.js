@@ -22,6 +22,8 @@ import {
   peekClaudeScanForPastDay,
   peekClaudeScanSeries,
   fetchCursorAggregate,
+  fetchArchivedAggregate,
+  listDeletedUsage,
   fetchCodexScan,
   fetchClaudeScan,
   sliceDay,
@@ -35,6 +37,11 @@ import {
 // 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
 
 let accounts = [];
+// 已删除账户保留的统计数据记录（后端 cursor_usage_deleted_list），总览与主窗口用量页同口径计入
+let deletedRecords = [];
+// 已删除账户按统计日的本地切片：`${accountId}:${aggKey}` → { agg, at }。保留的数据不再变化，
+// 切过一次的日子直接复用；记录集合变化（接管 / 恢复 / 清理）时整体丢弃
+const deletedSlices = new Map();
 let refreshing = false;
 let switching = false;
 let overviewLoading = false;
@@ -103,6 +110,17 @@ function trayIdentity(account) {
 
 function trayAccountLabel(account) {
   return trayIdentity(account).label;
+}
+
+/** 已删除账户在总览里的名称：用删除时保留的展示信息按同一口径推导，后缀「（已删除）」与主窗口图例一致。 */
+function deletedAccountLabel(record) {
+  const label = trayAccountLabel({
+    kind: "cursor",
+    note: record.note,
+    noteAuto: record.noteAuto !== false,
+    status: { name: record.name, email: record.email },
+  });
+  return `${label}（已删除）`;
 }
 
 function syncHeaderRefresh() {
@@ -430,10 +448,32 @@ function render() {
 
 /* ---------- 数据 ---------- */
 
-/** 重载账户列表（缓存状态，不刷新账户）；面板被唤起属于主动查看，总览按 5 分钟新鲜度补拉。 */
+/** 已删除记录集合的签名：账户 id 与事件库同步时间 / 事件数任一变化都视为数据变了。 */
+function deletedRecordsSig(records) {
+  return records.map((r) => `${r.accountId}:${r.syncedAt || 0}:${r.events || 0}`).join(",");
+}
+
+/**
+ * 重新拉取已删除账户记录列表（失败时沿用上次结果，不打断总览）；
+ * 集合有变化（删除时保留 / 重新添加后接管 / 备份恢复 / 主窗口清理）时丢掉旧切片。
+ */
+async function refreshDeletedRecords() {
+  let list;
+  try {
+    list = await listDeletedUsage();
+  } catch (error) {
+    console.error("读取已删除账户统计数据列表失败：", error);
+    return;
+  }
+  const next = Array.isArray(list) ? list : [];
+  if (deletedRecordsSig(next) !== deletedRecordsSig(deletedRecords)) deletedSlices.clear();
+  deletedRecords = next;
+}
+
+/** 重载账户列表与已删除记录（缓存状态，不刷新账户）；面板被唤起属于主动查看，总览按 5 分钟新鲜度补拉。 */
 async function load() {
   try {
-    const view = await invoke("accounts_list");
+    const [view] = await Promise.all([invoke("accounts_list"), refreshDeletedRecords()]);
     accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
     const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
@@ -1062,8 +1102,13 @@ function dayPeekers(scope) {
   };
 }
 
+/** 已删除账户在所选统计日的切片缓存键。 */
+function deletedSliceKey(record, scope) {
+  return `${record.accountId}:${scope.aggKey}`;
+}
+
 /** 从共享缓存拼出托盘总览：所选日数字用当天切片，24 小时柱用聚合结果的 hourly。
- *  来源（各账户 + 本地分析）按当日 Token 降序排列，行序与各图表配色一一对应；
+ *  来源（各账户 + 已删除账户保留的数据 + 本地分析）按当日 Token 降序排列，行序与各图表配色一一对应；
  *  所选日没有用量的来源不列出。fetchErrors 为本轮拉取失败的来源 id → 错误，用于数据时间的取舍。 */
 function buildOverviewData(scope, fetchErrors = new Map()) {
   const ymd = scope.ymd;
@@ -1100,6 +1145,23 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
         hourly: pickHourly(dayHit && dayHit.entry.agg, seriesHit && seriesHit.entry.agg),
       },
       modelSource: { id: a.id, label, models: modelsOnDay(sliceAgg, ymd, sliceKey) },
+    });
+  }
+
+  // 已删除账户保留的数据：切片就是所选日本身，与在用账户同一规则（所选日没有用量不占行）。
+  // 数据时间不计入：其同步时间停在删除时刻，计入会把「更新于」拖回过去（与已失效账户同理）
+  for (const record of deletedRecords) {
+    const hit = deletedSlices.get(deletedSliceKey(record, scope));
+    if (!hit) continue;
+    const slice = sliceDay(hit.agg, ymd, scope.aggKey);
+    if (!(slice.tokens > 0)) continue;
+    const label = deletedAccountLabel(record);
+    totalTokens += slice.tokens;
+    totalUsd += slice.usd;
+    entries.push({
+      row: { id: record.accountId, name: label, tokens: slice.tokens, usd: slice.usd },
+      hourlySource: { label, hourly: pickHourly(hit.agg, null) },
+      modelSource: { id: record.accountId, label, models: modelsOnDay(hit.agg, ymd, scope.aggKey) },
     });
   }
 
@@ -1143,19 +1205,16 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
   };
 }
 
+/** 本轮拉取失败的来源：已有行标错误，没有行（所选日无数据）补一行错误提示。 */
 function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
   if (!fetchErrors.size) return data;
-  for (const a of cursorAccounts) {
-    if (!fetchErrors.has(a.id)) continue;
-    const err = fetchErrors.get(a.id);
-    const row = data.rows.find((r) => r.id === a.id);
-    if (row) {
-      row.error = err;
-    } else {
-      data.rows.push({ id: a.id, name: trayAccountLabel(a), tokens: 0, usd: 0, error: err, empty: true });
-    }
-  }
-  for (const [id, name] of [["local", "本地 ChatGPT"], ["local-claude", "本地 Claude"]]) {
+  const sources = [
+    ...cursorAccounts.map((a) => [a.id, trayAccountLabel(a)]),
+    ...deletedRecords.map((record) => [record.accountId, deletedAccountLabel(record)]),
+    ["local", "本地 ChatGPT"],
+    ["local-claude", "本地 Claude"],
+  ];
+  for (const [id, name] of sources) {
     if (!fetchErrors.has(id)) continue;
     const err = fetchErrors.get(id);
     const row = data.rows.find((r) => r.id === id);
@@ -1228,6 +1287,21 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
       fetchCursorAggregate(a, scope.aggKey, { ...aggRange, force: fetchForce }).catch((error) => {
         fetchErrors.set(a.id, resetError(error));
       })
+    );
+  }
+  // 已删除账户保留的数据：纯本地切片（不联网、不进 localStorage），切过的日子直接复用，
+  // 只有刷新按钮的强制刷新才重切
+  for (const record of deletedRecords) {
+    const key = deletedSliceKey(record, scope);
+    if (deletedSlices.has(key) && !force) continue;
+    jobs.push(
+      fetchArchivedAggregate(record.accountId, aggRange)
+        .then((entry) => {
+          deletedSlices.set(key, entry);
+        })
+        .catch((error) => {
+          fetchErrors.set(record.accountId, resetError(error));
+        })
     );
   }
   if (needsDayFetch(peek.scan(""), rule)) {
@@ -1636,6 +1710,7 @@ window.addEventListener("focus", () => {
 // 订阅后端广播：主窗口刷新 / 增删改账户时，开着的面板实时同步（获焦重载仍保留作兜底）
 listen("accounts-changed", (event) => {
   const view = event.payload;
+  const beforeIds = accounts.map((a) => a.id).join(",");
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
   const ids = new Set(accounts.map((a) => a.id));
   for (const id of [...remoteRefreshingIds]) {
@@ -1644,10 +1719,23 @@ listen("accounts-changed", (event) => {
   const u = Number(view && view.intervalMinutes);
   if (Number.isFinite(u)) setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
   render();
+  // 账户增删会改变已删除账户保留数据的集合（删除时保留 / 重新添加后接管）：先重读列表再重载总览
+  const idsChanged = accounts.map((a) => a.id).join(",") !== beforeIds;
+  const ready = idsChanged ? refreshDeletedRecords() : Promise.resolve();
   // 后台事件触发的重载：按缓存有效期判断，不按主动查看的 5 分钟口径
-  if (trayTab === "overview") void loadOverview();
+  void ready.then(() => {
+    if (trayTab === "overview") void loadOverview();
+  });
 }).catch(() => {
   /* 非 Tauri 环境（浏览器直开调试）无事件桥，忽略 */
+});
+// 已删除账户保留的统计数据集合有变化（重新添加同账号后接管 / 备份恢复）：重读列表并重载总览
+listen("usage-archive-changed", () => {
+  void refreshDeletedRecords().then(() => {
+    if (trayTab === "overview") void loadOverview();
+  });
+}).catch(() => {
+  /* 非 Tauri 环境无事件桥 */
 });
 // 任何窗口发起的账户刷新开始 / 结束：同步行内「刷新中」动画、头部刷新按钮与总览进行中提示
 listen("account-refreshing", (event) => {
