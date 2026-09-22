@@ -83,6 +83,7 @@ const EVENTS: &[(&str, Level, Category, &str)] = &[
     ("usage_data_adopt", Info, Usage, "沿用统计数据"),
     ("usage_data_delete", Info, Usage, "删除统计数据"),
     ("usage_data_note", Info, Usage, "修改备注"),
+    ("usage_data_plan", Info, Usage, "修改套餐"),
     ("usage_data_clear", Info, Usage, "清除本地数据"),
     ("interval_set", Info, Settings, "定时设置"),
     ("local_sync_interval_set", Info, Settings, "同步间隔设置"),

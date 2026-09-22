@@ -510,6 +510,61 @@ pub async fn cursor_usage_deleted_set_note(
     deleted_record(&archive).ok_or_else(|| "not_deleted_account".to_string())
 }
 
+/// 已删除账户可手动指定的 Cursor 套餐档位（与前端套餐名 / 月费表一致）。
+const MEMBERSHIP_CHOICES: &[&str] = &[
+    "free",
+    "pro",
+    "pro_plus",
+    "ultra",
+    "business",
+    "team",
+    "enterprise",
+];
+
+/// 归一化手动指定的套餐档位：空白为 None（清除为未知），其余必须是登记的档位之一。
+pub(crate) fn normalize_membership_choice(raw: &str) -> Result<Option<String>, String> {
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !MEMBERSHIP_CHOICES.contains(&value.as_str()) {
+        return Err("invalid_membership".into());
+    }
+    Ok(Some(value))
+}
+
+/// 修改某个已删除账户保留记录的套餐档位（留空清除为未知），返回更新后的记录。
+/// 在用账户的套餐来自接口刷新，不经此命令修改；只有删除时会话已失效、没记下套餐的记录
+/// 才需要手动补，供统计页的套餐列与月费倍数对比使用。
+#[tauri::command]
+pub async fn cursor_usage_deleted_set_membership(
+    account_id: String,
+    membership_type: String,
+) -> Result<DeletedUsageRecord, String> {
+    let next = normalize_membership_choice(&membership_type)?;
+    let lock = account_lock(&account_id);
+    let _guard = lock.lock().await;
+    let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let Some(meta) = archive.deleted.as_mut() else {
+        return Err("not_deleted_account".into());
+    };
+    let label = deleted_label(meta);
+    let before = meta.membership_type.take();
+    meta.membership_type = next.clone();
+    save(&archive)?;
+    let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "未知".to_string());
+    audit::log(
+        "usage_data_plan",
+        format!(
+            "已删除账户「{label}」的套餐由「{}」改为「{}」",
+            show(&before),
+            show(&next)
+        ),
+        Some(json!({ "id": account_id, "membershipType": next })),
+    );
+    deleted_record(&archive).ok_or_else(|| "not_deleted_account".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // 命令：原始事件明细（原始账单）/ 清除在用账户的本地数据
 // ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ import {
   listDeletedUsage,
   removeDeletedUsage,
   setDeletedUsageNote,
+  setDeletedUsageMembership,
   fetchCodexScan,
   fetchClaudeScan,
   purgeAccountCache,
@@ -57,8 +58,9 @@ import {
   getRefreshIntervalMinutes,
   confirmDialog,
   promptDialog,
+  selectDialog,
 } from "./accounts.js";
-import { membershipLabel, planMonthlyUsd, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
+import { membershipLabel, planMonthlyUsd, cursorPlanChoices, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 import { openRawEvents } from "./raw_events.js";
 
@@ -1255,6 +1257,40 @@ async function onEditDeletedNote(record) {
 }
 
 /**
+ * 总览行「修改套餐」：为已删除账户保留记录指定套餐档位（固定档位下拉，「未知」= 清除）。
+ * 在用账户的套餐来自接口刷新不可手改；已删除账户若删除时会话已失效、没记下套餐，在此补填。
+ * 保存后就地替换记录并重绘账单表与合并结果（套餐只影响套餐列、合计月费与倍数，数据不变，不重新切片）。
+ */
+async function onEditDeletedPlan(record) {
+  const current = String(record.membershipType || "").trim().toLowerCase();
+  const options = [{ value: "", label: "未知（不参与月费对比）" }, ...cursorPlanChoices()];
+  // 接口曾返回过未登记的套餐值：保留为可选项，避免打开弹窗就把它换成「未知」
+  if (current && !options.some((o) => o.value === current)) {
+    options.splice(1, 0, { value: current, label: `${membershipLabel(current)}（当前）` });
+  }
+  const value = await selectDialog({
+    title: "修改套餐",
+    body: `为已删除账户“${deletedLabel(record)}”指定套餐档位。只影响统计页的套餐列、合计月费与倍数对比，不改动用量数据。`,
+    confirmText: "保存",
+    select: { label: "套餐", value: current, options },
+  });
+  if (value == null || value === current) return;
+  let updated;
+  try {
+    updated = await setDeletedUsageMembership(record.accountId, value);
+  } catch (error) {
+    setStatus("bad", `修改套餐失败：${resetError(error)}`);
+    return;
+  }
+  deletedRecords = deletedRecords.map((r) => (r.accountId === updated.accountId ? updated : r));
+  const shown = updated.membershipType ? membershipLabel(updated.membershipType) : "未知";
+  toast("ok", `套餐已保存：“${deletedLabel(updated)}”现为 ${shown}。`, { key: "usage-deleted" });
+  if (!isMergedView() || !activeSources().includeDeleted) return;
+  renderOverviewTable();
+  renderOverviewMerged();
+}
+
+/**
  * 打开某个 Cursor 账户（在用或已删除保留的数据）在当前时间范围内的原始账单弹窗。
  * 在用账户在弹窗里清除本地数据后，由 USAGE_LOCAL_CLEARED_EVENT 统一触发视图重载。
  */
@@ -1550,6 +1586,12 @@ function renderOverviewTable() {
             label: "编辑备注",
             title: "编辑备注：修改该已删除账户在统计页的显示名（留空恢复自动备注）",
             onClick: () => void onEditDeletedNote(record),
+          },
+          {
+            icon: "plan",
+            label: "修改套餐",
+            title: "修改套餐：为该已删除账户指定套餐档位（删除时会话已失效未记下套餐的可在此补填），用于套餐列与月费倍数对比",
+            onClick: () => void onEditDeletedPlan(record),
           },
           {
             icon: "delete",

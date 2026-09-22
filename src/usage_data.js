@@ -283,6 +283,11 @@ export function setDeletedUsageNote(accountId, note) {
   return invoke("cursor_usage_deleted_set_note", { accountId, note });
 }
 
+/** 修改某个已删除账户保留记录的套餐档位（留空清除为未知），返回更新后的记录。 */
+export function setDeletedUsageMembership(accountId, membershipType) {
+  return invoke("cursor_usage_deleted_set_membership", { accountId, membershipType });
+}
+
 /**
  * 只读列出账户事件库在范围内的原始用量事件（不联网；在用账户与已删除账户保留的数据均可），
  * 每条附带当前价格表下的归一名、命中的价格键与等价费用。

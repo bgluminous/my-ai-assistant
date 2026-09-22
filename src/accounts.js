@@ -962,6 +962,19 @@ export async function promptDialog({ title, body, confirmText, input }) {
   return value;
 }
 
+/**
+ * 供其它页面复用的下拉选择弹窗（如用量统计页为已删除账户指定套餐档位）。
+ * select = { label, value, options: [{ value, label }] }。确认返回所选项的 value；
+ * 取消 / Esc，或弹窗正被切换 / 删除流程占用时返回 null。
+ */
+export async function selectDialog({ title, body, confirmText, select }) {
+  if (switchModal.phase !== "hidden") return null;
+  const ok = await switchModal.toConfirm({ title, body, confirmText, danger: false, select });
+  const value = ok ? switchModal.selectValue() : null;
+  switchModal.close();
+  return value;
+}
+
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
 
 /** 切换成功的结果弹窗停留秒数，到点自动关闭（按钮上倒计时，期间可手动关闭）。 */
@@ -988,6 +1001,7 @@ const switchModal = {
     body.textContent = text;
     this.setOption(null);
     this.setInput(null);
+    this.setSelect(null);
     const steps = el("#switch-steps");
     steps.hidden = true;
     steps.replaceChildren();
@@ -1004,9 +1018,11 @@ const switchModal = {
    * 切到确认阶段：显示正文与取消 / 确认按钮，返回用户选择（Esc / 关闭 / 取消 = false）。
    * option = { label, checked } 时在正文下方显示一个勾选项（如删除 Cursor 账户的「保留统计数据」），
    * 确认后由调用方经 optionChecked() 读取；input = { label, value, placeholder } 时显示一个
-   * 单行文本输入（如修改已删除账户的备注），焦点落在输入框、回车即确认，确认后经 inputValue() 读取。
+   * 单行文本输入（如修改已删除账户的备注），焦点落在输入框、回车即确认，确认后经 inputValue() 读取；
+   * select = { label, value, options } 时显示一个下拉选择（如指定已删除账户的套餐档位），
+   * 焦点落在下拉框，确认后经 selectValue() 读取。
    */
-  toConfirm({ title, body, confirmText, danger, option, input }) {
+  toConfirm({ title, body, confirmText, danger, option, input, select }) {
     return new Promise((resolve) => {
       this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
@@ -1015,6 +1031,7 @@ const switchModal = {
       text.textContent = body || "";
       this.setOption(option || null);
       this.setInput(input || null);
+      this.setSelect(select || null);
       el("#switch-steps").hidden = true;
       el("#switch-modal-status").hidden = true;
       el("#switch-modal .modal-foot").hidden = false;
@@ -1030,10 +1047,40 @@ const switchModal = {
         const field = el("#switch-modal-input");
         field.focus();
         field.select();
+      } else if (select) {
+        el("#switch-modal-select").focus();
       } else {
         ok.focus();
       }
     });
+  },
+
+  /** 显示 / 隐藏确认阶段的下拉选择，并按 options 重建选项、选中 value（没有匹配项时选第一项）。 */
+  setSelect(select) {
+    const box = el("#switch-modal-select-field");
+    const field = el("#switch-modal-select");
+    if (!select) {
+      box.hidden = true;
+      field.replaceChildren();
+      return;
+    }
+    el("#switch-modal-select-label").textContent = select.label || "";
+    field.replaceChildren(
+      ...(select.options || []).map(({ value, label }) => {
+        const opt = document.createElement("option");
+        opt.value = String(value ?? "");
+        opt.textContent = label;
+        return opt;
+      })
+    );
+    field.value = String(select.value ?? "");
+    if (field.selectedIndex < 0 && field.options.length) field.selectedIndex = 0;
+    box.hidden = false;
+  },
+
+  /** 确认阶段下拉选择的当前值（未显示下拉时为空串）。 */
+  selectValue() {
+    return el("#switch-modal-select-field").hidden ? "" : el("#switch-modal-select").value;
   },
 
   /** 显示 / 隐藏确认阶段的单行文本输入。 */
@@ -1081,6 +1128,7 @@ const switchModal = {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
     this.setInput(null);
+    this.setSelect(null);
     el("#switch-modal .modal-foot").hidden = true;
     const box = el("#switch-steps");
     box.replaceChildren(
@@ -1136,6 +1184,7 @@ const switchModal = {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
     this.setInput(null);
+    this.setSelect(null);
     const status = el("#switch-modal-status");
     status.hidden = false;
     status.className = `status ${ok ? "ok" : "bad"}`;
@@ -1200,6 +1249,7 @@ const switchModal = {
     el("#switch-modal-body").hidden = false;
     this.setOption(null);
     this.setInput(null);
+    this.setSelect(null);
     el("#switch-steps").hidden = true;
     el("#switch-modal-status").hidden = true;
     el("#switch-alt").hidden = true;

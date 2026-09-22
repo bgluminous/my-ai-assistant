@@ -48,6 +48,18 @@ export function planMonthlyUsd(membershipType) {
   return Object.prototype.hasOwnProperty.call(CURSOR_PLAN_USD, key) ? CURSOR_PLAN_USD[key] : null;
 }
 
+/**
+ * 手动指定 Cursor 套餐时的可选档位（已删除账户补填套餐用）：与套餐名表一致，
+ * 标签附月费便于对照，未收录月费的档位只显示名称。
+ */
+export function cursorPlanChoices() {
+  return Object.keys(MEMBERSHIP_LABELS).map((value) => {
+    const price = planMonthlyUsd(value);
+    const name = MEMBERSHIP_LABELS[value];
+    return { value, label: price != null ? `${name} · $${price}/月` : name };
+  });
+}
+
 export function membershipLabel(value) {
   const key = String(value ?? "").toLowerCase();
   if (!key) return "";

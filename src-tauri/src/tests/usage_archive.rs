@@ -41,3 +41,14 @@ fn deleted_note_manual_overrides_identity_and_blank_restores_auto() {
     assert_eq!(bare.note, "");
     assert_eq!(deleted_label(&bare), "未命名账户");
 }
+
+#[test]
+fn membership_choice_normalizes_and_rejects_unknown() {
+    // 登记的档位：去空白、统一小写
+    assert_eq!(normalize_membership_choice(" Pro "), Ok(Some("pro".to_string())));
+    assert_eq!(normalize_membership_choice("PRO_PLUS"), Ok(Some("pro_plus".to_string())));
+    // 留空 = 清除为未知
+    assert_eq!(normalize_membership_choice("   "), Ok(None));
+    // 未登记的值不接受
+    assert_eq!(normalize_membership_choice("platinum"), Err("invalid_membership".to_string()));
+}
