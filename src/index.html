@@ -69,6 +69,10 @@
             <div class="heading-side">
               <span id="accounts-count-cursor" class="muted small"></span>
               <div class="heading-actions">
+                <!-- 退出本机登录：只清本机客户端的登录态，不动托管账户（三组同款，流程见 accounts.js onLogoutLocal） -->
+                <button id="accounts-logout-cursor" class="icon-action" type="button" title="退出本机 Cursor 登录（会关闭正在运行的 Cursor）" aria-label="退出本机 Cursor 登录">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                </button>
                 <button id="accounts-refresh-cursor" class="icon-action" type="button" title="刷新全部 Cursor 账户" aria-label="刷新全部 Cursor 账户">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                 </button>
@@ -106,6 +110,9 @@
             <div class="heading-side">
               <span id="accounts-count-codex" class="muted small"></span>
               <div class="heading-actions">
+                <button id="accounts-logout-codex" class="icon-action" type="button" title="退出本机 ChatGPT 登录（会关闭正在运行的 ChatGPT）" aria-label="退出本机 ChatGPT 登录">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                </button>
                 <button id="accounts-refresh-codex" class="icon-action" type="button" title="刷新全部 ChatGPT 账户" aria-label="刷新全部 ChatGPT 账户">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                 </button>
@@ -144,6 +151,9 @@
             <div class="heading-side">
               <span id="accounts-count-claude" class="muted small"></span>
               <div class="heading-actions">
+                <button id="accounts-logout-claude" class="icon-action" type="button" title="退出本机 Claude Code 登录（会关闭正在运行的 Claude Desktop）" aria-label="退出本机 Claude Code 登录">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                </button>
                 <button id="accounts-refresh-claude" class="icon-action" type="button" title="刷新全部 Claude 账户" aria-label="刷新全部 Claude 账户">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                 </button>

@@ -17,7 +17,8 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
 use crate::local_client::{
-    launch_detached_windows, wait_exit, ClientStatus, CloseResult, LaunchResult, SwitchResult,
+    launch_detached_windows, wait_exit, ClientStatus, CloseResult, LaunchResult, LogoutResult,
+    SwitchResult,
 };
 use crate::{accounts, audit, cursor, http, paths, process, settings};
 
@@ -236,6 +237,42 @@ fn write_auth(
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 登录态相关的全部键：write_auth 写入的 token / 身份缓存，加上它顺带清理的团队 / 订阅缓存。
+/// 退出登录时整组删除，让客户端下次启动回到未登录状态，不留上一个账号的残留。
+const AUTH_ITEM_KEYS: &[&str] = &[
+    "cursorAuth/accessToken",
+    "cursorAuth/refreshToken",
+    "cursor.accessToken",
+    "cursor.email",
+    "cursorAuth/cachedEmail",
+    "adminSettings.cachedAuthId",
+    "glass.lastSignedInAuthId",
+    "cursorAuth/stripeMembershipAuthId",
+    "cursorAuth/cachedSignUpType",
+    "cursorAuth/cachedScopedProfile",
+    "cursorAuth/cachedTeam",
+    "cursorAuth/stripeCustomerId",
+];
+
+/// 清除本地 Cursor 认证库里的登录态。写前整库备份到 *.vscdb.bak（与 write_auth 一致）。
+/// 返回清除前是否存在 accessToken（即本机是否处于登录状态）；认证库不存在视为从未登录。
+fn clear_auth(db: &Path) -> Result<bool, String> {
+    if !db.exists() {
+        return Ok(false);
+    }
+    let backup = db.with_extension("vscdb.bak");
+    std::fs::copy(db, &backup).map_err(|e| format!("backup_failed: {e}"))?;
+
+    let conn = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+    let was_logged_in = read_item(&conn, "cursorAuth/accessToken").is_some();
+    for key in AUTH_ITEM_KEYS {
+        delete_item(&conn, key)?;
+    }
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| e.to_string())?;
+    Ok(was_logged_in)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,3 +727,37 @@ pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
         exchanged: None,
     })
 }
+
+/// 退出本机 Cursor 登录：清除本地认证库里的登录态，客户端下次启动回到未登录状态。
+/// 与切换一样要求 Cursor 已关闭（关闭由 cursor_client_close 单独负责）；只动本机认证库，
+/// 托管的账户不受影响。
+#[tauri::command]
+pub async fn cursor_logout_local() -> Result<LogoutResult, String> {
+    if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
+        return Err("unsupported_platform".into());
+    }
+    if is_cursor_running() {
+        return Err("cursor_running".into());
+    }
+    let db = auth_db_path()?;
+    let was_logged_in = clear_auth(&db)?;
+    if !was_logged_in {
+        return Ok(LogoutResult {
+            was_logged_in: false,
+            message: "本机 Cursor 当前未登录，无需退出。".into(),
+        });
+    }
+    audit::log(
+        "cursor_logout_local",
+        "退出本机 Cursor 登录：已清除本地认证库中的登录态".to_string(),
+        None,
+    );
+    Ok(LogoutResult {
+        was_logged_in: true,
+        message: "已退出本机 Cursor 登录，下次启动 Cursor 需重新登录或从本工具切换账户。".into(),
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/cursor_local.rs"]
+mod tests;

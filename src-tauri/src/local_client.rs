@@ -131,3 +131,12 @@ pub struct SwitchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exchanged: Option<bool>,
 }
+
+/// `*_logout_local`：本机登录凭据已清除。was_logged_in=false 表示本机原本就没有登录，
+/// 什么都没改；托管的账户不受影响。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogoutResult {
+    pub was_logged_in: bool,
+    pub message: String,
+}

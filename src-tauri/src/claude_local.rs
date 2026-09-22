@@ -14,7 +14,7 @@ use tauri::AppHandle;
 
 use crate::local_client::{
     kill_pids, launch_detached_windows, path_starts_with_ci, wait_exit, ClientStatus, CloseResult,
-    DetectResult, LaunchResult, SwitchResult,
+    DetectResult, LaunchResult, LogoutResult, SwitchResult,
 };
 use crate::{accounts, audit, claude_oauth, paths, process, settings};
 
@@ -115,6 +115,37 @@ fn keychain_write(json_text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// macOS：删除 Keychain 里的凭据条目。先按当前用户账户名删，再退回任意账户；任一成功即成功。
+fn keychain_delete() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let mut attempts: Vec<Vec<String>> = Vec::new();
+    if let Ok(user) = std::env::var("USER") {
+        if !user.trim().is_empty() {
+            attempts.push(vec![
+                "delete-generic-password".into(),
+                "-a".into(),
+                user.trim().to_string(),
+                "-s".into(),
+                KEYCHAIN_SERVICE.into(),
+            ]);
+        }
+    }
+    attempts.push(vec![
+        "delete-generic-password".into(),
+        "-s".into(),
+        KEYCHAIN_SERVICE.into(),
+    ]);
+    attempts.into_iter().any(|args| {
+        Command::new("security")
+            .args(&args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
 /// 写凭据文件：先写临时文件再 rename 原子替换；Unix 下 0600 权限。
 fn write_credentials_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -150,6 +181,20 @@ fn parse_credentials(text: &str) -> Option<(String, Option<String>)> {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     Some((access, refresh))
+}
+
+/// 从凭据 JSON 文本里去掉 claudeAiOauth 段（Claude Code 的账号登录），返回
+/// (原本是否有登录, 剩余内容)。剩余内容为其它条目（如 MCP 服务器的 OAuth 凭据）重新序列化的
+/// 文本，去掉后为空对象则 None，表示整份凭据可以删除。解析不了的文本视为有登录残留、无可保留内容。
+pub(crate) fn strip_claude_login(text: &str) -> (bool, Option<String>) {
+    let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(text) else {
+        return (true, None);
+    };
+    let had_login = map.remove("claudeAiOauth").is_some();
+    if map.is_empty() {
+        return (had_login, None);
+    }
+    (had_login, serde_json::to_string_pretty(&Value::Object(map)).ok())
 }
 
 /// 读取本机 Claude Code 登录凭据。macOS 先查 Keychain 再退回文件；
@@ -536,3 +581,74 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
         exchanged: None,
     })
 }
+
+/// 退出本机 Claude Code 登录：从 macOS Keychain 与 .credentials.json 里去掉账号登录段
+/// （其它条目保留；全空则删掉整份凭据），文件改动前备份为 .credentials.json.bak。
+/// 与切换一样要求 Claude Desktop 已关闭（关闭由 claude_client_close 单独负责）。
+/// 只动本机凭据，托管的账户不受影响。
+#[tauri::command]
+pub async fn claude_logout_local() -> Result<LogoutResult, String> {
+    if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
+        return Err("unsupported_platform".into());
+    }
+    // 与刷新 / 切换共用同一队列，避免与正在进行的切号写入交错
+    let _queued = accounts::refresh_queue().lock().await;
+    if is_desktop_running() {
+        return Err("claude_running".into());
+    }
+
+    let mut was_logged_in = false;
+    if cfg!(target_os = "macos") {
+        if let Some(text) = keychain_read() {
+            let (had_login, rest) = strip_claude_login(&text);
+            if had_login {
+                was_logged_in = true;
+                let ok = match rest {
+                    Some(rest) => keychain_write(&rest),
+                    None => keychain_delete(),
+                };
+                if !ok {
+                    return Err("claude_creds_write_failed: keychain_failed".into());
+                }
+            }
+        }
+    }
+    if let Some(path) = credentials_path() {
+        if path.exists() {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("claude_creds_read_failed: {e}"))?;
+            let (had_login, rest) = strip_claude_login(&text);
+            if had_login {
+                was_logged_in = true;
+                let backup = path.with_extension("json.bak");
+                std::fs::copy(&path, &backup)
+                    .map_err(|e| format!("claude_creds_write_failed: backup_failed: {e}"))?;
+                match rest {
+                    Some(rest) => write_credentials_file(&path, &rest)?,
+                    None => std::fs::remove_file(&path)
+                        .map_err(|e| format!("claude_creds_write_failed: {e}"))?,
+                }
+            }
+        }
+    }
+
+    if !was_logged_in {
+        return Ok(LogoutResult {
+            was_logged_in: false,
+            message: "本机 Claude Code 当前未登录，无需退出。".into(),
+        });
+    }
+    audit::log(
+        "claude_logout_local",
+        "退出本机 Claude Code 登录：已清除本机凭据中的账号登录".to_string(),
+        None,
+    );
+    Ok(LogoutResult {
+        was_logged_in: true,
+        message: "已退出本机 Claude Code 登录，下次使用需重新登录或从本工具切换账户。".into(),
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/claude_local.rs"]
+mod tests;

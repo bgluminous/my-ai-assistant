@@ -14,7 +14,7 @@ use tauri::AppHandle;
 
 use crate::local_client::{
     kill_pids, launch_detached_windows, path_starts_with_ci, run_hidden, wait_exit, ClientStatus,
-    CloseResult, DetectResult, LaunchResult, SwitchResult,
+    CloseResult, DetectResult, LaunchResult, LogoutResult, SwitchResult,
 };
 use crate::{accounts, audit, http, paths, process, settings};
 
@@ -843,6 +843,100 @@ fn write_local_auth(mut value: Value) -> Result<(), String> {
     write_auth_json(&path, &value)
 }
 
+/// 本机 auth.json 里是否有 ChatGPT 账号登录（tokens.access_token 非空）。
+fn has_chatgpt_login(v: &Value) -> bool {
+    v.pointer("/tokens/access_token")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// 本机 auth.json 存在、能解析为对象但没有账号登录（已退出登录或只配置了 OPENAI_API_KEY）。
+/// 供定时同步把这种情况与「文件无法解析」区分开。
+pub(crate) fn local_auth_logged_out() -> bool {
+    let Some(path) = auth_json_path() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .filter(Value::is_object)
+        .is_some_and(|v| !has_chatgpt_login(&v))
+}
+
+/// 退出登录后 auth.json 应有的内容：用户配置了 OPENAI_API_KEY 时只保留这一项（API Key 模式
+/// 不属于账号登录，与切换时不覆盖 API Key 的做法一致），否则 None 表示整个文件应删除
+/// （与 `codex logout` 一致）。
+pub(crate) fn logged_out_auth_value(existing: &Value) -> Option<Value> {
+    let api_key = existing
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(json!({ "OPENAI_API_KEY": api_key }))
+}
+
+/// 退出本机 ChatGPT 登录：备份 auth.json 为 auth.json.bak 后删除其中的账号凭据
+/// （保留 OPENAI_API_KEY，没有则删除文件）。与切换一样要求客户端已关闭（关闭由
+/// codex_client_close 单独负责），运行中的客户端会把内存里的凭据再写回来。只动本机文件，
+/// 托管的账户及其凭据副本不受影响。
+#[tauri::command]
+pub async fn codex_logout_local() -> Result<LogoutResult, String> {
+    if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
+        return Err("unsupported_platform".into());
+    }
+    // 与刷新 / 切换 / 后台同步共用同一队列，避免刚删掉文件又被回同步写回
+    let _queued = accounts::refresh_queue().lock().await;
+    if is_desktop_running() {
+        return Err("codex_running".into());
+    }
+    let Some(path) = auth_json_path() else {
+        return Err("codex_auth_write_failed: home_dir_unavailable".into());
+    };
+    let not_logged_in = || LogoutResult {
+        was_logged_in: false,
+        message: "本机 ChatGPT 当前未登录，无需退出。".into(),
+    };
+    if !path.exists() {
+        return Ok(not_logged_in());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("codex_auth_read_failed: {e}"))?;
+    // 解析不了的文件视为有登录残留，整份删掉（已备份）；能解析但没有账号凭据（只有 API Key
+    // 或为空）的文件不算登录，不动它
+    let existing = serde_json::from_str::<Value>(&text)
+        .ok()
+        .filter(Value::is_object);
+    if existing.as_ref().is_some_and(|v| !has_chatgpt_login(v)) {
+        return Ok(not_logged_in());
+    }
+    let backup = path.with_extension("json.bak");
+    std::fs::copy(&path, &backup)
+        .map_err(|e| format!("codex_auth_write_failed: backup_failed: {e}"))?;
+    let kept_api_key = match existing.as_ref().and_then(logged_out_auth_value) {
+        Some(value) => {
+            write_auth_json(&path, &value)?;
+            true
+        }
+        None => {
+            std::fs::remove_file(&path).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
+            false
+        }
+    };
+    let suffix = if kept_api_key { "（保留了 OPENAI_API_KEY）" } else { "" };
+    audit::log(
+        "codex_logout_local",
+        format!("退出本机 ChatGPT 登录：已删除 auth.json 中的账号凭据{suffix}"),
+        Some(json!({ "keptApiKey": kept_api_key })),
+    );
+    Ok(LogoutResult {
+        was_logged_in: true,
+        message: format!(
+            "已退出本机 ChatGPT 登录{suffix}，下次启动 ChatGPT 需重新登录或从本工具切换账户。"
+        ),
+    })
+}
+
 /// 「强制写入并启动」的写入步骤：不向 OpenAI 换新凭据，直接用账户里保存的 auth.json 副本覆盖
 /// 本机文件。供切换时 refresh_token 已失效、拿不到新 access_token 的场景兜底；副本不完整
 ///（缺 id_token / access_token / refresh_token）时报 codex_auth_incomplete。
@@ -894,3 +988,7 @@ pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String>
         exchanged: Some(false),
     })
 }
+
+#[cfg(test)]
+#[path = "tests/codex_local.rs"]
+mod tests;

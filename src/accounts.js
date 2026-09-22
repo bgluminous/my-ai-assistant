@@ -598,7 +598,7 @@ function updateGroupMeta(kind) {
   el(`#accounts-count-${kind}`).textContent = rows.length ? text : "";
 }
 
-/** 卡片标题栏的刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
+/** 卡片标题栏的退出登录 / 刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
 function updateHeadingActions() {
   const blocked = switching || importing || refreshAllRunning;
   for (const kind of ["cursor", "codex", "claude"]) {
@@ -606,6 +606,7 @@ function updateHeadingActions() {
     const refreshBtn = el(`#accounts-refresh-${kind}`);
     refreshBtn.disabled = blocked || groupRefreshing.has(kind);
     refreshBtn.classList.toggle("busy", running);
+    el(`#accounts-logout-${kind}`).disabled = blocked;
     el(`#accounts-import-${kind}`).disabled = blocked;
     const hasRows = accounts.some((a) => a.kind === kind);
     el(`#accounts-export-${kind}`).disabled = blocked || !hasRows;
@@ -1242,6 +1243,13 @@ function mapSwitchError(err) {
   if (code.startsWith("claude_creds_write_failed")) {
     return "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
   }
+  // 退出登录前读不到本机登录文件（权限 / 占用），同样带冒号细节
+  if (code.startsWith("codex_auth_read_failed")) {
+    return "读取本机 ChatGPT 登录文件失败，请检查文件权限后重试。";
+  }
+  if (code.startsWith("claude_creds_read_failed")) {
+    return "读取本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
+  }
   // ChatGPT 换票被拒：后缀为服务端错误码的归类（expired / reused / revoked / invalid）
   if (code.startsWith("codex_refresh_denied")) {
     const reason = code.split(":")[1] || "invalid";
@@ -1540,6 +1548,92 @@ async function onSwitchClaudeAccount(id) {
   } catch (error) {
     switchModal.stepFail();
     switchModal.finish(false, `切换失败：${mapSwitchError(error)}`);
+  } finally {
+    switching = false;
+    render();
+  }
+}
+
+/* ---------- 退出本机登录（清除本机 Cursor / ChatGPT / Claude Code 登录态） ---------- */
+
+// 各类型在退出登录流程里的差异点：客户端名（检测 / 关闭对象）、登录名（清除对象）、后端命令与说明文案
+const LOGOUT_TARGETS = {
+  cursor: {
+    client: "Cursor",
+    login: "Cursor",
+    status: "cursor_client_status",
+    close: "cursor_client_close",
+    logout: "cursor_logout_local",
+    where: "本机 Cursor 认证库中的登录态",
+  },
+  codex: {
+    client: "ChatGPT",
+    login: "ChatGPT",
+    status: "codex_client_status",
+    close: "codex_client_close",
+    logout: "codex_logout_local",
+    where: "本机 auth.json 中的账号凭据（若配置了 OPENAI_API_KEY 则保留）",
+  },
+  claude: {
+    client: "Claude Desktop",
+    login: "Claude Code",
+    status: "claude_client_status",
+    close: "claude_client_close",
+    logout: "claude_logout_local",
+    where: "本机 Claude Code 凭据中的账号登录",
+  },
+};
+
+/**
+ * 退出本机登录：检测客户端 →（运行中先确认并关闭）→ 清除本机登录态 → 结果。
+ * 与切换共用同一弹窗与互斥标志（switching）；只动本机客户端的登录态，托管账户不受影响；
+ * 完成后不再启动客户端（启动即进入登录页，是否启动由用户自行决定）。
+ */
+async function onLogoutLocal(kind) {
+  if (switching || importing || refreshAllRunning) return;
+  const t = LOGOUT_TARGETS[kind] || LOGOUT_TARGETS.cursor;
+  switching = true;
+  render();
+  switchModal.openBusy(`退出本机 ${t.login} 登录`, `正在检测本地 ${t.client}…`);
+  try {
+    const st = await invoke(t.status);
+    const running = !!st.running;
+    const ok = await switchModal.toConfirm(
+      running
+        ? {
+            body: `检测到 ${t.client} 正在运行。退出登录需要先关闭它，未保存的内容可能会丢失。将清除${t.where}，托管的账户不受影响。确定继续？`,
+            confirmText: "关闭并退出登录",
+            danger: true,
+          }
+        : {
+            body: `将清除${t.where}，之后需重新登录或从本工具切换账户；托管的账户不受影响。确定继续？`,
+            confirmText: "退出登录",
+            danger: true,
+          }
+    );
+    if (!ok) {
+      switchModal.close();
+      return;
+    }
+    switchModal.toSteps(running ? [`关闭 ${t.client}`, "清除本机登录态"] : ["清除本机登录态"]);
+    if (running) {
+      switchModal.stepStart();
+      const c = await invoke(t.close);
+      if (!c.closed) {
+        switchModal.stepFail();
+        switchModal.finish(false, `未能完全关闭 ${t.client}，请手动关闭后重试。`);
+        return;
+      }
+      switchModal.stepDone();
+    }
+    switchModal.stepStart();
+    const r = await invoke(t.logout);
+    // 本机原本就没登录：步骤照常完成，结果文案由后端给出（「当前未登录，无需退出」）
+    switchModal.stepDone(r && r.wasLoggedIn === false ? "本机原本未登录" : "");
+    switchModal.finish(true, (r && r.message) || `已退出本机 ${t.login} 登录。`);
+  } catch (error) {
+    switchModal.stepFail();
+    switchModal.finish(false, `退出登录失败：${mapSwitchError(error)}`);
   } finally {
     switching = false;
     render();
@@ -1859,6 +1953,7 @@ async function loadInitial(allowRetry = true) {
 export function initAccounts() {
   for (const kind of ["cursor", "codex", "claude"]) {
     el(`#accounts-add-${kind}`).addEventListener("click", () => openModal(null, kind));
+    el(`#accounts-logout-${kind}`).addEventListener("click", () => { void onLogoutLocal(kind); });
     el(`#accounts-refresh-${kind}`).addEventListener("click", () => { void refreshGroup(kind); });
     el(`#accounts-import-${kind}`).addEventListener("click", () => { void onImportFile(kind); });
     el(`#accounts-export-${kind}`).addEventListener("click", () => { void onExport(kind); });

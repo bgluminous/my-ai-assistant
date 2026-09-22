@@ -1074,6 +1074,8 @@ pub(crate) enum LocalSyncOutcome {
     Adopted(usize),
     /// 本机 auth.json 无法读取或解析。
     LocalUnreadable,
+    /// 本机 auth.json 存在但没有账号登录（已退出登录或只配置了 OPENAI_API_KEY）。
+    LocalLoggedOut,
     /// 本机登录的账号没有添加为账户；附本机登录的邮箱（解析不出为空串）。
     NoMatchingAccount(String),
     /// 有同账号的账户，但本机凭据与账户一致或不比账户新。
@@ -1085,6 +1087,9 @@ impl LocalSyncOutcome {
         match self {
             LocalSyncOutcome::Adopted(n) => format!("已将本机更新的凭据同步到 {n} 个账户"),
             LocalSyncOutcome::LocalUnreadable => "文件无法读取或解析，未同步".to_string(),
+            LocalSyncOutcome::LocalLoggedOut => {
+                "本机 ChatGPT 未登录（auth.json 里没有账号凭据），未同步".to_string()
+            }
             LocalSyncOutcome::NoMatchingAccount(email) if email.is_empty() => {
                 "本机登录的账号未添加为账户，未同步".to_string()
             }
@@ -1099,8 +1104,13 @@ impl LocalSyncOutcome {
 /// 定时同步入口：本机 auth.json 有变化时，把与之同账号的 ChatGPT 账户更新为本机更新的凭据
 ///（判定与取回逻辑同 adopt_newer_local_codex）。
 pub(crate) fn sync_codex_from_local(app: &AppHandle) -> Result<LocalSyncOutcome, String> {
-    let LocalLoginRead::Found(local) = codex_local::read_local_login() else {
-        return Ok(LocalSyncOutcome::LocalUnreadable);
+    let local = match codex_local::read_local_login() {
+        LocalLoginRead::Found(local) => local,
+        // 文件在但没有账号凭据：是退出登录 / API Key 模式，不是文件坏了
+        LocalLoginRead::Invalid if codex_local::local_auth_logged_out() => {
+            return Ok(LocalSyncOutcome::LocalLoggedOut);
+        }
+        _ => return Ok(LocalSyncOutcome::LocalUnreadable),
     };
     let mut adopted = 0usize;
     let mut same_account = false;

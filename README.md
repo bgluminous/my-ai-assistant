@@ -72,6 +72,11 @@ HTTP 请求只发往 Cursor / OpenAI / Anthropic 官方域名，以及价格表�
   macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。
   客户端路径可手动指定，也可自动搜索常见安装位置。
   切换成功的结果弹窗 3 秒后自动关闭（按钮上倒计时，可手动关闭）；失败结果保留到手动关闭。
+- 可退出本机 Cursor / ChatGPT / Claude Code 的登录（各账户分组标题栏的「退出本机登录」按钮）：
+  运行中的客户端先关闭，再清除本机登录态——Cursor 清除认证库中的登录键，ChatGPT 删除
+  `auth.json` 中的账号凭据（配置了 `OPENAI_API_KEY` 时保留该项），Claude Code 去掉凭据中的
+  账号登录段（其它条目保留）；改动前都会备份。只动本机客户端，托管的账户不受影响，
+  完成后不自动启动客户端。
 - ChatGPT / Claude 账户可保存 `refresh_token`，access token 到期前自动续期。
   ChatGPT 的续期策略与 Codex CLI 一致：access token 距过期不足 5 分钟（或解析不出过期时刻且距
   上次获取超过 8 天）就换新整组凭据，请求返回 401 / 403 时补一次；每次续期都会轮换
