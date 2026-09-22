@@ -23,27 +23,54 @@ fn error_code_extraction_matches_codex_cli() {
 }
 
 #[test]
-fn dead_cursor_status_keeps_previous_identity() {
-    let prev = json!({ "alive": true, "name": "Alice", "email": "alice@example.com" });
+fn dead_cursor_status_keeps_previous_profile() {
+    let prev = json!({
+        "alive": true,
+        "name": "Alice",
+        "email": "alice@example.com",
+        "membershipType": "pro",
+        "billingCycleStart": "2026-09-01T00:00:00Z",
+        "billingCycleEnd": "2026-10-01T00:00:00Z",
+    });
 
-    // 会话失效：接口不返回身份，沿用上一次缓存的用户名与邮箱，失效标记不受影响
-    let mut dead = json!({ "alive": false, "name": null, "email": null, "membershipType": null });
-    carry_cursor_identity(&mut dead, Some(&prev));
+    // 会话失效：接口不返回身份与套餐，沿用上一次缓存的用户名、邮箱、套餐与计费周期，
+    // 失效标记不受影响；额度等其它字段不沿用
+    let mut dead = json!({
+        "alive": false,
+        "name": null,
+        "email": null,
+        "membershipType": null,
+        "billingCycleStart": null,
+        "billingCycleEnd": null,
+        "plan": { "used": null },
+    });
+    carry_cursor_profile(&mut dead, Some(&prev));
     assert_eq!(dead["alive"], json!(false));
     assert_eq!(dead["name"], json!("Alice"));
     assert_eq!(dead["email"], json!("alice@example.com"));
-    assert_eq!(dead["membershipType"], Value::Null);
+    assert_eq!(dead["membershipType"], json!("pro"));
+    assert_eq!(dead["billingCycleStart"], json!("2026-09-01T00:00:00Z"));
+    assert_eq!(dead["billingCycleEnd"], json!("2026-10-01T00:00:00Z"));
+    assert_eq!(dead["plan"]["used"], Value::Null);
 
     // 接口返回了新值时以新值为准
-    let mut fresh = json!({ "alive": true, "name": "Alice B", "email": "alice@example.com" });
-    carry_cursor_identity(&mut fresh, Some(&prev));
+    let mut fresh = json!({
+        "alive": true,
+        "name": "Alice B",
+        "email": "alice@example.com",
+        "membershipType": "ultra",
+    });
+    carry_cursor_profile(&mut fresh, Some(&prev));
     assert_eq!(fresh["name"], json!("Alice B"));
+    assert_eq!(fresh["membershipType"], json!("ultra"));
 
-    // 首次刷新（没有历史状态）或历史里也没有身份：保持原样
-    let mut first = json!({ "alive": false, "name": null, "email": null });
-    carry_cursor_identity(&mut first, None);
+    // 首次刷新（没有历史状态）或历史里也没有可沿用的值：保持原样
+    let mut first = json!({ "alive": false, "name": null, "email": null, "membershipType": null });
+    carry_cursor_profile(&mut first, None);
     assert_eq!(first["name"], Value::Null);
-    carry_cursor_identity(&mut first, Some(&json!({ "alive": false, "name": "  " })));
+    assert_eq!(first["membershipType"], Value::Null);
+    carry_cursor_profile(&mut first, Some(&json!({ "alive": false, "name": "  ", "membershipType": "" })));
     assert_eq!(first["name"], Value::Null);
     assert_eq!(first["email"], Value::Null);
+    assert_eq!(first["membershipType"], Value::Null);
 }

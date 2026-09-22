@@ -886,14 +886,16 @@ fn to_status<T: Serialize>(payload: &T) -> Result<Value, String> {
     Ok(v)
 }
 
-/// Cursor 会话失效（401 / 未认证）时接口不再返回用户名与邮箱，新状态里这两项为空。
+/// Cursor 会话失效（401 / 未认证）时接口不再返回用户名、邮箱与套餐，新状态里这些字段为空。
 /// 沿用上一次刷新缓存的值：账户页 / 托盘 / 用量页以及删除后保留的统计数据仍按原用户名显示，
-/// 自动备注也不会从邮箱退化成 user_id。接口返回了新值时以新值为准。
-fn carry_cursor_identity(status: &mut Value, prev: Option<&Value>) {
+/// 自动备注也不会从邮箱退化成 user_id；用量页的套餐列、月费倍数与合计也不会因失效而消失。
+/// 计费周期只作为套餐信息一并保留，各展示处在 alive=false 时本就不显示到期倒计时。
+/// 接口返回了新值时以新值为准。
+fn carry_cursor_profile(status: &mut Value, prev: Option<&Value>) {
     let Some(prev) = prev else {
         return;
     };
-    for key in ["name", "email"] {
+    for key in ["name", "email", "membershipType", "billingCycleStart", "billingCycleEnd"] {
         let pointer = format!("/{key}");
         if json_str_at(status, &pointer).is_some() {
             continue;
@@ -1435,7 +1437,7 @@ async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, Str
     let result: Result<Account, String> = match kind.as_str() {
         "cursor" => match cursor::cursor_inspect_token(snap.token).await {
             Ok(payload) => to_status(&payload).and_then(|mut status| {
-                carry_cursor_identity(&mut status, snap.status.as_ref());
+                carry_cursor_profile(&mut status, snap.status.as_ref());
                 finish(app, id, status)
             }),
             Err(e) => Err(e),
