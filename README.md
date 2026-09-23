@@ -220,8 +220,8 @@ npm run tauri build    # 打包当前平台安装包
 - 等价费用的口径是**模型厂商的官方 API 价目**（OpenAI、Anthropic、Google、xAI 等），不是 Cursor 等
   分发方的售价；Cursor 的账单只用来核对上报的模型名能否命中。只在 Cursor 提供的模型（Composer）
   以 Cursor 官方价目为厂商价。
-- Fast 条目只收录厂商官方设有 Fast 档的模型（OpenAI Fast mode、Anthropic fast mode 的 Opus 5 / 4.8、
-  Cursor Composer 2.5 Fast），键为「基础模型键 + `-fast`」（如 `gpt-5-fast`、
+- Fast 条目只收录厂商官方设有 Fast 档的模型（OpenAI Fast mode、Anthropic fast mode 的
+  Opus 5.5 / 5 / 4.8、Cursor Composer 2.5 Fast），键为「基础模型键 + `-fast`」（如 `gpt-5-fast`、
   `claude-opus-5-fast`），上报名末尾的 `-fast` 会归到对应条目。厂商没有 Fast 档的模型
   （如 xAI Grok，Cursor 对其 Fast 的加价属 Cursor 自身定价），其 Fast 用量独立成行、按标准价折算并在
   价格标签里显示套用的基础键。

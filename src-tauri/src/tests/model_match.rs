@@ -89,6 +89,28 @@ fn fable_5_1_never_priced_as_fable_5() {
 }
 
 #[test]
+fn opus_5_5_never_priced_as_opus_5() {
+    let t = table();
+    // Cursor 上报的连字符写法、版本在前式、effort / Fast 后缀与 cursor- 前缀都应命中 5.5，
+    // 展示名同样归并到点号规范键（Opus 5.5 比 Opus 5 便宜，截成 5 会高估）
+    for (raw, expect) in [
+        ("claude-opus-5-5", "claude-opus-5.5"),
+        ("claude-opus-5-5-thinking-high", "claude-opus-5.5"),
+        ("claude-opus-5-5-max", "claude-opus-5.5"),
+        ("claude-5.5-opus-high-thinking", "claude-opus-5.5"),
+        ("cursor-claude-opus-5-5-thinking-xhigh", "claude-opus-5.5"),
+        ("claude-opus-5-5-fast", "claude-opus-5.5-fast"),
+        ("claude-opus-5-5-thinking-high-fast", "claude-opus-5.5-fast"),
+    ] {
+        assert_eq!(resolve(&t, raw).map(|h| h.0), Some(expect), "{raw} 计价键不对");
+        assert_eq!(display_key(&t, raw), expect, "{raw} 展示名不对");
+    }
+    // 日期快照回退到 5.5 计价；opus 5 本体不受影响
+    assert_eq!(resolve(&t, "claude-opus-5-5-20260922").unwrap().0, "claude-opus-5.5");
+    assert_eq!(resolve(&t, "claude-opus-5-thinking-high").unwrap().0, "claude-opus-5");
+}
+
+#[test]
 fn opus_4_8_all_writings_resolve() {
     let t = table();
     // Cursor 版本在前式、API 家族在前式（点号 / 连字符）、日期快照、带前缀后缀
