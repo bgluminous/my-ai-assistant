@@ -3,6 +3,27 @@
 use super::*;
 
 #[test]
+fn cursor_api_filter_defaults_off_and_survives_serialization() {
+    let mut account: Account = serde_json::from_value(json!({
+        "id": "acc-test", "kind": "cursor", "token": "fixture"
+    })).unwrap();
+    assert!(!account.ignore_api_models);
+    account.ignore_api_models = true;
+    let stored = serde_json::to_value(&account).unwrap();
+    assert_eq!(stored["ignoreApiModels"], true);
+    let restored: Account = serde_json::from_value(stored).unwrap();
+    assert!(restored.ignore_api_models);
+
+    let legacy: AccountExportItem = serde_json::from_value(json!({ "token": "fixture" })).unwrap();
+    assert!(!legacy.ignore_api_models);
+    let exported: AccountExportItem = serde_json::from_value(json!({
+        "token": "fixture", "ignoreApiModels": true
+    })).unwrap();
+    assert!(serde_json::from_value::<AccountExportItem>(serde_json::to_value(exported).unwrap())
+        .unwrap().ignore_api_models);
+}
+
+#[test]
 fn error_code_extraction_matches_codex_cli() {
     // RFC 6749 形态：error 为字符串，说明在 error_description
     let rfc = r#"{"error":"invalid_grant","error_description":"refresh token expired"}"#;

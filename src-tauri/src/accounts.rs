@@ -43,6 +43,9 @@ pub struct Account {
     /// 备注是否为自动生成（未手填时用邮箱/用户名兜底）。为 true 时刷新会用最新身份回填。
     #[serde(default)]
     pub note_auto: bool,
+    /// Cursor 账户的「不记录 API 额度用量」开关；包含套餐 API 额度与超额按量付费。
+    #[serde(default)]
+    pub ignore_api_models: bool,
     /// Cursor user token / Codex access_token（JWT）/ Claude access_token（不透明值）。
     /// ChatGPT 账户有 codex_auth 副本时，本字段只在内存里由副本解出，不落盘。
     pub token: String,
@@ -550,6 +553,7 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
     };
     let mut entry = Account {
         id: new_id(),
+        ignore_api_models: false,
         kind,
         note,
         note_auto,
@@ -638,6 +642,7 @@ pub async fn accounts_update(
     note: String,
     token: String,
     refresh_token: Option<String>,
+    ignore_api_models: Option<bool>,
 ) -> Result<AccountsView, String> {
     let before = snapshot(&id)?;
     let token = sanitize_token(&before.kind, &token)?;
@@ -665,6 +670,23 @@ pub async fn accounts_update(
     };
     let mut name = String::new();
     let mut changed: Vec<&str> = Vec::new();
+    // 与用量同步串行：清理成功后才保存开关，防止并发同步把 API 事件写回。
+    let usage_lock = crate::usage_archive::account_lock(&id);
+    let _usage_guard = if before.kind == "cursor" {
+        Some(usage_lock.lock().await)
+    } else {
+        None
+    };
+    let filtered_archive = if before.kind == "cursor" && ignore_api_models == Some(true) {
+        // 同一身份更换凭据时可用新 token 补齐旧账单；换为另一账户时仍使用旧账户凭据。
+        let same_account = account_identity("cursor", &before.token)
+            .zip(account_identity("cursor", &token))
+            .is_some_and(|(old, new)| old == new);
+        let archive_token = if same_account { &token } else { &before.token };
+        crate::usage_archive::prepare_api_events_removal(&id, archive_token).await?
+    } else {
+        None
+    };
     let data = mutate(&app, |d| {
         let pos = d
             .accounts
@@ -693,6 +715,17 @@ pub async fn accounts_update(
         }
         if refresh_token != acc.refresh_token {
             changed.push("Refresh Token");
+        }
+        if kind == "cursor" {
+            if let Some(ignore) = ignore_api_models {
+                if ignore {
+                    crate::usage_archive::save_api_events_removal(filtered_archive.as_ref())?;
+                }
+                if ignore != acc.ignore_api_models {
+                    changed.push("不记录 API 额度用量");
+                    acc.ignore_api_models = ignore;
+                }
+            }
         }
         // 凭据发生变化时旧的状态摘要随之失效
         if credentials_changed {
@@ -1619,6 +1652,7 @@ pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<Impor
                 let mut entry = Account {
                     id: new_id(),
                     kind: login.kind,
+                    ignore_api_models: false,
                     note,
                     note_auto: true,
                     token,
@@ -1675,6 +1709,8 @@ struct AccountExportItem {
     note: String,
     #[serde(default)]
     note_auto: bool,
+    #[serde(default)]
+    ignore_api_models: bool,
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
@@ -1766,6 +1802,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
         .map(|a| AccountExportItem {
             note: a.note.clone(),
             note_auto: a.note_auto,
+            ignore_api_models: a.kind == "cursor" && a.ignore_api_models,
             token: a.token.clone(),
             // Cursor 没有 refresh_token 概念；Codex / Claude 随导出（用于自动续期）
             refresh_token: if kind == "cursor" {
@@ -1889,6 +1926,7 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                 let mut entry = Account {
                     id: new_id(),
                     kind: kind.clone(),
+                    ignore_api_models: kind == "cursor" && item.ignore_api_models,
                     note,
                     note_auto,
                     token,
@@ -1954,6 +1992,7 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
     let entry = Account {
         id: new_id(),
         kind: "claude".into(),
+        ignore_api_models: false,
         note,
         note_auto: true,
         token: result.access_token,

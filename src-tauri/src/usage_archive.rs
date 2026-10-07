@@ -1,8 +1,10 @@
 //! Cursor 账户用量事件库与快照图片保存。
 //!
 //! 事件库：每个 Cursor 账户一份 `{app_dir}/usage-archive/<账户id>.json`，保存从官方接口拉到的
-//! 全部原始用量事件（模型、四类 token、实扣、时间戳）。用量页任何时间跨度都从本地事件库切片并按
-//! 当前价格表折算，切换跨度不联网；只有刷新才同步——增量同步从库内最后一条事件所在日的 0 点起
+//! 用量事件（模型、四类 token、实扣、时间戳、计费类别）。开启「不记录 API 额度用量」后，
+//! 清理套餐内 API 额度及超额按量付费事件，
+//! 后续同步也不再保存。用量页任何时间跨度都从本地事件库切片并按当前价格表折算，
+//! 切换跨度不联网；只有刷新才同步——增量同步从库内最后一条事件所在日的 0 点起
 //! 拉取并替换该日之后的数据，用量页「刷新」按钮强制全量重拉。
 //! 已删除账户：删除时勾选「保留统计数据」会先做一次最终同步，再把事件库连同账户展示信息
 //! （备注 / 邮箱 / 用户名 / 套餐 / 删除时间 / 账户身份，不含 token）标记为已删除保留，
@@ -27,8 +29,9 @@ use crate::http;
 use crate::paths;
 use crate::pricing::{self, TokenRow, UsageAggregate};
 
-/// 事件库文件格式版本；v1 为旧版「仅聚合结果」存档，读到时视为不存在（下次同步整体重建）。
-const ARCHIVE_VERSION: u32 = 2;
+/// v1 仅存聚合结果，v2 保存事件；v3 增加计费元数据，仍兼容读取 v2 的七列事件。
+const ARCHIVE_VERSION: u32 = 3;
+const MIN_EVENT_ARCHIVE_VERSION: u32 = 2;
 /// `mode = "sync"` 时距上次成功同步不足该毫秒数则跳过联网：主窗口与托盘几乎同时触发的去重。
 const SYNC_DEDUPE_MS: i64 = 5_000;
 /// `mode = "auto"` 未给 max_age_ms 时的默认有效期（与前端默认缓存有效期一致）。
@@ -38,11 +41,16 @@ const DEFAULT_MAX_AGE_MS: i64 = 5 * 60_000;
 // 数据结构
 // ---------------------------------------------------------------------------
 
-/// 单条事件的紧凑存储形式：[模型, 输入, 输出, 缓存读, 缓存写, 实扣（分）, 时间戳毫秒 | null]。
-type EventTuple = (String, f64, f64, f64, f64, f64, Option<i64>);
+/// 前七列沿用 v2；末列为计费元数据，在用账户缺失时必须联网补齐后才能清理。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTuple(
+    String, f64, f64, f64, f64, f64, Option<i64>,
+    #[serde(default)] Option<cursor::UsageBilling>,
+);
 
-fn to_tuple(r: &TokenRow) -> EventTuple {
-    (
+fn to_tuple(event: &cursor::UsageEvent) -> EventTuple {
+    let r = &event.row;
+    EventTuple(
         r.model.clone(),
         r.input,
         r.output,
@@ -50,6 +58,7 @@ fn to_tuple(r: &TokenRow) -> EventTuple {
         r.cache_write,
         r.actual_cents,
         r.timestamp_ms,
+        Some(event.billing.clone()),
     )
 }
 
@@ -81,6 +90,12 @@ pub struct DeletedMeta {
     pub name: Option<String>,
     #[serde(default)]
     pub membership_type: Option<String>,
+    /// 删除账户时保留其统计开关；备份恢复后沿用相同口径。
+    #[serde(default)]
+    pub ignore_api_models: bool,
+    /// 已删除账户允许用模型归属近似清理缺少计费信息的旧事件，备份恢复沿用该方式。
+    #[serde(default)]
+    pub api_filter_legacy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -96,6 +111,9 @@ pub struct UsageArchive {
     /// 上次成功同步时刻（unix 毫秒）。
     #[serde(default)]
     pub synced_at: Option<i64>,
+    /// 同步游标：过滤前最新事件的时间戳，避免 API 事件被清理后反复全量拉取。
+    #[serde(default)]
+    pub last_event_at: Option<i64>,
     #[serde(default)]
     pub events: Vec<EventTuple>,
     /// 为 Some 表示该账户已删除、事件库作为保留的统计数据存在。
@@ -116,6 +134,12 @@ pub struct DeletedUsageRecord {
     pub email: Option<String>,
     pub name: Option<String>,
     pub membership_type: Option<String>,
+    /// 已移除 API 历史后为 true；已删除账户只允许从 false 变为 true。
+    pub ignore_api_models: bool,
+    /// 此次清理需按模型近似判断，或此前已经按这种方式清理过。
+    pub api_removal_approximate: bool,
+    /// 模型归属或已有计费类别仍无法识别时，不允许猜测清理。
+    pub api_removal_error: Option<String>,
     pub events: usize,
     pub first_event_at: Option<i64>,
     pub last_event_at: Option<i64>,
@@ -125,6 +149,8 @@ pub struct DeletedUsageRecord {
 #[serde(rename_all = "camelCase")]
 pub struct UsageSlice {
     pub agg: UsageAggregate,
+    /// 本次聚合采用的账户开关，供前端验证缓存口径。
+    pub ignore_api_models: bool,
     /// 事件库上次成功同步时刻（unix 毫秒）；前端以此作为缓存条目的数据时间。
     pub synced_at: Option<i64>,
     /// 本次联网同步失败（仍返回本地数据）时的错误码；成功或无需同步为 None。
@@ -162,7 +188,7 @@ fn file_path(account_id: &str) -> Result<PathBuf, String> {
 
 /// 每账户一把异步锁：同步（含联网）、写盘、改名、删除都在锁内进行。
 /// 主窗口与托盘并发触发同一账户时排队执行，后到者看到刚同步好的事件库后直接切片。
-fn account_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn account_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
         OnceLock::new();
     let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -173,11 +199,17 @@ fn account_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// 关闭历史记录与备份导入可能涉及不同 id 下的同一身份，串行处理以免旧备份覆盖关闭状态。
+fn deleted_mutation_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 fn read_archive_file(path: &Path) -> Option<UsageArchive> {
     let text = std::fs::read_to_string(path).ok()?;
     let archive: UsageArchive = serde_json::from_str(&text).ok()?;
     // 旧版存档（v1 只有聚合结果）没有事件明细，视为不存在，下次同步整体重建
-    (archive.version >= ARCHIVE_VERSION).then_some(archive)
+    (archive.version >= MIN_EVENT_ARCHIVE_VERSION).then_some(archive)
 }
 
 /// 读取事件库；文件不存在、旧版格式或损坏都返回 None。
@@ -247,43 +279,229 @@ fn local_day_start_ms(ts: i64) -> i64 {
         .unwrap_or(ts)
 }
 
-/// 联网同步事件库。full 或库内没有带时间戳的事件时全量重拉；否则增量：从最后一条事件所在日
+/// 联网同步事件库。full 或没有同步游标时全量重拉；否则增量：从最后一条事件所在日
 /// 0 点起拉取，替换库内该日之后的数据。无时间戳的旧事件保留，增量结果里无时间戳的丢弃，
 /// 避免每次同步重复累加。失败时事件库保持原样。
-async fn sync_events(archive: &mut UsageArchive, token: &str, full: bool) -> Result<(), String> {
+async fn sync_events(
+    archive: &mut UsageArchive,
+    token: &str,
+    full: bool,
+    ignore_api_models: bool,
+) -> Result<(), String> {
+    // 计费信息补齐、合并与清理先在副本中完成；任一环节失败均不更改原库。
+    let mut next = archive.clone();
+    if !full {
+        prepare_api_filter(&mut next, token, ignore_api_models).await?;
+    }
     let last_ts = if full {
         None
     } else {
-        archive.events.iter().filter_map(|e| e.6).max()
+        next.last_event_at.max(next.events.iter().filter_map(|e| e.6).max())
     };
-    match last_ts {
-        None => {
-            let rows = cursor::fetch_all_events(token, None, None).await?;
-            archive.events = rows.iter().map(to_tuple).collect();
+    let day_start = last_ts.map(local_day_start_ms);
+    let rows = cursor::fetch_all_events(token, day_start, None).await?;
+    merge_events(&mut next, &rows, day_start, ignore_api_models)?;
+    next.synced_at = Some(now_ms());
+    next.version = ARCHIVE_VERSION;
+    *archive = next;
+    Ok(())
+}
+
+/// 合并已成功拉取的数据，先更新游标，再丢弃 API 事件；过滤不会影响分页和增量范围。
+fn merge_events(
+    archive: &mut UsageArchive,
+    rows: &[cursor::UsageEvent],
+    day_start: Option<i64>,
+    ignore_api_models: bool,
+) -> Result<(), String> {
+    // 先验证新记录，防止遇到未知计费类型时只合并了一半。
+    if ignore_api_models {
+        for event in rows {
+            require_api_usage(&event.row.model, Some(&event.billing))?;
         }
-        Some(ts) => {
-            let day_start = local_day_start_ms(ts);
-            let rows = cursor::fetch_all_events(token, Some(day_start), None).await?;
-            archive.events.retain(|e| e.6.is_none_or(|t| t < day_start));
-            archive.events.extend(
-                rows.iter()
-                    .filter(|r| r.timestamp_ms.is_some_and(|t| t >= day_start))
-                    .map(to_tuple),
-            );
+        if day_start.is_some() {
+            validate_api_filter(archive)?;
         }
     }
-    archive.synced_at = Some(now_ms());
+    if let Some(start) = day_start {
+        archive.last_event_at = archive.last_event_at.max(archive.events.iter().filter_map(|e| e.6).max());
+        archive.events.retain(|e| e.6.is_none_or(|t| t < start));
+    } else {
+        archive.events.clear();
+        archive.last_event_at = None;
+    }
+    archive.events.extend(
+        rows.iter()
+            .filter(|r| day_start.is_none_or(|start| r.row.timestamp_ms.is_some_and(|t| t >= start)))
+            .map(to_tuple),
+    );
+    archive.last_event_at = archive.last_event_at.max(archive.events.iter().filter_map(|e| e.6).max());
+    if ignore_api_models {
+        prune_api_events(archive)?;
+    }
     Ok(())
+}
+
+/// 真正移除 API 明细（含无时间戳事件），只保留增量同步所需的时间游标。
+fn prune_api_events(archive: &mut UsageArchive) -> Result<bool, String> {
+    validate_api_filter(archive)?;
+    let before = archive.events.len();
+    archive.last_event_at = archive.last_event_at.max(archive.events.iter().filter_map(|e| e.6).max());
+    let legacy = legacy_api_filter(archive);
+    archive.events.retain(|e| event_api_usage(e, legacy) != Some(true));
+    Ok(archive.events.len() != before)
+}
+
+fn legacy_api_filter(archive: &UsageArchive) -> bool {
+    archive.deleted.as_ref().is_some_and(|meta| meta.api_filter_legacy)
+}
+
+/// 已有计费信息优先；近似模式仅补充旧格式缺失的元数据，不掩盖未知的新计费类别。
+fn event_api_usage(event: &EventTuple, legacy: bool) -> Option<bool> {
+    match &event.7 {
+        Some(billing) => billing.api_usage(&event.0),
+        None if legacy => cursor::model_uses_api_pool(&event.0),
+        None => None,
+    }
+}
+
+fn require_api_usage(model: &str, billing: Option<&cursor::UsageBilling>) -> Result<bool, String> {
+    billing.and_then(|b| b.api_usage(model)).ok_or_else(|| {
+        "账单缺少可识别的计费信息，未清理数据。请刷新用量后重试。".to_string()
+    })
+}
+
+fn validate_api_filter(archive: &UsageArchive) -> Result<(), String> {
+    for event in &archive.events {
+        if event_api_usage(event, legacy_api_filter(archive)).is_none() {
+            return Err(if archive.deleted.is_some() {
+                "历史记录包含无法识别的模型或计费类别，无法清理，原数据保持不变。".into()
+            } else {
+                "账单缺少可识别的计费信息，未清理数据。请刷新用量后重试。".into()
+            });
+        }
+    }
+    Ok(())
+}
+
+fn needs_billing(archive: &UsageArchive) -> bool {
+    archive.events.iter().any(|e| require_api_usage(&e.0, e.7.as_ref()).is_err())
+}
+
+/// 不使用金额匹配：Cursor 可能隐藏或调整历史金额。相同时间、模型及 token 的重复事件
+/// 逐条配对，避免把同一远端事件的计费类别重复套给多条本地记录。
+fn billing_key(event: &EventTuple) -> String {
+    json!([event.0, event.1, event.2, event.3, event.4, event.6]).to_string()
+}
+
+fn hydrate_billing(archive: &mut UsageArchive, rows: &[cursor::UsageEvent]) -> Result<(), String> {
+    let mut available: HashMap<String, Vec<cursor::UsageBilling>> = HashMap::new();
+    for row in rows {
+        available.entry(billing_key(&to_tuple(row))).or_default().push(row.billing.clone());
+    }
+    let mut events = archive.events.clone();
+    for event in &mut events {
+        if require_api_usage(&event.0, event.7.as_ref()).is_ok() {
+            continue;
+        }
+        let matches = available.get_mut(&billing_key(event));
+        if let Some(matches) = matches {
+            let first = matches.first().and_then(|b| b.api_usage(&event.0));
+            if matches.iter().any(|b| b.api_usage(&event.0) != first) {
+                return Err("历史账单存在无法唯一匹配的计费归属，未清理数据。".into());
+            }
+            event.7 = matches.pop();
+        }
+        if event.7.is_none() {
+            return Err("部分历史账单无法从 Cursor 补齐计费信息，未清理数据。可先导出账单，再清除本地数据并重新同步。".into());
+        }
+        require_api_usage(&event.0, event.7.as_ref())?;
+    }
+    archive.events = events;
+    archive.version = ARCHIVE_VERSION;
+    Ok(())
+}
+
+async fn prepare_api_filter(
+    archive: &mut UsageArchive,
+    token: &str,
+    ignore_api_models: bool,
+) -> Result<(), String> {
+    if !ignore_api_models {
+        return Ok(());
+    }
+    if needs_billing(archive) {
+        let rows = cursor::fetch_all_events(token, None, None).await?;
+        hydrate_billing(archive, &rows)?;
+    }
+    prune_api_events(archive)?;
+    Ok(())
+}
+
+fn persist_api_filter(archive: &mut UsageArchive, ignore_api_models: bool) -> Result<(), String> {
+    if ignore_api_models && prune_api_events(archive)? {
+        save(archive)?;
+    }
+    Ok(())
+}
+
+/// 编辑保存前准备清理后的事件库；联网及验证成功前不写盘。调用方须持有 account_lock。
+pub(crate) async fn prepare_api_events_removal(
+    account_id: &str,
+    token: &str,
+) -> Result<Option<UsageArchive>, String> {
+    // 编辑保存不能把读取失败当作「没有记录」，否则会在明细未清理时报告开关已生效。
+    let path = file_path(account_id)?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("读取本地用量数据失败：{e}")),
+    };
+    let mut archive: UsageArchive = serde_json::from_str(&text)
+        .map_err(|e| format!("解析本地用量数据失败：{e}"))?;
+    if archive.version < MIN_EVENT_ARCHIVE_VERSION {
+        return Err("本地用量数据格式过旧，请先刷新用量再开启此开关。".into());
+    }
+    archive.account_id = account_id.to_string();
+    prepare_api_filter(&mut archive, &http::normalize_cursor_token(token), true).await?;
+    Ok(Some(archive))
+}
+
+/// 编辑字段验证通过后，在保存账户开关前落盘；调用方仍须持有 account_lock。
+pub(crate) fn save_api_events_removal(archive: Option<&UsageArchive>) -> Result<(), String> {
+    archive.map_or(Ok(()), save)
+}
+
+/// 读取时也校验口径，兼容较早版本生成的事件库与备份。
+fn recorded_events(
+    archive: &UsageArchive,
+    ignore_api_models: bool,
+) -> impl Iterator<Item = &EventTuple> {
+    archive.events.iter()
+        .filter(move |e| !ignore_api_models || event_api_usage(e, legacy_api_filter(archive)) != Some(true))
+}
+
+fn account_api_filter(archive: &UsageArchive) -> Result<bool, String> {
+    if let Some(meta) = &archive.deleted {
+        return Ok(meta.ignore_api_models);
+    }
+    crate::settings::ensure_loaded()?;
+    Ok(accounts::account_snapshot(&archive.account_id)
+        .map(|a| a.kind == "cursor" && a.ignore_api_models)
+        .unwrap_or(false))
 }
 
 /// 按 [start, end]（unix 毫秒，闭区间，None = 不限）切片并按当前价格表聚合。
 /// 有界范围只计入带时间戳的事件；「全部」（两端都为 None）连无时间戳的事件一起计入。
 /// 区间不超过两天时按小时序列覆盖区间内的日期（任意历史日期都能画 24 小时柱图）。
-fn slice(archive: &UsageArchive, start: Option<i64>, end: Option<i64>) -> UsageAggregate {
+fn slice(
+    archive: &UsageArchive,
+    start: Option<i64>,
+    end: Option<i64>,
+    ignore_api_models: bool,
+) -> UsageAggregate {
     let bounded = start.is_some() || end.is_some();
-    let rows: Vec<TokenRow> = archive
-        .events
-        .iter()
+    let rows: Vec<TokenRow> = recorded_events(archive, ignore_api_models)
         .filter(|e| {
             if !bounded {
                 return true;
@@ -352,7 +570,10 @@ fn apply_deleted_note(meta: &mut DeletedMeta, identity: Option<&str>, note: &str
 
 fn deleted_record(archive: &UsageArchive) -> Option<DeletedUsageRecord> {
     let meta = archive.deleted.as_ref()?;
-    let stamps = || archive.events.iter().filter_map(|e| e.6);
+    let stamps = || recorded_events(archive, meta.ignore_api_models).filter_map(|e| e.6);
+    let api_removal_error = archive.events.iter()
+        .any(|event| event_api_usage(event, true).is_none())
+        .then(|| "历史记录包含无法识别的模型或计费类别，暂时无法移除 API 历史记录。".to_string());
     Some(DeletedUsageRecord {
         account_id: archive.account_id.clone(),
         identity: archive.identity.clone(),
@@ -363,7 +584,10 @@ fn deleted_record(archive: &UsageArchive) -> Option<DeletedUsageRecord> {
         email: meta.email.clone(),
         name: meta.name.clone(),
         membership_type: meta.membership_type.clone(),
-        events: archive.events.len(),
+        ignore_api_models: meta.ignore_api_models,
+        api_removal_approximate: meta.api_filter_legacy || archive.events.iter().any(|e| e.7.is_none()),
+        api_removal_error,
+        events: recorded_events(archive, meta.ignore_api_models).count(),
         first_event_at: stamps().min(),
         last_event_at: stamps().max(),
     })
@@ -395,6 +619,13 @@ pub async fn cursor_usage_fetch(
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let mut archive = load(&account_id).unwrap_or_default();
+    archive.account_id = account_id.clone();
+    archive.deleted = None;
+    let ignore_api_models = account_api_filter(&archive)?;
+    let upgrade_billing = ignore_api_models && needs_billing(&archive);
+    if !upgrade_billing {
+        persist_api_filter(&mut archive, ignore_api_models)?;
+    }
     let age = archive.synced_at.map(|t| now_ms() - t);
     let (do_sync, full) = match mode.as_str() {
         "full" => (true, true),
@@ -405,8 +636,8 @@ pub async fn cursor_usage_fetch(
         ),
     };
     let mut sync_error = None;
-    if do_sync {
-        match sync_events(&mut archive, &token, full).await {
+    if do_sync || upgrade_billing {
+        match sync_events(&mut archive, &token, full, ignore_api_models).await {
             Ok(()) => {
                 archive.version = ARCHIVE_VERSION;
                 archive.account_id = account_id.clone();
@@ -420,7 +651,7 @@ pub async fn cursor_usage_fetch(
                 }
             }
             Err(e) => {
-                if archive.synced_at.is_none() {
+                if archive.synced_at.is_none() || upgrade_billing {
                     return Err(e);
                 }
                 sync_error = Some(e);
@@ -428,7 +659,8 @@ pub async fn cursor_usage_fetch(
         }
     }
     Ok(UsageSlice {
-        agg: slice(&archive, start, end),
+        agg: slice(&archive, start, end, ignore_api_models),
+        ignore_api_models,
         synced_at: archive.synced_at,
         sync_error,
     })
@@ -443,9 +675,12 @@ pub async fn cursor_usage_slice(
 ) -> Result<UsageSlice, String> {
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
-    let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let ignore_api_models = account_api_filter(&archive)?;
+    persist_api_filter(&mut archive, ignore_api_models)?;
     Ok(UsageSlice {
-        agg: slice(&archive, start, end),
+        agg: slice(&archive, start, end, ignore_api_models),
+        ignore_api_models,
         synced_at: archive.synced_at,
         sync_error: None,
     })
@@ -508,6 +743,93 @@ pub async fn cursor_usage_deleted_set_note(
         Some(json!({ "id": account_id, "auto": auto })),
     );
     deleted_record(&archive).ok_or_else(|| "not_deleted_account".to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedUsageUpdateResult {
+    pub record: DeletedUsageRecord,
+    pub removed_events: usize,
+}
+
+/// 一次性移除 API 历史并编辑备注。remove_api_usage = false 只编辑备注，绝不重新开启记录。
+/// 先处理副本，无法识别任一事件时，备注、开关与事件均不改变。
+fn apply_deleted_update(
+    archive: &mut UsageArchive,
+    note: &str,
+    remove_api_usage: bool,
+) -> Result<usize, String> {
+    if archive.deleted.is_none() {
+        return Err("not_deleted_account".into());
+    }
+    let mut next = archive.clone();
+    let before = next.events.len();
+    if remove_api_usage {
+        if next.events.iter().any(|e| e.7.is_none()) {
+            next.deleted.as_mut().unwrap().api_filter_legacy = true;
+        }
+        prune_api_events(&mut next)?;
+        next.deleted.as_mut().unwrap().ignore_api_models = true;
+    }
+    let identity = next.identity.clone();
+    apply_deleted_note(next.deleted.as_mut().unwrap(), identity.as_deref(), note);
+    next.version = ARCHIVE_VERSION;
+    let removed = before - next.events.len();
+    *archive = next;
+    Ok(removed)
+}
+
+/// 已删除账户的编辑入口：仅接受「移除 API 历史」，没有恢复 / 重新开启的参数。
+#[tauri::command]
+pub async fn cursor_usage_deleted_update(
+    app: AppHandle,
+    account_id: String,
+    note: String,
+    remove_api_usage: bool,
+) -> Result<DeletedUsageUpdateResult, String> {
+    let _deleted_guard = deleted_mutation_lock().lock().await;
+    let lock = account_lock(&account_id);
+    let _guard = lock.lock().await;
+    let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let removed_events = apply_deleted_update(&mut archive, &note, remove_api_usage)?;
+    save(&archive)?;
+    let record = deleted_record(&archive).ok_or_else(|| "not_deleted_account".to_string())?;
+    audit::log(
+        "usage_data_edit",
+        format!(
+            "编辑已删除账户「{}」{}",
+            deleted_label(archive.deleted.as_ref().unwrap()),
+            if remove_api_usage {
+                let method = if record.api_removal_approximate { "按模型归属近似移除" } else { "永久移除" };
+                format!("，{method} {removed_events} 条 API 历史记录")
+            } else {
+                "的备注".into()
+            },
+        ),
+        Some(json!({"id": account_id, "removedEvents": removed_events, "approximate": record.api_removal_approximate})),
+    );
+    accounts::notify_usage_archive_changed(&app);
+    Ok(DeletedUsageUpdateResult { record, removed_events })
+}
+
+/// 导入备份也遵守单向关闭：同身份的本地记录已经移除 API 历史时，不允许旧备份重新开启。
+fn preserve_deleted_api_filter(
+    incoming: &mut UsageArchive,
+    local: &[UsageArchive],
+) -> Result<(), String> {
+    if local.iter().any(|a| a.deleted.as_ref().is_some_and(|m| m.ignore_api_models)) {
+        let Some(meta) = incoming.deleted.as_mut() else {
+            return Err("not_deleted_account".into());
+        };
+        meta.ignore_api_models = true;
+        meta.api_filter_legacy |= local.iter().any(|a| {
+            a.deleted.as_ref().is_some_and(|m| m.ignore_api_models && m.api_filter_legacy)
+        });
+    }
+    if incoming.deleted.as_ref().is_some_and(|m| m.ignore_api_models) {
+        prune_api_events(incoming)?;
+    }
+    Ok(())
 }
 
 /// 已删除账户可手动指定的 Cursor 套餐档位（与前端套餐名 / 月费表一致）。
@@ -616,12 +938,12 @@ pub async fn cursor_usage_events(
 ) -> Result<RawUsageEvents, String> {
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
-    let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
+    let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
     let table = pricing::load();
+    let ignore_api_models = account_api_filter(&archive)?;
+    persist_api_filter(&mut archive, ignore_api_models)?;
     let bounded = start.is_some() || end.is_some();
-    let mut events: Vec<RawUsageEvent> = archive
-        .events
-        .iter()
+    let mut events: Vec<RawUsageEvent> = recorded_events(&archive, ignore_api_models)
         .filter(|e| {
             if !bounded {
                 return true;
@@ -649,7 +971,7 @@ pub async fn cursor_usage_events(
     events.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms.unwrap_or(i64::MIN)));
     Ok(RawUsageEvents {
         events,
-        total: archive.events.len(),
+        total: recorded_events(&archive, ignore_api_models).count(),
         synced_at: archive.synced_at,
         deleted: archive.deleted.is_some(),
         path: file_path(&account_id)?.to_string_lossy().to_string(),
@@ -706,8 +1028,15 @@ pub async fn retain_for_deleted(acc: &Account) -> Result<Retained, String> {
     let lock = account_lock(&acc.id);
     let _guard = lock.lock().await;
     let mut archive = load(&acc.id).unwrap_or_default();
+    // 删除流程可能排在编辑账户之后，锁内重读偏好以免使用旧快照。
+    let ignore_api_models = accounts::account_snapshot(&acc.id)
+        .map(|a| a.ignore_api_models)
+        .unwrap_or(acc.ignore_api_models);
+    archive.account_id = acc.id.clone();
     let token = http::normalize_cursor_token(&acc.token);
-    let synced = sync_events(&mut archive, &token, false).await;
+    let synced = sync_events(&mut archive, &token, false, ignore_api_models).await;
+    // 同步失败可使用旧数据，但不能把缺失计费归属的旧事件作为已过滤数据保留。
+    persist_api_filter(&mut archive, ignore_api_models)?;
     if archive.events.is_empty() {
         return match synced {
             Ok(()) => {
@@ -729,6 +1058,8 @@ pub async fn retain_for_deleted(acc: &Account) -> Result<Retained, String> {
         email: status_field(acc, "email"),
         name: status_field(acc, "name"),
         membership_type: status_field(acc, "membershipType"),
+        ignore_api_models,
+        api_filter_legacy: false,
     });
     save(&archive)?;
     Ok(Retained::Kept)
@@ -748,6 +1079,7 @@ pub async fn adopt_deleted(account_id: &str, token: &str, display_name: &str) ->
     let Some(identity) = accounts::account_identity("cursor", token) else {
         return false;
     };
+    let _deleted_guard = deleted_mutation_lock().lock().await;
     let mut candidates: Vec<UsageArchive> = deleted_archives()
         .into_iter()
         .filter(|a| same_identity(a.identity.as_deref(), Some(&identity)))
@@ -766,18 +1098,27 @@ pub async fn adopt_deleted(account_id: &str, token: &str, display_name: &str) ->
         .as_ref()
         .map(deleted_label)
         .unwrap_or_default();
-    let events = chosen.events.len();
     {
         let old_lock = account_lock(&old_id);
         let _old_guard = old_lock.lock().await;
+        if chosen.deleted.as_ref().is_some_and(|meta| meta.ignore_api_models)
+            && prune_api_events(&mut chosen).is_err() {
+            return false;
+        }
+        chosen.deleted = None;
+        if accounts::account_snapshot(account_id).is_ok_and(|a| a.ignore_api_models) {
+            if prepare_api_filter(&mut chosen, &http::normalize_cursor_token(token), true).await.is_err() {
+                return false;
+            }
+        }
         chosen.account_id = account_id.to_string();
         chosen.identity = Some(identity);
-        chosen.deleted = None;
         if save(&chosen).is_err() {
             return false;
         }
         remove_file(&old_id);
     }
+    let events = chosen.events.len();
     for other in candidates {
         let other_lock = account_lock(&other.account_id);
         let _other_guard = other_lock.lock().await;
@@ -794,24 +1135,31 @@ pub async fn adopt_deleted(account_id: &str, token: &str, display_name: &str) ->
 }
 
 /// 全量备份导出：全部已删除账户的事件库（在用账户导入后可自行重新同步，不随备份携带）。
-pub fn export_deleted() -> Vec<Value> {
+pub fn export_deleted() -> Result<Vec<Value>, String> {
     deleted_archives()
-        .iter()
-        .filter_map(|a| serde_json::to_value(a).ok())
+        .into_iter()
+        .map(|mut a| {
+            if a.deleted.as_ref().is_some_and(|meta| meta.ignore_api_models) {
+                // 无凭据可补齐的旧库不能静默删除事件，也不能作为已过滤数据导出。
+                prune_api_events(&mut a).map_err(|e| format!("已删除账户的统计数据需要补齐计费信息；重新添加该账户并刷新后再导出：{e}"))?;
+            }
+            serde_json::to_value(a).map_err(|e| e.to_string())
+        })
         .collect()
 }
 
 /// 全量备份导入：恢复备份里已删除账户的事件库。同身份账户在本机仍在用则跳过（它会自行同步）；
 /// 本机已有同身份 / 同 id 的已删除记录时只在备份数据更新时替换；其余直接写入。返回恢复条数。
 pub async fn import_deleted(items: &[Value], live_identities: &[String]) -> usize {
+    let _deleted_guard = deleted_mutation_lock().lock().await;
     let mut restored = 0usize;
     for item in items {
         let Ok(mut incoming) = serde_json::from_value::<UsageArchive>(item.clone()) else {
             continue;
         };
-        if incoming.version < ARCHIVE_VERSION
+        if incoming.version < MIN_EVENT_ARCHIVE_VERSION
             || incoming.deleted.is_none()
-            || incoming.events.is_empty()
+            || (incoming.events.is_empty() && !incoming.deleted.as_ref().is_some_and(|m| m.ignore_api_models))
             || file_path(&incoming.account_id).is_err()
         {
             continue;
@@ -829,6 +1177,9 @@ pub async fn import_deleted(items: &[Value], live_identities: &[String]) -> usiz
                     || same_identity(a.identity.as_deref(), incoming.identity.as_deref())
             })
             .collect();
+        if preserve_deleted_api_filter(&mut incoming, &local_same).is_err() {
+            continue;
+        }
         let incoming_synced = incoming.synced_at.unwrap_or(0);
         if local_same
             .iter()

@@ -1493,6 +1493,29 @@ input.price-input {
 .toggle input:disabled + .toggle-track { opacity: 0.45; }
 .toggle input:disabled ~ .toggle-text { color: var(--faint); }
 .toggle:has(input:disabled) { cursor: not-allowed; }
+/* 编辑账户：与上方字段留出 16px，开关与说明间隔 8px，左右沿用表单内边距。 */
+#account-modal textarea { display: block; }
+#account-api-field { gap: 8px; margin: 16px 0 0; }
+#account-api-field > .toggle,
+#account-api-field > p { margin: 0; }
+#switch-modal.has-api-history .modal-input-field { margin-bottom: 0; }
+#switch-modal-api-history { gap: 8px; margin: 16px 0 0; }
+#switch-modal-api-history > .toggle { margin: 0; }
+.api-history-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  color: var(--bad);
+  background: var(--bad-soft);
+  border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent);
+  border-left: 3px solid var(--bad);
+  border-radius: 10px;
+}
+.api-history-warning > svg { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; }
+.api-history-warning strong { display: block; font-size: 13px; line-height: 1.5; }
+.api-history-warning p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.65; }
+:root[data-theme="light"] .api-history-warning { color: #b4232c; }
 /* 确认弹窗正文下方的勾选项（如删除 Cursor 账户时的「保留统计数据」） */
 .modal-option { display: flex; margin: 4px 0 8px; font-size: 13px; }
 /* 确认弹窗正文下方的单行文本输入（如修改已删除账户的备注） */
@@ -1557,6 +1580,8 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
   .modal { padding: 12px; }
   .modal-card { max-height: 92vh; }
   .modal-head, .modal-toolbar, .pricing-add, .pricing-update, .modal-foot { padding-left: 16px; padding-right: 16px; }
+  #account-modal .modal-body,
+  #switch-modal.has-api-history .modal-body { padding-left: 16px; padding-right: 16px; }
   .pricing-add-grid { grid-template-columns: 1fr 1fr; }
   .pricing-add-grid input[type="text"] { grid-column: 1 / -1; }
   #pricing-status { margin-left: 16px; margin-right: 16px; }

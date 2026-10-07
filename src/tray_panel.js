@@ -6,6 +6,7 @@ import {
   USAGE_CACHE_ORIGIN,
   DEFAULT_USAGE_TTL_MS,
   setUsageCacheTtlMs,
+  syncCursorUsageFilters,
   isUsageCacheFresh,
   localYmd,
   dayStartMs,
@@ -42,6 +43,8 @@ let deletedRecords = [];
 // 已删除账户按统计日的本地切片：`${accountId}:${aggKey}` → { agg, at }。保留的数据不再变化，
 // 切过一次的日子直接复用；记录集合变化（接管 / 恢复 / 清理）时整体丢弃
 const deletedSlices = new Map();
+let deletedRevision = 0;
+let deletedListSeq = 0;
 let refreshing = false;
 let switching = false;
 let overviewLoading = false;
@@ -450,7 +453,7 @@ function render() {
 
 /** 已删除记录集合的签名：账户 id 与事件库同步时间 / 事件数任一变化都视为数据变了。 */
 function deletedRecordsSig(records) {
-  return records.map((r) => `${r.accountId}:${r.syncedAt || 0}:${r.events || 0}`).join(",");
+  return records.map((r) => `${r.accountId}:${r.syncedAt || 0}:${r.events || 0}:${!!r.ignoreApiModels}`).join(",");
 }
 
 /**
@@ -458,6 +461,7 @@ function deletedRecordsSig(records) {
  * 集合有变化（删除时保留 / 重新添加后接管 / 备份恢复 / 主窗口清理）时丢掉旧切片。
  */
 async function refreshDeletedRecords() {
+  const seq = ++deletedListSeq;
   let list;
   try {
     list = await listDeletedUsage();
@@ -466,7 +470,11 @@ async function refreshDeletedRecords() {
     return;
   }
   const next = Array.isArray(list) ? list : [];
-  if (deletedRecordsSig(next) !== deletedRecordsSig(deletedRecords)) deletedSlices.clear();
+  if (seq !== deletedListSeq) return;
+  if (deletedRecordsSig(next) !== deletedRecordsSig(deletedRecords)) {
+    deletedRevision += 1;
+    deletedSlices.clear();
+  }
   deletedRecords = next;
 }
 
@@ -475,6 +483,7 @@ async function load() {
   try {
     const [view] = await Promise.all([invoke("accounts_list"), refreshDeletedRecords()]);
     accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
+    syncCursorUsageFilters(accounts);
     const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
     render();
@@ -1258,7 +1267,8 @@ function loadOverview(opts = {}) {
  */
 async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const scope = dayScope();
-  const stillCurrent = () => trayDayMs === scope.start;
+  const revision = deletedRevision;
+  const stillCurrent = () => trayDayMs === scope.start && revision === deletedRevision;
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const peek = dayPeekers(scope);
   const rule = { force, maxAgeMs: viewing ? VIEW_MAX_AGE_MS : null };
@@ -1297,7 +1307,7 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
     jobs.push(
       fetchArchivedAggregate(record.accountId, aggRange)
         .then((entry) => {
-          deletedSlices.set(key, entry);
+          if (revision === deletedRevision) deletedSlices.set(key, entry);
         })
         .catch((error) => {
           fetchErrors.set(record.accountId, resetError(error));
@@ -1712,6 +1722,7 @@ listen("accounts-changed", (event) => {
   const view = event.payload;
   const beforeIds = accounts.map((a) => a.id).join(",");
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
+  syncCursorUsageFilters(accounts);
   const ids = new Set(accounts.map((a) => a.id));
   for (const id of [...remoteRefreshingIds]) {
     if (!ids.has(id)) remoteRefreshingIds.delete(id);
@@ -1731,6 +1742,8 @@ listen("accounts-changed", (event) => {
 });
 // 已删除账户保留的统计数据集合有变化（重新添加同账号后接管 / 备份恢复）：重读列表并重载总览
 listen("usage-archive-changed", () => {
+  deletedRevision += 1;
+  deletedSlices.clear();
   void refreshDeletedRecords().then(() => {
     if (trayTab === "overview") void loadOverview();
   });

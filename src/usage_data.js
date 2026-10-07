@@ -10,15 +10,14 @@ import { invoke, emit } from "./shared.js";
 // Codex 键：scan:${rangeKey}:${home}，rangeKey 为 all 或 today: / day: / range: 同上。
 // Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
-export const USAGE_CACHE_PREFIX = "usage-cache:v4:";
+export const USAGE_CACHE_PREFIX = "usage-cache:v8:";
 export const USAGE_CACHE_EVENT = "usage-cache-changed";
 
-// 旧版缓存一次性清理：聚合口径随版本演进（v3 合并思考等级、v4 小版本号点号归一），
-// 旧条目继续保留只会与新数据混排。
+// 旧版缓存一次性清理：v8 按 Cursor API 额度与按量付费口径过滤，旧统计不能再复用。
 try {
   for (let i = localStorage.length - 1; i >= 0; i -= 1) {
     const k = localStorage.key(i);
-    if (k && (k.startsWith("usage-cache:v2:") || k.startsWith("usage-cache:v3:"))) {
+    if (k && /^usage-cache:v[234567]:/.test(k)) {
       localStorage.removeItem(k);
     }
   }
@@ -33,6 +32,20 @@ const PEEK_SCAN_RANGES = ["7", "30", "all"];
 let ttlMs = DEFAULT_USAGE_TTL_MS;
 const memAgg = new Map();
 const inflight = new Map();
+const accountCacheRevisions = new Map();
+let cursorUsageFilters = new Map();
+
+/** 每次账户列表变化时同步口径；主窗口与托盘都在读取聚合缓存前调用。 */
+export function syncCursorUsageFilters(accounts) {
+  const previous = cursorUsageFilters;
+  cursorUsageFilters = new Map(
+    accounts.filter((a) => a.kind === "cursor").map((a) => [a.id, !!a.ignoreApiModels])
+  );
+  for (const [id, ignore] of cursorUsageFilters) {
+    // 初次加载开启的账户也清掉旧缓存，防止离线保存设置后遗留 API 统计。
+    if (previous.get(id) !== ignore && (previous.has(id) || ignore)) purgeAccountCache(id);
+  }
+}
 
 export function setUsageCacheTtlMs(ms) {
   const n = Number(ms);
@@ -138,10 +151,15 @@ function cacheLoad(key) {
 
 export function getCachedAgg(accountId, rangeKey) {
   const key = `${accountId}:${rangeKey}`;
+  const ignoreApiModels = cursorUsageFilters.get(accountId) || false;
   let entry = memAgg.get(key) || null;
+  if (entry && entry.ignoreApiModels !== ignoreApiModels) {
+    memAgg.delete(key);
+    entry = null;
+  }
   if (!entry) {
     const stored = cacheLoad(`agg:${key}`);
-    if (stored && stored.agg && Array.isArray(stored.agg.models)) {
+    if (stored && stored.ignoreApiModels === ignoreApiModels && stored.agg && Array.isArray(stored.agg.models)) {
       entry = stored;
       memAgg.set(key, entry);
     }
@@ -225,10 +243,14 @@ function withTimeout(promise, label) {
  * 再以带 usageCache 的错误抛出，调用方按「更新失败（仍显示上次数据）」处理。
  */
 export function fetchCursorAggregate(account, rangeKey, { start, end, force, full } = {}) {
+  if (!cursorUsageFilters.has(account.id)) cursorUsageFilters.set(account.id, !!account.ignoreApiModels);
+  const ignoreApiModels = cursorUsageFilters.get(account.id);
+  const revision = accountCacheRevisions.get(account.id) || 0;
   const key = `${account.id}:${rangeKey}`;
   const cached = getCachedAgg(account.id, rangeKey);
   if (!force && !full && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
-  const inflightKey = `agg:${key}`;
+  // 切换时不能复用旧口径的在途请求。
+  const inflightKey = `agg:${key}:api:${ignoreApiModels}:${revision}`;
   if (inflight.has(inflightKey)) return inflight.get(inflightKey);
   const p = withTimeout(
     invoke("cursor_usage_fetch", {
@@ -242,9 +264,13 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force, ful
     "cursor_usage_fetch"
   )
     .then((result) => {
-      const entry = { agg: result.agg, at: Number(result.syncedAt) || Date.now() };
-      memAgg.set(key, entry);
-      cacheStore(`agg:${key}`, entry);
+      const entry = { agg: result.agg, at: Number(result.syncedAt) || Date.now(), ignoreApiModels: !!result.ignoreApiModels };
+      // 旧请求晚于开关变更返回时，不允许覆盖新口径缓存。
+      if (entry.ignoreApiModels === cursorUsageFilters.get(account.id)
+        && revision === (accountCacheRevisions.get(account.id) || 0)) {
+        memAgg.set(key, entry);
+        cacheStore(`agg:${key}`, entry);
+      }
       if (result.syncError) throw attachUsageCache(new Error(result.syncError), entry);
       return entry;
     })
@@ -281,6 +307,13 @@ export function removeDeletedUsage(accountId) {
 /** 修改某个已删除账户保留记录的备注（留空恢复自动备注），返回更新后的记录。 */
 export function setDeletedUsageNote(accountId, note) {
   return invoke("cursor_usage_deleted_set_note", { accountId, note });
+}
+
+/** 编辑已删除账户；removeApiUsage 只执行移除，false 不会恢复已移除的数据。 */
+export async function updateDeletedUsageAccount(accountId, note, removeApiUsage) {
+  const result = await invoke("cursor_usage_deleted_update", { accountId, note, removeApiUsage });
+  if (removeApiUsage) purgeAccountCache(accountId);
+  return result;
 }
 
 /** 修改某个已删除账户保留记录的套餐档位（留空清除为未知），返回更新后的记录。 */
@@ -455,6 +488,8 @@ export const peekClaudeScanSeries = claudeScan.peekSeries;
 export const fetchClaudeScan = claudeScan.fetch;
 
 export function purgeAccountCache(accountId) {
+  // 连续开关后即便又回到原状态，也不能让清理前的在途请求恢复旧统计。
+  accountCacheRevisions.set(accountId, (accountCacheRevisions.get(accountId) || 0) + 1);
   const memPrefix = `${accountId}:`;
   for (const key of [...memAgg.keys()]) {
     if (key.startsWith(memPrefix)) memAgg.delete(key);

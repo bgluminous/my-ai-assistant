@@ -206,7 +206,7 @@ pub async fn backup_export(
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    let usage_archives = usage_archive::export_deleted();
+    let usage_archives = usage_archive::export_deleted()?;
     let usage_count = usage_archives.len();
     let data = json!({
         "settings": settings_value,
@@ -386,6 +386,7 @@ pub async fn backup_import_apply(
             let codex_auth = if kind == "codex" { acc.codex_auth } else { None };
             let entry = Account {
                 id: accounts::new_id(),
+                ignore_api_models: kind == "cursor" && acc.ignore_api_models,
                 kind,
                 note: acc.note,
                 note_auto: acc.note_auto,

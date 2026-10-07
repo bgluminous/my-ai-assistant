@@ -817,6 +817,16 @@
             <textarea id="account-refresh-token" rows="3" spellcheck="false" placeholder="~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期"></textarea>
           </div>
 
+          <div id="account-api-field" class="toggle-group" hidden>
+            <label class="toggle">
+              <input id="account-ignore-api-models" type="checkbox" role="switch" />
+              <span class="toggle-track" aria-hidden="true"></span>
+              <span class="toggle-text">不记录 API 额度用量</span>
+            </label>
+            <p class="muted small">排除套餐内 API 额度用量和超额按量付费记录。开启并保存后清除对应明细及统计，后续同步也不再保存。旧账单需要联网补齐计费信息；关闭后不会还原已清除的数据，再次同步时可能重新获取。</p>
+            <p class="muted small">自有模型临时转扣 API 额度的记录暂无法精确识别。</p>
+          </div>
+
           <p id="account-modal-status" class="status" hidden></p>
         </div>
 
@@ -860,6 +870,20 @@
           <div id="switch-modal-select-field" class="modal-input-field" hidden>
             <label id="switch-modal-select-label" for="switch-modal-select"></label>
             <select id="switch-modal-select"></select>
+          </div>
+          <div id="switch-modal-api-history" class="toggle-group" hidden>
+            <label class="toggle">
+              <input id="switch-modal-api-input" type="checkbox" role="switch" aria-describedby="switch-modal-api-warning-title switch-modal-api-help" />
+              <span class="toggle-track" aria-hidden="true"></span>
+              <span class="toggle-text">保留 API 额度历史记录</span>
+            </label>
+            <div class="api-history-warning" role="note" aria-labelledby="switch-modal-api-warning-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18.6A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-2.4L13.7 3.9a2 2 0 0 0-3.4 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <div>
+                <strong id="switch-modal-api-warning-title"></strong>
+                <p id="switch-modal-api-help"></p>
+              </div>
+            </div>
           </div>
           <div id="switch-steps" class="switch-steps" hidden></div>
           <p id="switch-modal-status" class="status" hidden></p>

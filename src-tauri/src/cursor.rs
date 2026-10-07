@@ -1,5 +1,5 @@
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::http;
@@ -250,12 +250,83 @@ fn parse_timestamp_ms(item: &Value) -> Option<i64> {
     Some(if n.abs() < 1_000_000_000_000 { n.saturating_mul(1000) } else { n })
 }
 
-/// 把单条用量事件解析为计价行；模型缺失归入 "unknown"。
-fn parse_event(item: &Value) -> TokenRow {
+/// 用量接口的计费元数据。不能用模型名 "api"、金额非零或 isTokenBasedCall 单独判断额度池。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsageBilling {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub is_token_based_call: Option<bool>,
+    #[serde(default)]
+    pub cursor_token_fee: Option<f64>,
+}
+
+impl UsageBilling {
+    /// true = 套餐 API 额度 / 超额按量付费；None = 接口未提供足够的计费信息。
+    pub(crate) fn api_usage(&self, model: &str) -> Option<bool> {
+        let normalized = self.kind.trim().to_ascii_uppercase().replace([' ', '-'], "_");
+        let kind = normalized.strip_prefix("USAGE_EVENT_KIND_").unwrap_or(&normalized);
+        match kind {
+            // 按量付费包括 Cursor 自有模型超额后的用量，不能先按模型豁免。
+            "USAGE_BASED" | "ON_DEMAND" => return Some(true),
+            "USER_API_KEY" => return Some(self.cursor_token_fee.is_some_and(|fee| fee > 0.0)),
+            "FREE_CREDIT" | "FREE" | "ERRORED_NOT_CHARGED" | "ABORTED_NOT_CHARGED" => {
+                return Some(false);
+            }
+            _ => {}
+        }
+        if kind != "INCLUDED" && !kind.starts_with("INCLUDED_") {
+            return None;
+        }
+        // 旧制按请求次数的记录不属于按 API 价格扣减的额度。
+        if !self.is_token_based_call? {
+            return Some(false);
+        }
+        if self.cursor_token_fee.is_some_and(|fee| fee > 0.0) {
+            return Some(true);
+        }
+        model_uses_api_pool(model)
+    }
+}
+
+/// Dashboard 尚未返回逐条额度池，套餐内按公开的模型额度归属区分：
+/// https://cursor.com/docs/models-and-pricing
+/// 也用于用户确认的已删除账户旧账单近似清理；不能识别 BYOK 或自有模型超额付费。
+pub(crate) fn model_uses_api_pool(model: &str) -> Option<bool> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() || model == "unknown" || model == "api" {
+        return None;
+    }
+    let matches_model = |name: &str| model == name
+        || model.strip_prefix(name).is_some_and(|rest| rest.starts_with('-'));
+    let cursor_pool = model == "auto"
+        || model == "default"
+        || model.starts_with("cursor-grok-")
+        || ["composer-1.5", "composer-2", "composer-2.5", "grok-4.5", "grok-4.6", "grok-4.7"]
+            .iter().any(|name| matches_model(name));
+    if cursor_pool {
+        Some(false)
+    } else if model.starts_with("composer-") && model != "composer-1" {
+        // 新的自有模型先要求适配，避免按第三方 API 模型误删。
+        None
+    } else {
+        Some(true)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UsageEvent {
+    pub row: TokenRow,
+    pub billing: UsageBilling,
+}
+
+/// 同时保留计价行与计费类别，事件库在落盘前按账户开关筛选。
+pub(crate) fn parse_event(item: &Value) -> UsageEvent {
     let tu = item.get("tokenUsage").cloned().unwrap_or(Value::Null);
     let num = |v: &Value, key: &str| v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0);
     let model = item.get("model").and_then(|x| x.as_str()).unwrap_or("");
-    TokenRow {
+    let row = TokenRow {
         model: if model.is_empty() {
             "unknown".to_string()
         } else {
@@ -267,6 +338,14 @@ fn parse_event(item: &Value) -> TokenRow {
         cache_write: num(&tu, "cacheWriteTokens"),
         actual_cents: num(item, "chargedCents"),
         timestamp_ms: parse_timestamp_ms(item),
+    };
+    UsageEvent {
+        row,
+        billing: UsageBilling {
+            kind: s(item, "kind").unwrap_or_default(),
+            is_token_based_call: item.get("isTokenBasedCall").and_then(Value::as_bool),
+            cursor_token_fee: item.get("cursorTokenFee").and_then(Value::as_f64),
+        },
     }
 }
 
@@ -307,12 +386,12 @@ async fn fetch_events_page(
     let total = v
         .get("totalUsageEventsCount")
         .and_then(|x| x.as_u64())
-        .unwrap_or(0);
+        .ok_or_else(|| "invalid_usage_response".to_string())?;
     let items = v
         .get("usageEventsDisplay")
         .and_then(|x| x.as_array())
         .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| "invalid_usage_response".to_string())?;
     Ok((items, total))
 }
 
@@ -323,26 +402,29 @@ pub(crate) async fn fetch_all_events(
     token: &str,
     start: Option<i64>,
     end: Option<i64>,
-) -> Result<Vec<TokenRow>, String> {
+) -> Result<Vec<UsageEvent>, String> {
     let client = http::client();
     let page_size: u32 = 1000;
     let mut page: u32 = 1;
-    let mut rows: Vec<TokenRow> = Vec::new();
+    let mut rows: Vec<UsageEvent> = Vec::new();
     loop {
         let (items, total) =
             fetch_events_page(&client, token, page, page_size, start, end).await?;
         if items.is_empty() {
+            if (rows.len() as u64) < total {
+                return Err("incomplete_usage_response".into());
+            }
             break;
         }
         for item in &items {
             rows.push(parse_event(item));
         }
-        if (page as u64) * (page_size as u64) >= total {
+        if (rows.len() as u64) >= total {
             break;
         }
         page += 1;
         if page > 200 {
-            break;
+            return Err("usage_page_limit_exceeded".into());
         }
     }
     Ok(rows)

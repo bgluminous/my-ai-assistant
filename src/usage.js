@@ -29,7 +29,7 @@ import {
   fetchArchivedAggregate,
   listDeletedUsage,
   removeDeletedUsage,
-  setDeletedUsageNote,
+  updateDeletedUsageAccount,
   setDeletedUsageMembership,
   fetchCodexScan,
   fetchClaudeScan,
@@ -57,7 +57,7 @@ import {
   refreshAccounts,
   getRefreshIntervalMinutes,
   confirmDialog,
-  promptDialog,
+  editDeletedAccountDialog,
   selectDialog,
 } from "./accounts.js";
 import { membershipLabel, planMonthlyUsd, cursorPlanChoices, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
@@ -77,7 +77,7 @@ import { openRawEvents } from "./raw_events.js";
 // 多日 range:首日_末日、全部 "0"。不超过两天的区间按小时柱图（后端按区间内日期给出 hourly），
 // 其余按日柱图，周 / 月按完整日历区间列轴（未到的日子留空）。所有柱图横轴统一从左到右由旧到新。
 //
-// 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，键前缀 usage-cache:v4:）。
+// 缓存策略：与托盘总览共用 usage_data.js（内存 + localStorage，缓存键前缀由该模块统一维护）。
 // 打开视图时先用缓存（含过期缓存）立即渲染，再在后台拉取最新数据原地刷新（stale-while-revalidate）。
 // Cursor 账户的数据源是后端按账户维护的本地用量事件库：各跨度都由后端从事件库切片，事件库在
 // 有效期内只切片不联网（切换跨度不再联网），过期才增量同步；「刷新」按钮强制全量重拉。
@@ -124,6 +124,7 @@ let accountIdsSig = "";
 const overviewResults = new Map(); // accountId -> { state, agg?, error? }
 let deletedRecords = []; // 已删除账户保留的统计数据记录（后端 cursor_usage_deleted_list）
 let deletedDirty = true; // 账户增删后置脏，下次总览加载时重新拉取已删除记录列表
+let deletedListSeq = 0;
 // accountId -> { at: lastRefreshAt, token }：检测「刚刷新过」（触发用量预取）与「凭据刚更换」（作废旧缓存）
 const seenAccounts = new Map();
 let seenInitialized = false; // 首批账户快照只登记不预取（启动时账户数据来自磁盘，并非刚刷新）
@@ -1177,12 +1178,15 @@ function fetchDeletedAggregate(record) {
  * 调用方不必再继续原视图的加载。
  */
 async function refreshDeletedRecords() {
+  const seq = ++deletedListSeq;
   try {
     const list = await listDeletedUsage();
+    if (seq !== deletedListSeq) return false;
     deletedRecords = Array.isArray(list) ? list : [];
   } catch (error) {
     console.error("读取已删除账户统计数据列表失败：", error);
   }
+  if (seq !== deletedListSeq) return false;
   deletedDirty = false;
   const before = selectionKey();
   rebuildChips();
@@ -1229,29 +1233,39 @@ async function onDeleteUsageData(record) {
 }
 
 /**
- * 总览行「编辑备注」：修改已删除账户保留记录的备注。非空为手填备注（显示时优先于用户名 / 邮箱），
- * 留空恢复自动备注（邮箱，其次账号 ID）。保存后就地替换记录并重绘账单表与合并结果
- * （名称只影响展示，数据不变，不重新切片）。
+ * 总览行「编辑账户」：修改备注，并可单向关闭 API 历史记录；清理后重新切片统计。
  */
-async function onEditDeletedNote(record) {
+async function onEditDeletedAccount(record) {
   const current = record.noteAuto === false ? String(record.note || "").trim() : "";
-  const value = await promptDialog({
-    title: "编辑备注",
-    body: `修改已删除账户“${deletedLabel(record)}”在统计页的显示名。留空则恢复自动备注（邮箱，其次账号 ID）。`,
-    confirmText: "保存",
-    input: { label: "备注", value: current, placeholder: "给账户起个名字，便于区分（选填）" },
+  const value = await editDeletedAccountDialog({
+    label: deletedLabel(record),
+    note: current,
+    ignoreApiModels: !!record.ignoreApiModels,
+    apiRemovalApproximate: !!record.apiRemovalApproximate,
+    apiRemovalError: record.apiRemovalError,
   });
-  if (value == null || value.trim() === current) return;
-  let updated;
+  if (value == null || (value.note.trim() === current && !value.removeApiUsage)) return;
+  let result;
   try {
-    updated = await setDeletedUsageNote(record.accountId, value);
+    result = await updateDeletedUsageAccount(record.accountId, value.note, value.removeApiUsage);
   } catch (error) {
-    setStatus("bad", `修改备注失败：${resetError(error)}`);
+    setStatus("bad", `保存已删除账户失败：${resetError(error)}`);
     return;
   }
+  const updated = result.record;
   deletedRecords = deletedRecords.map((r) => (r.accountId === updated.accountId ? updated : r));
-  toast("ok", `备注已保存，现显示为“${deletedLabel(updated)}”。`, { key: "usage-deleted" });
+  if (value.removeApiUsage) overviewResults.delete(record.accountId);
+  const message = value.removeApiUsage
+    ? `“${deletedLabel(updated)}”已${updated.apiRemovalApproximate ? "近似清理" : "移除"} ${result.removedEvents} 条 API 历史记录，不能重新开启。`
+    : `已保存“${deletedLabel(updated)}”。`;
+  toast("ok", message, { key: "usage-deleted" });
   if (!isMergedView() || !activeSources().includeDeleted) return;
+  if (value.removeApiUsage) {
+    renderedAt = 0;
+    lastAttemptAt = 0;
+    if (panelVisible) loadView(false);
+    return;
+  }
   renderOverviewTable();
   renderOverviewMerged();
 }
@@ -1583,9 +1597,9 @@ function renderOverviewTable() {
           },
           {
             icon: "edit",
-            label: "编辑备注",
-            title: "编辑备注：修改该已删除账户在统计页的显示名（留空恢复自动备注）",
-            onClick: () => void onEditDeletedNote(record),
+            label: "编辑账户",
+            title: "编辑账户：修改备注，或永久移除该已删除账户的 API 历史记录",
+            onClick: () => void onEditDeletedAccount(record),
           },
           {
             icon: "plan",
@@ -2135,8 +2149,8 @@ function scheduleRerenderFromCache() {
 
 /**
  * 对比上次账户快照：lastRefreshAt 变化且非 0 的为「状态刚刷新过」（触发用量预取）；
- * Cursor 账户 token 变化的为「凭据刚更换」（旧用量缓存作废；Cursor 的 token 不会自动轮换，
- * 变化只可能来自用户编辑）。首批快照只登记（启动时账户数据来自磁盘，并非刚刷新）。
+ * Cursor 账户的 API 开关变化时重算统计；token 变化的为「凭据刚更换」，旧用量缓存作废
+ * （Cursor 的 token 不会自动轮换，变化只可能来自用户编辑）。首批快照只登记。
  */
 function diffAccounts(list) {
   const ids = new Set(list.map((a) => a.id));
@@ -2145,16 +2159,18 @@ function diffAccounts(list) {
   }
   const refreshed = [];
   const rekeyed = [];
+  const refiltered = [];
   for (const a of list) {
     const at = Number(a.lastRefreshAt) || 0;
     const prev = seenAccounts.get(a.id);
-    seenAccounts.set(a.id, { at, token: a.token });
+    seenAccounts.set(a.id, { at, token: a.token, ignoreApiModels: !!a.ignoreApiModels });
     if (!seenInitialized) continue;
     if (at > 0 && at !== (prev && prev.at)) refreshed.push(a);
     if (prev && a.kind === "cursor" && a.token !== prev.token) rekeyed.push(a);
+    if (prev && a.kind === "cursor" && !!a.ignoreApiModels !== prev.ignoreApiModels) refiltered.push(a);
   }
   seenInitialized = true;
-  return { refreshed, rekeyed };
+  return { refreshed, rekeyed, refiltered };
 }
 
 /**
@@ -2413,15 +2429,16 @@ export function initUsage() {
       // 含已删除账户的合并视图会在随后的加载里重读列表；其它视图这里直接刷新，让「已删除」chip 及时出现
       if (!isMergedView() || !activeSources().includeDeleted) void refreshDeletedRecords();
     }
-    const { refreshed, rekeyed } = diffAccounts(list);
-    // 刚更换过凭据的账户：旧 token 统计出的用量缓存与总览内存结果一并作废
+    const { refreshed, rekeyed, refiltered } = diffAccounts(list);
+    // 更换凭据或统计开关的账户：用量缓存与总览内存结果一并作废
     // （只在变化那一次做，不反复广播），重新加载时不再拿旧数据垫底
-    for (const a of rekeyed) {
-      purgeAccountCache(a.id);
+    for (const a of [...rekeyed, ...refiltered]) {
       overviewResults.delete(a.id);
     }
-    // 账户增删 / 换凭据是结构性变化，结果区视为过期
-    if (idsChanged || rekeyed.length) {
+    // 开关变化的缓存由 usage_data 在同步账户列表时清理，托盘共用同一入口。
+    for (const a of rekeyed) purgeAccountCache(a.id);
+    // 账户增删 / 换凭据 / 切换统计口径时，结果区视为过期
+    if (idsChanged || rekeyed.length || refiltered.length) {
       renderedAt = 0;
       lastAttemptAt = 0;
     }
@@ -2433,6 +2450,16 @@ export function initUsage() {
     if (selection !== before) {
       applyVisibility();
       if (panelVisible) loadView(false);
+      return;
+    }
+    // 开关变化立即重载并作废旧口径的在途结果；隐藏期间也避免旧请求重新填回总览。
+    if (refiltered.length) {
+      if (panelVisible) loadView(false);
+      else {
+        loadSeq += 1;
+        loading = false;
+        setLoadingHint(false);
+      }
       return;
     }
     if (!panelVisible || loading) return;
@@ -2484,15 +2511,22 @@ export function initUsage() {
   // 直接重新加载（作废在途结果；在途请求由 usage_data 的 in-flight 表去重，不会重复联网）
   listen("usage-archive-changed", () => {
     deletedDirty = true;
+    // API 历史可能刚被清理，旧切片不能继续作为加载中的展示数据。
+    for (const record of deletedRecords) overviewResults.delete(record.accountId);
     // 含已删除账户的合并视图当场作废重载（加载时会重读记录列表并重建 chip）；
     // 其它视图只刷新列表让「已删除」chip 及时出现或消失，切回时 applyVisibility 会清空 renderedFor 自然重载
     if (!isMergedView() || !activeSources().includeDeleted) {
       void refreshDeletedRecords();
       return;
     }
+    loadSeq += 1;
     renderedAt = 0;
     lastAttemptAt = 0;
     if (panelVisible) loadView(false);
+    else {
+      loading = false;
+      setLoadingHint(false);
+    }
   }).catch(() => {
     /* 非 Tauri 环境无事件桥 */
   });

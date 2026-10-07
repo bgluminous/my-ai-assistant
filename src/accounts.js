@@ -25,7 +25,7 @@ import {
   cursorIdentity,
   compareAccounts,
 } from "./account_format.js";
-import { clearCursorLocalData } from "./usage_data.js";
+import { clearCursorLocalData, syncCursorUsageFilters } from "./usage_data.js";
 
 // 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
@@ -674,6 +674,7 @@ function updateRow(id) {
 
 function applyView(view) {
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
+  syncCursorUsageFilters(accounts);
   const n = Number(view && view.intervalMinutes);
   if (Number.isFinite(n)) intervalMinutes = n;
   el("#accounts-interval").value = String(intervalMinutes);
@@ -962,6 +963,36 @@ export async function promptDialog({ title, body, confirmText, input }) {
   return value;
 }
 
+/** 已删除账户只允许关闭并移除 API 历史；保存后不能再开启，备注仍可编辑。 */
+export async function editDeletedAccountDialog({ label, note, ignoreApiModels, apiRemovalApproximate, apiRemovalError }) {
+  if (switchModal.phase !== "hidden") return null;
+  const ok = await switchModal.toConfirm({
+    title: "编辑已删除账户",
+    body: `编辑“${label}”的备注及保留的历史记录。`,
+    confirmText: "保存",
+    danger: false,
+    input: { label: "备注", value: note, placeholder: "留空恢复自动备注" },
+    apiHistory: {
+      checked: !ignoreApiModels,
+      disabled: !!ignoreApiModels || !!apiRemovalError,
+      warningTitle: ignoreApiModels ? "警告：API 历史记录已永久移除" : "警告：清理后无法恢复",
+      description: ignoreApiModels
+        ? apiRemovalApproximate
+          ? "已按模型归属近似移除 API 历史记录，不能重新开启或恢复。"
+          : "API 额度及按量付费历史记录已移除，不能重新开启或恢复。"
+        : apiRemovalError || (apiRemovalApproximate
+          ? "关闭并保存后，永久移除历史明细及统计，不能重新开启。旧账单按模型归属近似清理：移除 Claude、GPT 等第三方模型，保留 Auto、Composer 2/2.5、Cursor Grok 等记录；可能误删自配 API Key 用量，或漏掉自有模型超额付费。"
+          : "关闭并保存后，永久移除套餐内 API 额度和超额按量付费的历史明细及统计。保存后不能重新开启；自有模型临时转扣 API 额度的记录暂无法精确识别。"),
+    },
+  });
+  const result = ok ? {
+    note: switchModal.inputValue(),
+    removeApiUsage: !ignoreApiModels && !apiRemovalError && !el("#switch-modal-api-input").checked,
+  } : null;
+  switchModal.close();
+  return result;
+}
+
 /**
  * 供其它页面复用的下拉选择弹窗（如用量统计页为已删除账户指定套餐档位）。
  * select = { label, value, options: [{ value, label }] }。确认返回所选项的 value；
@@ -1002,6 +1033,7 @@ const switchModal = {
     this.setOption(null);
     this.setInput(null);
     this.setSelect(null);
+    this.setApiHistory(null);
     const steps = el("#switch-steps");
     steps.hidden = true;
     steps.replaceChildren();
@@ -1022,7 +1054,7 @@ const switchModal = {
    * select = { label, value, options } 时显示一个下拉选择（如指定已删除账户的套餐档位），
    * 焦点落在下拉框，确认后经 selectValue() 读取。
    */
-  toConfirm({ title, body, confirmText, danger, option, input, select }) {
+  toConfirm({ title, body, confirmText, danger, option, input, select, apiHistory }) {
     return new Promise((resolve) => {
       this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
@@ -1032,6 +1064,7 @@ const switchModal = {
       this.setOption(option || null);
       this.setInput(input || null);
       this.setSelect(select || null);
+      this.setApiHistory(apiHistory || null);
       el("#switch-steps").hidden = true;
       el("#switch-modal-status").hidden = true;
       el("#switch-modal .modal-foot").hidden = false;
@@ -1123,12 +1156,24 @@ const switchModal = {
     return !el("#switch-modal-option").hidden && el("#switch-modal-option-input").checked;
   },
 
+  setApiHistory(option) {
+    const box = el("#switch-modal-api-history");
+    const input = el("#switch-modal-api-input");
+    box.hidden = !option;
+    el("#switch-modal").classList.toggle("has-api-history", !!option);
+    input.checked = !!option?.checked;
+    input.disabled = !!option?.disabled;
+    el("#switch-modal-api-warning-title").textContent = option?.warningTitle || "";
+    el("#switch-modal-api-help").textContent = option?.description || "";
+  },
+
   /** 渲染步骤列表（全部待办）并进入执行阶段，期间不可关闭。 */
   toSteps(labels) {
     el("#switch-modal-body").hidden = true;
     this.setOption(null);
     this.setInput(null);
     this.setSelect(null);
+    this.setApiHistory(null);
     el("#switch-modal .modal-foot").hidden = true;
     const box = el("#switch-steps");
     box.replaceChildren(
@@ -1185,6 +1230,7 @@ const switchModal = {
     this.setOption(null);
     this.setInput(null);
     this.setSelect(null);
+    this.setApiHistory(null);
     const status = el("#switch-modal-status");
     status.hidden = false;
     status.className = `status ${ok ? "ok" : "bad"}`;
@@ -1250,6 +1296,7 @@ const switchModal = {
     this.setOption(null);
     this.setInput(null);
     this.setSelect(null);
+    this.setApiHistory(null);
     el("#switch-steps").hidden = true;
     el("#switch-modal-status").hidden = true;
     el("#switch-alt").hidden = true;
@@ -1808,6 +1855,7 @@ function setModalKind(kind) {
   }
   el("#account-token").placeholder = TOKEN_PLACEHOLDERS[modalKind];
   el("#account-refresh-field").hidden = modalKind === "cursor";
+  el("#account-api-field").hidden = modalKind !== "cursor" || editingId == null;
   el("#account-refresh-token").placeholder =
     modalKind === "claude"
       ? "~/.claude/.credentials.json 里的 refreshToken，填写后 Token 过期可自动续期"
@@ -1823,6 +1871,7 @@ function openModal(account, presetKind) {
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
+  el("#account-ignore-api-models").checked = !!(account && account.ignoreApiModels);
   el("#account-oauth-code").value = "";
   setModalKind(account ? account.kind : presetKind || "cursor");
   // 编辑时不允许切换账户类型
@@ -1880,6 +1929,7 @@ async function onSave() {
   }
   const note = el("#account-note").value.trim();
   const refreshToken = modalKind !== "cursor" ? el("#account-refresh-token").value.trim() || null : null;
+  const ignoreApiModels = modalKind === "cursor" && el("#account-ignore-api-models").checked;
   const isEdit = editingId != null;
   const id = editingId;
   const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
@@ -1888,7 +1938,7 @@ async function onSave() {
   setModalStatus("", "保存中…");
   try {
     const view = isEdit
-      ? await invoke("accounts_update", { id, note, token, refreshToken })
+      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels })
       : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
     applyView(view);
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
