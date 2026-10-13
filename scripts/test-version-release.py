@@ -16,8 +16,9 @@ def fake_gh(args):
     state_path = Path(os.environ['FAKE_GH_STATE'])
     state = json.loads(state_path.read_text(encoding='utf-8'))
     state['calls'].append(args)
-    if args[0] == 'api' and '/releases/tags/' in args[1]:
-        assert args[-2:] == ['--jq', '[.id, .draft] | @tsv']
+    if args[:2] == ['release', 'view']:
+        assert args[2] == os.environ['TAG']
+        assert args[-4:] == ['--json', 'databaseId,isDraft', '--jq', '[.databaseId, .isDraft] | @tsv']
         print('7\t' + str(state['draft']).lower())
     elif args[:2] == ['api', '--paginate']:
         assert args[-2:] == ['--jq', '.[] | [.name, .state, .size, .digest] | @tsv']
@@ -203,7 +204,8 @@ printf '%s\\n' "$GITHUB_RELEASE_TAG" "$GITHUB_RELEASE_ASSET_NAME" "$RELEASE_PLAT
         self.upload_fixture()
         self.run_sh('ci/upload-release-assets.sh', 'app.exe')
         state = json.loads((self.work / 'gh-state.json').read_text(encoding="utf-8"))
-        self.assertTrue(all(call[0] == 'api' for call in state['calls']))
+        self.assertEqual(state['calls'][0][:2], ['release', 'view'])
+        self.assertTrue(all(call[0] == 'api' for call in state['calls'][1:]))
 
     def test_conflicting_asset_is_never_replaced(self):
         state = self.upload_fixture()
@@ -212,7 +214,8 @@ printf '%s\\n' "$GITHUB_RELEASE_TAG" "$GITHUB_RELEASE_ASSET_NAME" "$RELEASE_PLAT
         result = self.run_sh('ci/upload-release-assets.sh', 'app.exe', expected=2)
         self.assertIn('E_ASSET_DIGEST_CONFLICT', result.stderr)
         state = json.loads((self.work / 'gh-state.json').read_text(encoding="utf-8"))
-        self.assertTrue(all(call[0] == 'api' for call in state['calls']))
+        self.assertEqual(state['calls'][0][:2], ['release', 'view'])
+        self.assertTrue(all(call[0] == 'api' for call in state['calls'][1:]))
 
     def test_published_release_is_never_modified(self):
         self.upload_fixture(draft=False)

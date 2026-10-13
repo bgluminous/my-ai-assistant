@@ -11,7 +11,8 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/maa-assets.XXXXXX") || fail E_TEMP
 trap 'rm -rf "$tmp"' 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
-gh api "repos/$GH_REPO/releases/tags/$TAG" --jq '[.id, .draft] | @tsv' > "$tmp/release.tsv"
+# GitHub's /releases/tags/:tag endpoint omits drafts; use the same lookup as prepare.
+gh release view "$TAG" --json databaseId,isDraft --jq '[.databaseId, .isDraft] | @tsv' > "$tmp/release.tsv"
 IFS="$(printf ' \t\r')" read -r release_id draft < "$tmp/release.tsv"
 [ "$draft" = true ] || fail E_RELEASE_ALREADY_PUBLISHED
 case "$release_id" in ''|*[!0-9]*) fail E_RELEASE_ID ;; esac
