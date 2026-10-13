@@ -121,7 +121,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("AI 助手 · 用量与费用")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => main_window::show(app),
-            "quit" => app.exit(0),
+            "quit" if !crate::operations::paused() => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {

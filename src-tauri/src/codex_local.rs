@@ -541,12 +541,14 @@ fn view(cfg: &CodexClientConfig) -> CodexClientView {
 
 #[tauri::command]
 pub fn codex_client_get() -> Result<CodexClientView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
 pub fn codex_client_set(exe_path: String) -> Result<CodexClientView, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("codex_exe_invalid".into());
@@ -571,6 +573,7 @@ pub fn codex_client_detect() -> DetectResult {
 
 #[tauri::command]
 pub async fn codex_client_status() -> Result<ClientStatus, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -583,6 +586,7 @@ pub async fn codex_client_status() -> Result<ClientStatus, String> {
 
 #[tauri::command]
 pub async fn codex_client_close() -> Result<CloseResult, String> {
+    let _operation = crate::operations::begin()?;
     let closed = tauri::async_runtime::spawn_blocking(close_desktop)
         .await
         .map_err(|e| e.to_string())?;
@@ -591,6 +595,7 @@ pub async fn codex_client_close() -> Result<CloseResult, String> {
 
 #[tauri::command]
 pub fn codex_client_launch() -> Result<LaunchResult, String> {
+    let _operation = crate::operations::begin()?;
     Ok(LaunchResult {
         launched: launch_desktop(),
     })
@@ -600,6 +605,7 @@ pub fn codex_client_launch() -> Result<LaunchResult, String> {
 /// 写文件要求客户端已关闭（关闭由 codex_client_close 单独负责），与 Cursor 切号一致。
 #[tauri::command]
 pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }
@@ -741,6 +747,8 @@ pub fn start_local_sync(app: AppHandle) {
         let mut last_check = std::time::Instant::now();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if crate::operations::required() { continue; }
+            let Ok(_operation) = crate::operations::begin() else { continue; };
             let interval = std::time::Duration::from_secs(u64::from(settings::local_sync_minutes()) * 60);
             if last_check.elapsed() < interval {
                 continue;
@@ -786,6 +794,7 @@ pub fn start_local_sync(app: AppHandle) {
 /// 读取本机同步间隔（分钟）。
 #[tauri::command]
 pub fn local_sync_get() -> Result<u32, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     Ok(settings::local_sync_minutes())
 }
@@ -793,6 +802,7 @@ pub fn local_sync_get() -> Result<u32, String> {
 /// 设置本机同步间隔（分钟），只接受设置弹窗提供的几档。
 #[tauri::command]
 pub fn local_sync_set(minutes: u32) -> Result<u32, String> {
+    let _operation = crate::operations::begin()?;
     if !settings::LOCAL_SYNC_CHOICES.contains(&minutes) {
         return Err("invalid_interval".into());
     }
@@ -883,6 +893,7 @@ pub(crate) fn logged_out_auth_value(existing: &Value) -> Option<Value> {
 /// 托管的账户及其凭据副本不受影响。
 #[tauri::command]
 pub async fn codex_logout_local() -> Result<LogoutResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }
@@ -942,6 +953,7 @@ pub async fn codex_logout_local() -> Result<LogoutResult, String> {
 ///（缺 id_token / access_token / refresh_token）时报 codex_auth_incomplete。
 #[tauri::command]
 pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }

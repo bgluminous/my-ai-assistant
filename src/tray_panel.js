@@ -1,9 +1,11 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
 import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
+import { updatePresentation } from "./update_status.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
   USAGE_CACHE_ORIGIN,
+  CODEX_USAGE_CHANGED_EVENT,
   DEFAULT_USAGE_TTL_MS,
   setUsageCacheTtlMs,
   syncCursorUsageFilters,
@@ -38,12 +40,28 @@ import {
 // 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
 
 let accounts = [];
+let updateRevision = -1;
+function updateNotice(view) {
+  if (!view || view.revision < updateRevision) return;
+  updateRevision = view.revision;
+  const ui = updatePresentation(view);
+  const notice = el("#tray-update-notice");
+  notice.hidden = !ui.failed && !view.latestVersion && !ui.paused;
+  notice.textContent = view.forceUpdate ? "需要更新 · 打开主窗口处理" : ui.paused ? "正在准备安装更新" : ui.failed ? "更新失败 · 打开主窗口重试" : `新版本 ${view.latestVersion} · 查看`;
+  notice.title = ui.text;
+  for (const node of document.querySelectorAll(".tray-tabs, #tray-list, #tray-overview, #tray-modal")) node.inert = view.forceUpdate || ui.paused;
+  el("#tray-refresh").disabled = view.forceUpdate || ui.paused;
+}
+el("#tray-update-notice").addEventListener("click", () => { void invoke("tray_open_main"); });
+void listen("app-update-state", (event) => updateNotice(event.payload))
+  .then(() => invoke("app_update_status")).then(updateNotice).catch(() => {});
 // 已删除账户保留的统计数据记录（后端 cursor_usage_deleted_list），总览与主窗口用量页同口径计入
 let deletedRecords = [];
 // 已删除账户按统计日的本地切片：`${accountId}:${aggKey}` → { agg, at }。保留的数据不再变化，
 // 切过一次的日子直接复用；记录集合变化（接管 / 恢复 / 清理）时整体丢弃
 const deletedSlices = new Map();
 let deletedRevision = 0;
+let codexViewRevision = 0;
 let deletedListSeq = 0;
 let refreshing = false;
 let switching = false;
@@ -1196,7 +1214,7 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
       modelSource: { id, label: name, models: modelsOnDay(agg, ymd, hit.rangeKey) },
     });
   };
-  pushScanEntry("local", "本地 ChatGPT", peek.scan(""), peek.scanSeries(""));
+  pushScanEntry("local", "ChatGPT", peek.scan(""), peek.scanSeries(""));
   pushScanEntry("local-claude", "本地 Claude", peek.claude(""), peek.claudeSeries(""));
 
   entries.sort((a, b) => b.row.tokens - a.row.tokens);
@@ -1220,7 +1238,7 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
   const sources = [
     ...cursorAccounts.map((a) => [a.id, trayAccountLabel(a)]),
     ...deletedRecords.map((record) => [record.accountId, deletedAccountLabel(record)]),
-    ["local", "本地 ChatGPT"],
+    ["local", "ChatGPT"],
     ["local-claude", "本地 Claude"],
   ];
   for (const [id, name] of sources) {
@@ -1268,7 +1286,8 @@ function loadOverview(opts = {}) {
 async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const scope = dayScope();
   const revision = deletedRevision;
-  const stillCurrent = () => trayDayMs === scope.start && revision === deletedRevision;
+  const gptRevision = codexViewRevision;
+  const stillCurrent = () => trayDayMs === scope.start && revision === deletedRevision && gptRevision === codexViewRevision;
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const peek = dayPeekers(scope);
   const rule = { force, maxAgeMs: viewing ? VIEW_MAX_AGE_MS : null };
@@ -1762,6 +1781,10 @@ listen("account-refreshing", (event) => {
   /* 非 Tauri 环境无事件桥 */
 });
 let usageCacheTimer = null;
+window.addEventListener(CODEX_USAGE_CHANGED_EVENT, () => {
+  codexViewRevision += 1;
+  if (trayTab === "overview") void loadOverview();
+});
 function scheduleOverviewFromCache(key) {
   forgetUsageCacheFromEvent(key);
   if (trayTab !== "overview") return;

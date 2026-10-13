@@ -6,6 +6,7 @@ import { initPricing } from "./pricing.js";
 import { initProxy } from "./proxy.js";
 import { initSettings } from "./settings.js";
 import { initAbout } from "./about.js";
+import { initAppUpdate } from "./app_update.js";
 import { initRawEvents } from "./raw_events.js";
 
 function setupTheme() {
@@ -46,6 +47,7 @@ function setupTabs() {
       event.preventDefault();
       const dir = event.key === "ArrowRight" ? 1 : -1;
       const next = tabs[(index + dir + tabs.length) % tabs.length];
+      if (next.disabled) return;
       select(next.dataset.panel);
       next.focus();
     });
@@ -83,5 +85,6 @@ initPricing();
 initProxy();
 initSettings();
 initAbout();
+void initAppUpdate();
 // 两帧 rAF 确保浏览器完成首次布局与绘制后才显示窗口
 requestAnimationFrame(() => requestAnimationFrame(() => { void revealWindow(); }));

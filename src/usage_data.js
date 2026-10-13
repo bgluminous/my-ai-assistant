@@ -1,4 +1,4 @@
-import { invoke, emit } from "./shared.js";
+import { invoke, emit, listen } from "./shared.js";
 
 // 主窗口用量页与托盘总览共用的聚合缓存。
 // 内存 Map 仅本 WebView 有效；localStorage 同 origin 下主窗口 / 托盘互通。
@@ -7,7 +7,7 @@ import { invoke, emit } from "./shared.js";
 //   多日区间，按日历区间命名）；托盘按日探查时还会回退到 7 / 30 等旧版天数键。
 //   Cursor 的数据源是后端按账户维护的本地用量事件库：任何区间都由后端从事件库切片，只有事件库
 //   过期 / 强制刷新时才联网同步（增量），切换区间不再联网；缓存条目的 at 取事件库的同步时间。
-// Codex 键：scan:${rangeKey}:${home}，rangeKey 为 all 或 today: / day: / range: 同上。
+// Codex 键：scan2:${rangeKey}:${home}:${deviceId}，空 deviceId 表示全部设备。
 // Claude 键：cscan:${rangeKey}:${home}，rangeKey 同 Codex（本地 Claude Code 会话扫描）。
 
 export const USAGE_CACHE_PREFIX = "usage-cache:v8:";
@@ -389,15 +389,15 @@ function scanRangeKey(days, sinceMs, untilMs) {
 }
 
 /**
- * 本地会话扫描来源（本地 Codex / Claude Code）的缓存读取、按日探查与拉取。两者只差内存表、
- * 存储键前缀（scan: / cscan:）与后端命令名，其余逻辑完全一致，由此工厂各生成一组函数。
+ * Codex 存档 / Claude Code 本地扫描的缓存读取、按日探查与拉取。
+ * Codex 额外区分设备筛选，并在同步或清理后只读存档，由同一工厂保留共享缓存行为。
  */
-function makeScanSource({ prefix, command }) {
+function makeScanSource({ prefix, command, codex = false }) {
   const mem = new Map();
   const hasData = (entry) => !!(entry.scan && entry.scan.aggregate);
 
-  const getCached = (rangeKey, home) => {
-    const key = `${rangeKey}:${home || ""}`;
+  const getCached = (rangeKey, home, deviceId) => {
+    const key = `${rangeKey}:${home || ""}${codex ? `:${deviceId || ""}` : ""}`;
     let entry = mem.get(key) || null;
     if (!entry) {
       const stored = cacheLoad(`${prefix}${key}`);
@@ -437,33 +437,39 @@ function makeScanSource({ prefix, command }) {
     return peekForDay(ymd, h);
   };
 
-  const fetch = ({ key: explicitKey, days, sinceMs, untilMs, home, force } = {}) => {
+  const fetch = ({ key: explicitKey, days, sinceMs, untilMs, home, deviceId, force } = {}) => {
     const h = home || "";
     const rangeKey = explicitKey || scanRangeKey(days, sinceMs, untilMs);
-    const key = `${rangeKey}:${h}`;
-    const cached = getCached(rangeKey, h);
+    const key = `${rangeKey}:${h}${codex ? `:${deviceId || ""}` : ""}`;
+    const cached = getCached(rangeKey, h, deviceId);
     if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
     const inflightKey = `${prefix}${key}`;
     if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+    const revision = codexRevision;
+    if (codex && force) codexArchiveOnly = false;
+    const scanCommand = codex && codexArchiveOnly ? "codex_usage_query" : command;
     const p = withTimeout(
-      invoke(command, {
+      invoke(scanCommand, {
         days: days == null || days === 0 ? null : days,
         sinceMs: sinceMs ?? null,
         untilMs: untilMs ?? null,
         home: h || null,
+        ...(codex ? { deviceId: deviceId || null } : {}),
       }),
       command
     )
       .then((scan) => {
+        if (codex && revision !== codexRevision) throw new Error("sync_cancelled");
         const entry = { scan, at: Date.now() };
         mem.set(key, entry);
         cacheStore(`${prefix}${key}`, entry);
         return entry;
       })
       .catch((error) => {
+        if (codex && revision !== codexRevision) throw new Error("sync_cancelled");
         throw attachUsageCache(error, cached);
       })
-      .finally(() => inflight.delete(inflightKey));
+      .finally(() => { if (inflight.get(inflightKey) === p) inflight.delete(inflightKey); });
     inflight.set(inflightKey, p);
     return p;
   };
@@ -471,9 +477,29 @@ function makeScanSource({ prefix, command }) {
   return { mem, prefix, getCached, peekForDay, peekForPastDay, peekSeries, fetch };
 }
 
-const codexScan = makeScanSource({ prefix: "scan:", command: "codex_scan_sessions" });
+let codexRevision = 0;
+let codexArchiveOnly = false;
+export const CODEX_USAGE_CHANGED_EVENT = "codex-usage-view-changed";
+const codexScan = makeScanSource({ prefix: "scan2:", command: "codex_scan_sessions", codex: true });
 const claudeScan = makeScanSource({ prefix: "cscan:", command: "claude_scan_sessions" });
 const SCAN_SOURCES = [codexScan, claudeScan];
+
+function invalidateCodex(reason) {
+  codexRevision += 1;
+  codexArchiveOnly = reason === "clear" || reason === "sync";
+  codexScan.mem.clear();
+  for (const key of [...inflight.keys()]) if (key.startsWith("scan2:")) inflight.delete(key);
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith(`${USAGE_CACHE_PREFIX}scan:`) || key.startsWith(`${USAGE_CACHE_PREFIX}scan2:`))) localStorage.removeItem(key);
+    }
+  } catch { /* 缓存不可用不影响存档 */ }
+  window.dispatchEvent(new CustomEvent(CODEX_USAGE_CHANGED_EVENT, { detail: { reason } }));
+}
+// 启动时不复用上次进程的 GPT 汇总，确保服务器配置/备份变更后不会短暂混入旧空间。
+invalidateCodex("startup");
+listen("codex-usage-changed", (e) => invalidateCodex(e.payload && e.payload.reason)).catch(() => {});
 
 export const getCachedScan = codexScan.getCached;
 export const peekScanForDay = codexScan.peekForDay;

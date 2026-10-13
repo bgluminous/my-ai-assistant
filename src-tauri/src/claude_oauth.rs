@@ -65,6 +65,7 @@ pub struct OauthBegin {
 /// 生成 PKCE 授权地址并尝试打开系统浏览器。授权上下文保存在内存，等待 finish 消费。
 #[tauri::command]
 pub fn claude_oauth_begin() -> Result<OauthBegin, String> {
+    let _operation = crate::operations::begin()?;
     let verifier = random_urlsafe(64)?;
     let challenge = {
         let digest = Sha256::digest(verifier.as_bytes());

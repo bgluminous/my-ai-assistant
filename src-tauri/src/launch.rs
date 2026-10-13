@@ -45,6 +45,7 @@ fn current_view(app: &AppHandle) -> Result<AutostartView, String> {
 
 #[tauri::command]
 pub fn autostart_get(app: AppHandle) -> Result<AutostartView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     current_view(&app)
 }
@@ -52,6 +53,7 @@ pub fn autostart_get(app: AppHandle) -> Result<AutostartView, String> {
 /// 设置开机自启动与静默启动。开关只在状态变化时写系统（disable 不存在的注册项会报错）。
 #[tauri::command]
 pub fn autostart_set(app: AppHandle, enabled: bool, silent: bool) -> Result<AutostartView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let manager = app.autolaunch();
     let currently = manager.is_enabled().map_err(|e| e.to_string())?;

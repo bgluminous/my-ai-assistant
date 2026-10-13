@@ -1,0 +1,11 @@
+# Non-sensitive release settings; parsed as data, never sourced as shell code.
+# The version, v<version> tag and platform asset names are derived by ci/.
+RELEASE_BACKEND=github
+RELEASE_PROJECT_CODE=my-ai-assistant
+RELEASE_PLATFORMS="windows-x64 macos-arm64"
+RELEASE_VERSION_HOOK=ci/read-version.sh
+RELEASE_ASSET_MODE=existing
+RELEASE_FORCE_UPDATE=false
+GITHUB_RELEASE_REPOSITORY=bgluminous/my-ai-assistant
+GITHUB_REGISTRY_REPOSITORY=bgluminous/open-source-registry
+GITHUB_REGISTRY_BRANCH=main

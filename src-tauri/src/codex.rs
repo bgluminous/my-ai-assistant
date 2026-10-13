@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -8,8 +9,10 @@ use walkdir::WalkDir;
 
 use crate::http;
 use crate::paths;
-use crate::pricing::{self, TokenRow, UsageAggregate};
-use crate::session_scan::{self, FileCache, TimeRange};
+use crate::pricing::{TokenRow, UsageAggregate};
+#[cfg(test)]
+use crate::session_scan::TimeRange;
+use crate::session_scan::{self, FileCache};
 
 const WHAM_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// 订阅起止时间（access_token JWT 经常没有 chatgpt_subscription_active_*，以此接口为准）。
@@ -33,6 +36,15 @@ pub struct UsageWindow {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResetCreditDetail {
+    pub status: Option<String>,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub used_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexUsage {
     pub alive: bool,
     pub email: Option<String>,
@@ -52,6 +64,8 @@ pub struct CodexUsage {
     pub reset_credits_available: Option<i64>,
     /// 可用重置次数中最早一次的过期时间（RFC3339，来自明细接口）；次数为 0 或明细拉取失败为 None。
     pub reset_credits_expires_at: Option<String>,
+    /// 接口返回的全部重置次数记录（含已使用 / 已过期）；None 表示未获取，空数组表示没有记录。
+    pub reset_credits_details: Option<Vec<ResetCreditDetail>>,
     pub status: u16,
     pub raw: Value,
 }
@@ -225,9 +239,36 @@ async fn fetch_subscription(jwt: &str, account_id: &str) -> Option<SubscriptionI
     })
 }
 
-/// 拉取额度重置次数明细，返回状态为 available 的条目中最早的过期时间（RFC3339）。
-/// 接口失败、结构不符或没有可用条目都返回 None，不影响主流程。
-async fn fetch_reset_credits_earliest_expiry(jwt: &str, account_id: Option<&str>) -> Option<String> {
+/// 保留全部明细，不按 available 筛选；最早有效期另行计算供紧凑摘要使用。
+fn parse_reset_credits(raw: &Value) -> Option<Vec<ResetCreditDetail>> {
+    Some(
+        raw.get("credits")?.as_array()?.iter()
+            .filter(|c| c.is_object())
+            .map(|c| ResetCreditDetail {
+                status: c.get("status").and_then(Value::as_str).map(|s| s.trim().to_string()),
+                granted_at: json_date(c, &[
+                    "granted_at", "grantedAt", "earned_at", "earnedAt", "created_at", "createdAt",
+                ]),
+                expires_at: json_date(c, &["expires_at", "expiresAt"]),
+                used_at: json_date(c, &["used_at", "usedAt", "consumed_at", "consumedAt"]),
+            })
+            .collect(),
+    )
+}
+
+fn reset_credits_earliest_expiry(details: &[ResetCreditDetail]) -> Option<String> {
+    details.iter()
+        .filter(|c| {
+            c.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("available"))
+        })
+        .filter_map(|c| c.expires_at.as_ref())
+        .filter_map(|iso| DateTime::parse_from_rfc3339(iso).ok().map(|dt| (dt, iso)))
+        .min_by_key(|(dt, _)| *dt)
+        .map(|(_, iso)| iso.clone())
+}
+
+/// 拉取额度重置次数的全部明细；接口失败或结构不符返回 None，不影响主流程。
+async fn fetch_reset_credits(jwt: &str, account_id: Option<&str>) -> Option<Vec<ResetCreditDetail>> {
     let mut req = http::client()
         .get(RESET_CREDITS)
         .header("Authorization", format!("Bearer {jwt}"))
@@ -242,22 +283,7 @@ async fn fetch_reset_credits_earliest_expiry(jwt: &str, account_id: Option<&str>
         return None;
     }
     let raw: Value = resp.json().await.ok()?;
-    raw.get("credits")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter(|c| {
-            c.get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.eq_ignore_ascii_case("available"))
-        })
-        .filter_map(|c| json_date(c, &["expires_at", "expiresAt"]))
-        .filter_map(|iso| {
-            DateTime::parse_from_rfc3339(&iso)
-                .ok()
-                .map(|dt| (dt.timestamp(), iso))
-        })
-        .min_by_key(|(ts, _)| *ts)
-        .map(|(_, iso)| iso)
+    parse_reset_credits(&raw)
 }
 
 pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
@@ -328,6 +354,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
             credits: None,
             reset_credits_available: None,
             reset_credits_expires_at: None,
+            reset_credits_details: None,
             status: status.as_u16(),
             raw: Value::Null,
         });
@@ -373,12 +400,16 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         .filter(|v| v.is_object())
         .and_then(|v| gi(v, &["available_count", "availableCount"]))
         .map(|n| n.max(0));
-    // 有可用次数时再拉一次明细，取最早过期的那一次；为 0 或不提供时省掉这次请求
-    let reset_credits_expires_at = if reset_credits_available.is_some_and(|n| n > 0) {
-        fetch_reset_credits_earliest_expiry(&jwt, account_id.as_deref()).await
+    // 套餐提供重置次数时拉全部明细；剩余为 0 时仍可查看已使用 / 已过期的历史。
+    let reset_credits_details = if reset_credits_available.is_some() {
+        fetch_reset_credits(&jwt, account_id.as_deref()).await
     } else {
         None
     };
+    let reset_credits_expires_at = reset_credits_details
+        .as_deref()
+        .filter(|_| reset_credits_available.is_some_and(|n| n > 0))
+        .and_then(reset_credits_earliest_expiry);
 
     Ok(CodexUsage {
         alive: status.is_success(),
@@ -393,6 +424,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         credits,
         reset_credits_available,
         reset_credits_expires_at,
+        reset_credits_details,
         status: status.as_u16(),
         raw,
     })
@@ -438,12 +470,12 @@ fn codex_roots(home: Option<String>) -> Vec<PathBuf> {
 /// token_count 事件里累计计数器（info.total_token_usage）的快照。它在一个线程内单调递增，
 /// 因此同一会话谱系里两条快照相同的记录必然指向同一次消耗——要么是重复上报，要么是分叉时复制的历史。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct UsageKey {
-    input: i64,
-    cached: i64,
-    output: i64,
-    reasoning: i64,
-    total: i64,
+pub(crate) struct UsageKey {
+    pub input: i64,
+    pub cached: i64,
+    pub output: i64,
+    pub reasoning: i64,
+    pub total: i64,
 }
 
 fn usage_key(total: &Value) -> Option<UsageKey> {
@@ -467,27 +499,27 @@ fn usage_key(total: &Value) -> Option<UsageKey> {
 
 /// 已解析的单条记录（保留时间戳，扫描时再按范围过滤，缓存因此与时间范围无关）。
 #[derive(Clone)]
-struct CachedRow {
-    ts: Option<DateTime<Utc>>,
+pub(crate) struct CachedRow {
+    pub ts: Option<DateTime<Utc>>,
     /// 累计计数器快照；老版本日志没有 total_token_usage 时为 None，这类记录不参与去重。
-    key: Option<UsageKey>,
-    row: TokenRow,
+    pub key: Option<UsageKey>,
+    pub row: TokenRow,
 }
 
 /// 单个会话文件的解析结果。
 #[derive(Clone, Default)]
-struct ParsedFile {
+pub(crate) struct ParsedFile {
     /// 文件首条 session_meta 的线程 id。文件里后续的 session_meta 要么是恢复会话时追加的（同 id），
     /// 要么是分叉时随历史一起复制进来的父任务 meta（异 id），都不代表本文件的身份。
-    thread_id: Option<String>,
+    pub thread_id: Option<String>,
     /// 分叉来源线程 id。子 Agent（thread_spawn）与手动分叉都带此字段，且日志开头是父任务
     /// 全部历史的复制件；guardian 等未分叉的子线程只有 parent_thread_id，不复制历史。
-    forked_from_id: Option<String>,
+    pub forked_from_id: Option<String>,
     /// 首条 session_meta 的时间，用于保证父任务先于它的分叉被处理。
-    created: Option<DateTime<Utc>>,
+    pub created: Option<DateTime<Utc>>,
     /// 是否含会话元信息（用于计会话数）。
-    had_meta: bool,
-    rows: Vec<CachedRow>,
+    pub had_meta: bool,
+    pub rows: Vec<CachedRow>,
 }
 
 fn scan_cache() -> &'static FileCache<ParsedFile> {
@@ -587,6 +619,7 @@ fn parse_file(path: &std::path::Path) -> ParsedFile {
 
 /// 沿 forked_from_id 追溯到谱系根的线程 id。父文件不存在（已删除）时以找不到的那个 id 为根，
 /// 同一父任务的多个分叉仍落在同一谱系内互相去重；没有 session_meta 的文件自成一系。
+#[cfg(test)]
 fn lineage_root(files: &[ParsedFile], by_id: &HashMap<&str, usize>, start: usize) -> String {
     let mut idx = start;
     let mut hops = 0usize;
@@ -616,6 +649,7 @@ fn lineage_root(files: &[ParsedFile], by_id: &HashMap<&str, usize>, start: usize
 /// 因此以「谱系根 + 累计值快照」为记录身份，每个身份只计第一次出现的那条。文件按创建时间先后处理，
 /// 父任务总在分叉之前，保留的是父任务里带真实时间戳的那条；父任务日志已删除时，复制件按最早的分叉
 /// 计一次（时间只能落在分叉时刻）。去重必须先于时间过滤，否则范围外的父记录挡不住范围内的复制件。
+#[cfg(test)]
 fn dedupe_rows(mut files: Vec<ParsedFile>, range: &TimeRange) -> Vec<TokenRow> {
     files.sort_by_key(|f| (f.created.is_none(), f.created));
     let by_id: HashMap<&str, usize> = files
@@ -639,7 +673,7 @@ fn dedupe_rows(mut files: Vec<ParsedFile>, range: &TimeRange) -> Vec<TokenRow> {
     rows
 }
 
-/// 扫描本地会话并折算等价费用。时间范围语义见 [`TimeRange`]（since_ms 优先于 days，
+/// 扫描本地会话并折算等价费用。时间范围语义见 [`session_scan::TimeRange`]（since_ms 优先于 days，
 /// until_ms 为开区间终点，与 since_ms 搭配可表达「昨天」这类完整自然日）。
 /// 同步命令会在主线程执行，全量解析大量 jsonl 时会把 UI 冻住，
 /// 因此这里声明为 async 并把重活丢到阻塞线程池。
@@ -649,22 +683,15 @@ pub async fn codex_scan_sessions(
     since_ms: Option<i64>,
     until_ms: Option<i64>,
     home: Option<String>,
+    device_id: Option<String>,
 ) -> Result<CodexScan, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_sessions_blocking(days, since_ms, until_ms, home))
-        .await
-        .map_err(|e| e.to_string())?
+    let _operation = crate::operations::begin()?;
+    crate::codex_sync::query(days, since_ms, until_ms, home, device_id, true).await
 }
 
-fn scan_sessions_blocking(
-    days: Option<i64>,
-    since_ms: Option<i64>,
-    until_ms: Option<i64>,
-    home: Option<String>,
-) -> Result<CodexScan, String> {
-    let table = pricing::load();
+pub(crate) fn collect_sessions(home: Option<String>) -> (Vec<(String, ParsedFile)>, Vec<String>) {
     let roots = codex_roots(home);
-    let range = TimeRange::new(days, since_ms, until_ms);
-    let mut files: Vec<ParsedFile> = Vec::new();
+    let mut files = Vec::new();
     let mut scanned_roots: Vec<String> = Vec::new();
 
     for root in &roots {
@@ -679,7 +706,7 @@ fn scan_sessions_blocking(
                 if !session_scan::is_jsonl_file(&entry) {
                     continue;
                 }
-                files.push(scan_cache().get_or_parse(&entry, parse_file));
+                files.push((entry.path().to_string_lossy().to_string(), scan_cache().get_or_parse(&entry, parse_file)));
             }
         }
         if root_used {
@@ -687,20 +714,7 @@ fn scan_sessions_blocking(
         }
     }
 
-    let files_scanned = files.len();
-    let sessions = files.iter().filter(|f| f.had_meta).count();
-    let rows = dedupe_rows(files, &range);
-
-    // until_ms 为开区间终点，按小时聚合的日期按闭区间末毫秒推算
-    let hourly_dates = pricing::hourly_dates_for(since_ms, until_ms.map(|u| u - 1));
-    let aggregate = pricing::aggregate_and_price_for(rows, &table, hourly_dates.as_deref());
-    Ok(CodexScan {
-        aggregate,
-        files_scanned,
-        sessions,
-        roots: scanned_roots,
-        days,
-    })
+    (files, scanned_roots)
 }
 
 #[cfg(test)]

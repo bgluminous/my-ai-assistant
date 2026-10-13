@@ -28,6 +28,7 @@
           </div>
         </div>
         <div class="header-actions">
+          <button id="app-update-chip" class="chip" type="button" hidden>检查更新</button>
           <button id="pricing-chip" class="chip" type="button" title="点击复制价格表路径">价格表：—</button>
           <button id="proxy-btn" class="icon-btn" type="button" title="代理设置" aria-label="代理设置">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
@@ -246,11 +247,16 @@
         <div id="usage-local-form" class="surface" hidden>
           <div class="row wrap">
             <label class="inline">CODEX_HOME
-              <input id="usage-codex-home" type="text" spellcheck="false" placeholder="留空使用默认 ~/.codex" />
+              <input id="usage-codex-home" type="text" readonly title="在设置中的 GPT 用量同步内修改采集目录" placeholder="默认目录（在设置中修改）" />
             </label>
             <button id="usage-codex-scan" class="secondary" type="button">重新扫描</button>
+            <label class="inline">设备
+              <select id="usage-codex-device"><option value="">全部设备</option></select>
+            </label>
+            <button id="usage-codex-clear" class="secondary" type="button" disabled>清理此设备缓存</button>
           </div>
-          <p class="muted small">统计本机会话日志的 token 用量并按官方 API 价折算，为本机所有 ChatGPT 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度与套餐见「账户管理」。</p>
+          <p class="muted small">汇总 GPT 用量存档，按当前价格表折算费用。配置同步后包含其他设备，复制的日志在总计中去重；日志没有账户归属。设备表示采集来源，各设备单独统计可能重叠。</p>
+          <p id="usage-sync-summary" class="muted small"></p>
         </div>
 
         <!-- 本地 Claude Code 用量分析：扫描 ~/.claude/projects 会话日志；统计范围由上方时间跨度 TAB 决定 -->
@@ -336,7 +342,7 @@
 
         <!-- 总览：各来源（Cursor 账户含已删除账户保留的数据 + 本地 Codex / Claude 分析）账单小计，按总 Token 降序；置于图表之后 -->
         <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；本地 ChatGPT / Claude 为本机日志分析，无实扣金额；标「已删除」的为已删除账户保留的统计数据</span></div>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 等价费用 ÷ 套餐月费；ChatGPT 为全部设备用量存档，Claude 为本机日志分析，均无实扣金额；标「已删除」的为已删除账户保留的统计数据</span></div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -421,6 +427,39 @@
           </dl>
         </div>
 
+        <div class="surface app-update-card">
+          <div class="app-update-heading">
+            <div class="app-update-summary">
+              <h3>应用更新</h3>
+              <p id="app-update-meta" class="muted small">当前版本：—</p>
+              <p id="app-update-status" class="app-update-state" role="status" aria-live="polite">尚未检查更新</p>
+            </div>
+            <div class="app-update-primary-actions">
+              <button id="app-update-check" class="primary" type="button">检查更新</button>
+              <button id="app-update-install" class="primary" type="button" hidden>下载并安装</button>
+              <button id="app-update-cancel" class="secondary" type="button" hidden>取消下载</button>
+            </div>
+          </div>
+          <p id="app-update-required" class="status bad" hidden>此版本要求更新。请完成更新后继续使用；可先在设置中导出备份。</p>
+          <p id="app-update-manual" class="muted small app-update-message" hidden></p>
+          <pre id="app-update-notes" class="update-notes" aria-label="更新说明" hidden></pre>
+          <progress id="app-update-progress" max="100" hidden aria-label="更新下载进度"></progress>
+          <p id="app-update-progress-text" class="muted small" aria-live="polite" hidden></p>
+          <div class="app-update-footer">
+            <div class="app-update-links">
+              <button id="app-update-releases" class="secondary compact" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+                GitHub Releases
+              </button>
+              <button id="app-update-copy-link" class="secondary compact" type="button" title="复制 GitHub Releases 地址">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+                复制地址
+              </button>
+            </div>
+            <button id="app-update-proxy" class="secondary compact" type="button">代理设置</button>
+          </div>
+        </div>
+
         <div class="surface">
           <div class="section-heading">
             <h3>开源依赖与许可证</h3>
@@ -431,7 +470,9 @@
                 <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
               </thead>
               <tbody>
-                <tr><td>tauri</td><td>2.11.5</td><td>桌面壳 / WebView</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri</td><td>2.12.2</td><td>桌面壳 / WebView</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-updater</td><td>2.13.3</td><td>更新包签名校验与安装</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>reqwest（更新器）</td><td>0.13.4</td><td>版本索引与更新包下载</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>tauri-plugin-single-instance</td><td>2.4.3</td><td>单实例</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>tauri-plugin-dialog</td><td>2.7.3</td><td>系统文件对话框</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>tauri-plugin-autostart</td><td>2.5.1</td><td>开机自启动</td><td>Apache-2.0 OR MIT</td></tr>
@@ -464,7 +505,7 @@
                 <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
               </thead>
               <tbody>
-                <tr><td>tauri-build</td><td>2.6.3</td><td>Cargo build.rs</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-build</td><td>2.7.2</td><td>Cargo build.rs</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>@tauri-apps/cli</td><td>2.11.4</td><td>npm run tauri</td><td>Apache-2.0 OR MIT</td></tr>
               </tbody>
             </table>
@@ -531,6 +572,12 @@
           </div>
           <p id="pricing-update-meta" class="muted small"></p>
           <p id="pricing-update-hint" class="update-hint" hidden></p>
+          <p id="pricing-update-error" class="status bad" role="status" hidden></p>
+          <div class="update-actions">
+            <button id="pricing-update-retry" class="secondary compact" type="button">重新检查</button>
+            <button id="pricing-update-proxy" class="secondary compact" type="button">代理设置</button>
+            <button id="pricing-update-source" class="secondary compact" type="button">打开公共价格表</button>
+          </div>
         </div>
 
         <p id="pricing-status" class="status" hidden></p>
@@ -639,6 +686,47 @@
           <p class="muted small">按设定间隔自动刷新全部账户状态，并重新统计用量数据。</p>
           <p id="interval-status" class="status" hidden></p>
 
+          <hr class="modal-divider" />
+
+          <label>GPT 用量同步</label>
+          <label for="gpt-sync-url" class="muted small">中心服务器地址（留空停用）</label>
+          <input id="gpt-sync-url" type="url" spellcheck="false" placeholder="https://sync.example.com" />
+          <label for="gpt-sync-key" class="muted small">账户同步密钥</label>
+          <input id="gpt-sync-key" type="password" autocomplete="new-password" spellcheck="false" />
+          <label class="inline"><input id="gpt-sync-clear-key" type="checkbox" />清除已保存的同步密钥</label>
+          <p class="muted small">由服务端管理后台生成，同一账户的所有机器填写同一个密钥。与 OpenAI API Key 或 GPT 登录凭据无关；重置后需更新所有机器，服务端历史保留。</p>
+          <label for="gpt-sync-device-name" class="muted small">本机设备名称</label>
+          <input id="gpt-sync-device-name" type="text" maxlength="128" />
+          <label for="gpt-sync-home" class="muted small">本机采集目录（CODEX_HOME）</label>
+          <input id="gpt-sync-home" type="text" spellcheck="false" placeholder="留空沿用环境变量和默认 ~/.codex" />
+          <label for="gpt-sync-interval" class="muted small">自动同步</label>
+          <select id="gpt-sync-interval" class="compact-select">
+            <option value="0">关闭（仅手动）</option>
+            <option value="5" selected>每 5 分钟</option>
+            <option value="15">每 15 分钟</option>
+            <option value="30">每 30 分钟</option>
+            <option value="60">每 1 小时</option>
+          </select>
+          <div class="row wrap">
+            <button id="gpt-sync-save" class="secondary" type="button">保存同步设置</button>
+            <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
+            <button id="gpt-sync-now" class="secondary" type="button">立即同步</button>
+          </div>
+          <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。测试连接只验证账户；保存配置后同步历史并登记设备，MAA 在托盘运行时继续自动同步。</p>
+          <p id="gpt-sync-status" class="muted small"></p>
+          <p id="gpt-sync-result" class="status" hidden></p>
+          <section class="sync-setup" aria-labelledby="gpt-sync-setup-title">
+            <div class="sync-setup-text">
+              <h4 id="gpt-sync-setup-title">自行搭建同步服务端</h4>
+              <p class="muted small">复制搭建文档交给你的 agent，完成后将它提供的服务器地址和同步密钥填入上方。</p>
+            </div>
+            <button id="gpt-sync-copy-prompt" class="secondary compact" type="button">复制提示词</button>
+          </section>
+          <hr class="modal-divider" />
+
+          <h4>应用更新</h4>
+          <label class="inline"><input id="app-update-auto" type="checkbox" checked />自动检查新版本</label>
+          <p class="muted small">启动 30 秒后检查，此后每 24 小时检查一次；下载、安装和重启前需要确认。</p>
           <hr class="modal-divider" />
 
           <label for="local-sync-interval">同步本机 ChatGPT 凭据</label>
@@ -901,5 +989,16 @@
 
     <script src="vendor/chart.umd.min.js"></script>
     <script type="module" src="main.js"></script>
+    <div id="app-update-confirm" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="app-update-confirm-title">
+        <div class="modal-head"><h3 id="app-update-confirm-title">安装应用更新</h3></div>
+        <div class="modal-body"><p id="app-update-confirm-text"></p></div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" data-close>稍后更新</button>
+          <button id="app-update-confirm-ok" class="primary" type="button">下载安装并重启</button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

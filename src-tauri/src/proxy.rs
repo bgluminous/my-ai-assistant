@@ -66,12 +66,14 @@ fn view(cfg: &ProxyConfig) -> ProxyView {
 
 #[tauri::command]
 pub fn proxy_get() -> Result<ProxyView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
 pub fn proxy_set(config: ProxyConfig) -> Result<ProxyView, String> {
+    let _operation = crate::operations::begin()?;
     let cfg = sanitize(config);
     validate(&cfg)?;
     settings::mutate(|s| {
@@ -108,6 +110,7 @@ fn json_str(v: &serde_json::Value, key: &str) -> Option<String> {
 /// 用给定（可能尚未保存的）配置试连一次，返回出口 IP、地区、ISP 与耗时，便于用户确认代理可用。
 #[tauri::command]
 pub async fn proxy_test(config: ProxyConfig) -> Result<ProxyTestResult, String> {
+    let _operation = crate::operations::begin()?;
     let cfg = sanitize(config);
     validate(&cfg)?;
     let client = crate::http::build_client(&cfg);

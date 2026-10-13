@@ -525,6 +525,7 @@ pub(crate) fn is_duplicate_account(
 
 #[tauri::command]
 pub fn accounts_list() -> Result<AccountsView, String> {
+    let _operation = crate::operations::begin()?;
     // 启动时载入失败（如文件被短暂占用）会在这里自愈；仍失败则明确报错，
     // 前端展示错误横幅而不是被误导成「暂无账户」。
     settings::ensure_loaded()?;
@@ -533,6 +534,7 @@ pub fn accounts_list() -> Result<AccountsView, String> {
 
 #[tauri::command]
 pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<AccountsView, String> {
+    let _operation = crate::operations::begin()?;
     let kind = sanitize_kind(&account.kind)?;
     let token = sanitize_token(&kind, &account.token)?;
     // 备注留空时用邮箱/用户名兜底，并标记为自动生成（刷新时可升级为真实邮箱）。
@@ -644,6 +646,7 @@ pub async fn accounts_update(
     refresh_token: Option<String>,
     ignore_api_models: Option<bool>,
 ) -> Result<AccountsView, String> {
+    let _operation = crate::operations::begin()?;
     let before = snapshot(&id)?;
     let token = sanitize_token(&before.kind, &token)?;
     let refresh_token = sanitize_refresh_token(refresh_token);
@@ -772,6 +775,7 @@ pub async fn accounts_delete(
     id: String,
     keep_usage: bool,
 ) -> Result<DeleteResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let Ok(target) = snapshot(&id) else {
         return Ok(DeleteResult {
@@ -816,6 +820,7 @@ pub async fn accounts_delete(
 /// 设置定时刷新间隔（分钟，0 = 关闭），账户状态刷新与用量统计自动更新共用。
 #[tauri::command]
 pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<AccountsView, String> {
+    let _operation = crate::operations::begin()?;
     let data = mutate(&app, |d| {
         d.interval_minutes = interval_minutes;
         Ok(())
@@ -1460,6 +1465,7 @@ pub(crate) fn refresh_queue() -> &'static tokio::sync::Mutex<()> {
 /// 不论刷新由哪个窗口发起。
 #[tauri::command]
 pub async fn account_refresh(app: AppHandle, id: String) -> Result<AccountView, String> {
+    let _operation = crate::operations::begin()?;
     let _ = app.emit("account-refreshing", json!({ "id": id, "active": true }));
     let result = refresh_account_inner(&app, &id).await;
     let _ = app.emit("account-refreshing", json!({ "id": id, "active": false }));
@@ -1595,6 +1601,7 @@ fn import_label(hint: &str, token: &str) -> String {
 /// 本机从未登录既不算导入也不算跳过；同身份已存在记 exists，凭据无法解析记 invalid。
 #[tauri::command]
 pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocalResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let kind = sanitize_kind(&kind)?;
     let mut imported: Vec<ImportedItem> = Vec::new();
@@ -1793,6 +1800,7 @@ fn default_export_name(kind: &str) -> &'static str {
 /// 导出指定类型账户为 JSON 文件。对话框取消返回 cancelled，不写盘。
 #[tauri::command]
 pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let kind = sanitize_kind(&kind)?;
     let rows: Vec<AccountExportItem> = current()
@@ -1856,6 +1864,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
 /// 从 JSON 文件导入指定类型账户：合并到现有列表，同身份跳过，类型不符则报错。
 #[tauri::command]
 pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<ImportFileResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let kind = sanitize_kind(&kind)?;
     let label = kind_label(&kind);
@@ -1986,6 +1995,7 @@ pub struct ClaudeOauthAddResult {
 /// 需先调用 claude_oauth_begin 打开授权页；备注用接口返回的邮箱兜底。
 #[tauri::command]
 pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeOauthAddResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let result = claude_oauth::exchange_code(&code).await?;
     let note = result.email.clone().unwrap_or_default();

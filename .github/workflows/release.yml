@@ -4,7 +4,8 @@
 #   - 推送 Release-<版本> 分支（如 Release-1.2.3）：校验分支名与版本号一致后创建 draft Release
 #     v<版本>，两个平台各自构建并上传产物，全部成功后自动发布；发布时 GitHub 在该分支的提交上
 #     创建 v<版本> 标签。任一平台失败则保持 draft，重跑复用同一个 draft。
-#     同一版本已发布过则直接失败，不覆盖已发布产物。
+#     同一版本已发布过则直接失败；草稿中同名附件也只复用相同内容。
+#     正式公开后分别登记 Windows / macOS 的 GitHub 版本索引，失败可单独重跑登记 job。
 #   - 手动触发（workflow_dispatch）：只构建，产物作为 workflow artifact 保留 7 天，
 #     不创建 Release，用于试跑。
 #   - 推送 master 或其它分支不触发。
@@ -49,30 +50,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 与 scripts/build-release-windows.ps1 相同的一致性校验，另外核对 package-lock.json
-      # 与触发分支名，尽早失败以免白跑两个平台的编译。
+      # 共用本地离线入口，保留项目实际的大写 Release-* 分支格式。
       - name: Read and verify version
         id: meta
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          conf=$(jq -r .version src-tauri/tauri.conf.json)
-          pkg=$(jq -r .version package.json)
-          lock=$(jq -r .version package-lock.json)
-          lock_pkg=$(jq -r '.packages[""].version' package-lock.json)
-          cargo=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' src-tauri/Cargo.toml | head -n 1)
-          echo "tauri.conf.json=$conf package.json=$pkg package-lock.json=$lock/$lock_pkg Cargo.toml=$cargo"
-          if [ "$conf" != "$pkg" ] || [ "$conf" != "$lock" ] || [ "$conf" != "$lock_pkg" ] || [ "$conf" != "$cargo" ]; then
-            echo "::error::Version mismatch between tauri.conf.json / package.json / package-lock.json / Cargo.toml"
-            exit 1
-          fi
+          conf=$(sh ci/read-version.sh)
           publish=false
           if [ "$EVENT_NAME" = "push" ]; then
-            if [ "$REF_NAME" != "Release-$conf" ]; then
-              echo "::error::Branch $REF_NAME does not match version $conf in src-tauri/tauri.conf.json (expected Release-$conf)"
-              exit 1
-            fi
+            sh scripts/version-publish/check-version.sh --branch "$REF_NAME"
             publish=true
           fi
           {
@@ -80,6 +68,34 @@ jobs:
             echo "tag=v$conf"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: Check updater signing credentials
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo '::error::Configure updater signing secrets before building (see docs/releasing.md)'
+            exit 1
+          fi
+
+      - name: Verify public pricing source before release
+        if: steps.meta.outputs.publish == 'true'
+        run: node ci/check-pricing-source.mjs
+
+      - name: Check registry credential is configured
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          GITHUB_REGISTRY_TOKEN: ${{ secrets.RELEASE_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$GITHUB_REGISTRY_TOKEN" ]; then
+            echo '::error::Configure RELEASE_REGISTRY_TOKEN before publishing (see docs/releasing.md)'
+            exit 1
+          fi
 
       # 说明 = 下载指引 + 变更列表。变更列表取「当前提交可达的最近一个 v* 标签」到当前提交
       # 之间的非合并提交标题，按 Conventional Commits 类型分组；没有历史标签时写「首个发布版本」。
@@ -98,6 +114,9 @@ jobs:
             - \`${APP_NAME}.exe\`：便携版，需要系统已安装 WebView2
           - macOS（Apple Silicon）
             - \`${APP_NAME}_${VERSION}_aarch64.dmg\`
+
+          已安装含更新模块的版本，可在「关于」页检查更新；更旧版本需先手动安装一次。
+          \`.sig\`、\`.app.tar.gz\` 与 \`updater-*.json\` 是应用内更新资源，无需手动解压。
 
           安装包未做代码签名：Windows SmartScreen 可能提示「未知发布者」；macOS 首次打开若提示
           「已损坏」或「无法验证开发者」，在终端执行 \`xattr -cr /Applications/${APP_NAME}.app\` 后再打开。
@@ -128,14 +147,28 @@ jobs:
             if [ -n "$rest" ]; then printf '### 未分类\n\n%s\n\n' "$rest" >> notes.md; fi
             echo "完整对比：https://github.com/$GH_REPO/compare/$prev...$TAG" >> notes.md
           fi
-          echo "--- notes.md ---"; cat notes.md
+
+      - name: Prepare registry input without network access
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: sh ci/register-release.sh prepare "$REF_NAME" notes.md
+
+      - name: Save registry input for independent retries
+        if: steps.meta.outputs.publish == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-registration
+          path: release-out/
+          if-no-files-found: error
+          retention-days: 1
 
       # 已发布的同版本不允许覆盖；上次失败遗留的 draft 则复用并更新指向的提交与说明。
       # Release 以 --target 指向当前提交，正式发布时 GitHub 会在该提交上创建 v<版本> 标签。
       - name: Create or reuse draft release
         if: steps.meta.outputs.publish == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
@@ -192,12 +225,21 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - uses: actions/download-artifact@v8
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          name: release-registration
+          path: release-out/
+
       # Windows 复用仓库脚本：版本校验 + tauri build + 收集便携版 / NSIS / MSI。
       # -KeepTarget 保留 src-tauri/target 供 rust-cache 缓存依赖编译产物。
       # -SkipArchive 不打 7z，Release / artifact 按文件单独下载。
       - name: Build Windows release
         if: runner.os == 'Windows'
-        run: npm run release:windows -- -KeepTarget -SkipArchive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run release:windows -- -KeepTarget -SkipArchive -Updater
 
       - name: Collect Windows artifacts
         if: runner.os == 'Windows'
@@ -207,13 +249,29 @@ jobs:
 
       - name: Build macOS release
         if: runner.os == 'macOS'
-        run: npm run build -- --target ${{ matrix.rust_target }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build -- --target ${{ matrix.rust_target }} --config src-tauri/tauri.updater.conf.json
 
       - name: Collect macOS artifacts
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist
           cp src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg dist/
+          cp src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app.tar.gz dist/
+          cp src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app.tar.gz.sig dist/
+
+      - name: Verify signatures and write updater manifest
+        env:
+          RELEASE_PLATFORM: ${{ matrix.name }}
+          PUBLISH: ${{ needs.prepare.outputs.publish }}
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            node ci/updater-manifest.mjs "$RELEASE_PLATFORM" dist "release-out/$RELEASE_PLATFORM/release.json"
+          else
+            node ci/updater-manifest.mjs "$RELEASE_PLATFORM" dist
+          fi
 
       - name: List artifacts
         run: ls -l dist
@@ -221,8 +279,8 @@ jobs:
       - name: Upload artifacts to release
         if: needs.prepare.outputs.publish == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" dist/* --clobber
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: sh ci/upload-release-assets.sh dist/*
 
       # Actions artifact 每个 step 仍会打成 zip，但每个 zip 里只有一个文件，
       # 试跑时可按安装包分别下载。正式 Release 由上一步按文件上传，不是 zip。
@@ -258,6 +316,15 @@ jobs:
           path: dist/*.dmg
           retention-days: 7
 
+      - name: Save signed updater artifacts (manual run)
+        if: needs.prepare.outputs.publish != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: updater-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish release
     needs: [prepare, build]
@@ -268,8 +335,42 @@ jobs:
       # 想保留为 draft 由人工发布，删掉这一步即可。
       - name: Mark release as published
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           gh release edit "$TAG" --draft=false
           gh release view "$TAG" --json url,tagName,targetCommitish --jq '"published \(.tagName) at \(.targetCommitish): \(.url)"'
+
+  register:
+    name: Register ${{ matrix.platform }} version
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-x64, macos-arm64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-registration
+          path: release-out/
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: Verify public updater assets before registration
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: node ci/verify-release-updater.mjs "$RELEASE_PLATFORM" "release-out/$RELEASE_PLATFORM/release.json"
+      - name: Register existing public release asset
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REGISTRY_TOKEN: ${{ secrets.RELEASE_REGISTRY_TOKEN }}
+        run: sh ci/register-release.sh publish "$REF_NAME" "$RELEASE_PLATFORM"

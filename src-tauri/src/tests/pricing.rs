@@ -3,6 +3,25 @@
 
 use super::*;
 
+#[test]
+fn official_urls_migrate_but_custom_sources_survive() {
+    for url in ["", "   ", LEGACY_UPDATE_URL, DEFAULT_UPDATE_URL] {
+        assert!(normalize_update_url(url).is_empty());
+    }
+    let custom = "https://example.org/own-prices.json";
+    assert_eq!(normalize_update_url(custom), custom);
+    let old = format!("  {LEGACY_UPDATE_URL}  ");
+    assert!(normalize_update_url(&old).is_empty());
+}
+
+#[test]
+fn malformed_remote_prices_are_rejected_before_any_cache_write() {
+    for bytes in [b"{".as_slice(), br#"{"models":{}}"#, br#"{"models":{"x":{"input":-1}}}"#] {
+        assert!(parse_remote_table(bytes).is_err());
+    }
+    assert_eq!(parse_remote_table(DEFAULT_JSON.as_bytes()).unwrap().models.len(), 95);
+}
+
 // ---------------------------------------------------------------------------
 // 聚合：按日 / 按模型 / 按小时
 // ---------------------------------------------------------------------------

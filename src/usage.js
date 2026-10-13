@@ -1,5 +1,6 @@
 import {
   el,
+  invoke,
   listen,
   fmtInt,
   fmtTokens,
@@ -42,6 +43,7 @@ import {
   USAGE_CACHE_ORIGIN,
   USAGE_LOCAL_CLEARED_EVENT,
   USAGE_PRICING_CHANGED_EVENT,
+  CODEX_USAGE_CHANGED_EVENT,
   forgetUsageCacheFromEvent,
   todayRangeKey,
   dayRangeKey,
@@ -63,6 +65,7 @@ import {
 import { membershipLabel, planMonthlyUsd, cursorPlanChoices, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 import { openRawEvents } from "./raw_events.js";
+import { syncError } from "./usage_sync.js";
 
 // 用量统计：Cursor 账单数据源自「账户管理」中保存的 Cursor 账户，自动拉取，无需手动输入。
 // Codex / Claude 账户不在本页展示（额度信息见「账户管理」）；它们的账单只能来自本地会话日志，
@@ -186,14 +189,14 @@ const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const LOCAL_SOURCES = {
   local: {
     tag: "codex",
-    label: "本地 ChatGPT 分析",
-    title: "本地 ChatGPT 用量分析",
-    mergedName: "本地 ChatGPT",
-    emptyText: "未在本地会话日志中找到用量。",
+    label: "ChatGPT 用量分析",
+    title: "ChatGPT 用量分析",
+    mergedName: "ChatGPT",
+    emptyText: "该范围内尚无 GPT 用量记录。",
     form: "#usage-local-form",
     homeInput: "#usage-codex-home",
     scanBtn: "#usage-codex-scan",
-    cachePrefix: "scan:",
+    cachePrefix: "scan2:",
     getCached: cacheGetScan,
     fetch: fetchCodexScan,
   },
@@ -250,7 +253,27 @@ function activeSources() {
 }
 /** 本地来源表单里填写的会话目录（已 trim，空串表示用默认目录）。 */
 function localHomeRaw(key) {
+  if (key === "local") return ""; // GPT 采集目录由后端持久化，主窗口与托盘共用。
   return el(LOCAL_SOURCES[key].homeInput).value.trim();
+}
+
+function selectedCodexDevice() {
+  return selection === "local" ? el("#usage-codex-device").value : "";
+}
+
+let codexDeviceListSeq = 0;
+async function refreshCodexDevices() {
+  const seq = ++codexDeviceListSeq;
+  try {
+    const [devices, config] = await Promise.all([invoke("codex_usage_devices"), invoke("codex_usage_sync_get")]);
+    if (seq !== codexDeviceListSeq) return;
+    const select = el("#usage-codex-device");
+    const previous = select.value;
+    select.replaceChildren(new Option("全部设备", ""), ...devices.map((d) => new Option(`${d.local ? "本机 · " : ""}${d.name}`, d.deviceId)));
+    if (devices.some((d) => d.deviceId === previous)) select.value = previous;
+    el("#usage-codex-clear").disabled = !select.value;
+    el("#usage-codex-home").value = config.sourceHome;
+  } catch (error) { if (seq === codexDeviceListSeq) el("#usage-sync-summary").textContent = syncError(error); }
 }
 
 /* ---------- 时间范围（周期 + 滑动 / 自定义区间） ---------- */
@@ -392,7 +415,7 @@ function currentAccount() {
   return getAccounts().find((a) => a.id === selection) || null;
 }
 function selectionKey() {
-  if (isLocalSelection()) return `${selection}:${scanKey()}:${localHomeRaw(selection)}`;
+  if (isLocalSelection()) return `${selection}:${scanKey()}:${localHomeRaw(selection)}:${selectedCodexDevice()}`;
   // 多选：所选集合本身也是视图身份的一部分
   if (isMultiSelection()) return `multi:${[...selectedKeys].sort().join(",")}:${rangeKey()}:${scanKey()}`;
   // 今天的键含日期（today:YYYY-MM-DD），跨零点后自动视为新视图
@@ -1076,7 +1099,7 @@ function rebuildChips() {
     const { primary, email } = cursorIdentity(a);
     chips.push({ value: a.id, label: primary, sub: email, kind: a.kind });
   }
-  for (const key of LOCAL_KEYS) chips.push({ value: key, label: "本地用量分析", sub: "", kind: LOCAL_SOURCES[key].tag });
+  for (const key of LOCAL_KEYS) chips.push({ value: key, label: key === "local" ? "用量分析" : "本地用量分析", sub: "", kind: LOCAL_SOURCES[key].tag });
   // 已删除账户保留的统计数据：有记录时在末尾给一个「已删除」chip，作为一个整体项参与选择
   if (deletedRecords.length) chips.push({ value: DELETED_SELECTION, label: "已删除", sub: "", kind: "cursor" });
 
@@ -1154,7 +1177,7 @@ function getCachedAgg(account) {
 
 /** 本地来源在当前跨度下的缓存条目；home 为空时用默认目录（键中为空串）。 */
 function getCachedLocal(key, home) {
-  return LOCAL_SOURCES[key].getCached(scanKey(), home);
+  return LOCAL_SOURCES[key].getCached(scanKey(), home, key === "local" ? selectedCodexDevice() : undefined);
 }
 
 /**
@@ -1342,7 +1365,7 @@ function scanParams(home, force) {
 }
 
 function fetchLocal(key, home, force) {
-  return LOCAL_SOURCES[key].fetch(scanParams(home, force));
+  return LOCAL_SOURCES[key].fetch({ ...scanParams(home, force), ...(key === "local" ? { deviceId: selectedCodexDevice() } : {}) });
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -1922,7 +1945,7 @@ async function loadOverview(force, seq) {
     if (warns.length) setStatus("warn", `${warns.join("；")}，明细见上表；失败来源如有上次数据则继续显示。`);
     else if (merged.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
     else if (selection === "all" && !cursorAccounts.length && !deletedShown) {
-      setStatus("", "尚未添加 Cursor 账户，总览目前仅含本地 ChatGPT / Claude 用量。");
+      setStatus("", "尚未添加 Cursor 账户，总览目前仅含 ChatGPT / 本地 Claude 用量。");
     } else clearStatus();
     return;
   }
@@ -1976,7 +1999,9 @@ function renderLocalScan(key, scan, at) {
   renderAggregate(scan.aggregate, {
     showActual: false,
     plan: null,
-    metaText: `${src.title} · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
+    metaText: key === "local"
+      ? `${src.title} · ${rangeText()} · ${el("#usage-codex-device").selectedOptions[0]?.textContent || "全部设备"} · ${scan.sessions} 个有用量会话 · 按当前价格表折算`
+      : `${src.title} · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
     dailySources: [
       {
         label: src.label,
@@ -1988,7 +2013,7 @@ function renderLocalScan(key, scan, at) {
   });
   markUpdated(at);
   if (scan.aggregate.models.length === 0) {
-    setStatus("warn", `${src.emptyText}目录：${rootsText}`);
+    setStatus("warn", key === "local" ? src.emptyText : `${src.emptyText}目录：${rootsText}`);
   }
 }
 
@@ -2348,6 +2373,34 @@ function applyCustomRange() {
 }
 
 export function initUsage() {
+  void refreshCodexDevices();
+  el("#usage-codex-device").addEventListener("change", () => {
+    el("#usage-codex-clear").disabled = !el("#usage-codex-device").value;
+    renderedAt = 0;
+    loadView(false);
+  });
+  el("#usage-codex-clear").addEventListener("click", async () => {
+    const deviceId = el("#usage-codex-device").value;
+    if (!deviceId) return;
+    const ok = await confirmDialog({
+      title: "清理当前 MAA 的设备用量缓存",
+      body: "将清理此设备在当前 MAA 中已同步的全部用量历史，不受页面日期范围限制。未上传记录、中心服务器、其他机器及 Codex 原日志保留。后续刷新或同步可以恢复这些历史。",
+      confirmText: "清理缓存", danger: true,
+    });
+    if (!ok) return;
+    try { await invoke("codex_usage_cache_clear", { deviceId }); }
+    catch (error) { setStatus("bad", syncError(error)); }
+  });
+  window.addEventListener(CODEX_USAGE_CHANGED_EVENT, () => {
+    loadSeq += 1;
+    loading = false;
+    setLoadingHint(false);
+    overviewResults.delete("local");
+    renderedAt = 0;
+    lastAttemptAt = 0;
+    renderedFor = "";
+    void refreshCodexDevices().then(() => { if (panelVisible) loadView(false); });
+  });
   el("#usage-refresh").addEventListener("click", () => {
     // 统一刷新：重新统计当前视图，并顺带刷新视图相关账户的状态（合并视图取参与合并的账户）
     loadView(true);

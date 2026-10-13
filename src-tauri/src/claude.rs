@@ -495,6 +495,7 @@ pub async fn claude_scan_sessions(
     until_ms: Option<i64>,
     home: Option<String>,
 ) -> Result<ClaudeScan, String> {
+    let _operation = crate::operations::begin()?;
     tauri::async_runtime::spawn_blocking(move || scan_sessions_blocking(days, since_ms, until_ms, home))
         .await
         .map_err(|e| e.to_string())?

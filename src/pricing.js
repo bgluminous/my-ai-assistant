@@ -1,5 +1,6 @@
 import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml, toast } from "./shared.js";
 import { notifyPricingChanged } from "./usage_data.js";
+import { pricingError } from "./update_status.js";
 
 // 价格表编辑弹窗：读取“默认 + 在线 + 用户覆盖”的有效表，逐模型编辑 输入/输出/缓存读/缓存写，
 // 覆盖写入用户目录 .xilore/myaiassistant/settings.json 的 pricing 字段（后端只写与基础层不同的条目）。
@@ -14,6 +15,8 @@ const state = {
   entries: [],
   remote: { url: "", defaultUrl: "", fetchedAtMs: null, models: 0 },
   update: { available: false, models: 0 },
+  error: "",
+  checking: false,
 };
 let chip = null;
 
@@ -196,9 +199,9 @@ async function onReset() {
 }
 
 /** 把 remote / 更新检测状态同步到弹窗的在线更新区与 chip 角标。 */
-function syncUpdateArea() {
+function syncUpdateArea(resetInput = false) {
   const input = el("#pricing-update-url");
-  input.value = state.remote.url;
+  if (resetInput) input.value = state.remote.url;
   input.placeholder = state.remote.defaultUrl ? `默认：${state.remote.defaultUrl}` : "";
   el("#pricing-update-meta").textContent = state.remote.fetchedAtMs
     ? `上次更新：${fmtDateMs(state.remote.fetchedAtMs)} · 在线表 ${state.remote.models} 个模型`
@@ -210,10 +213,15 @@ function syncUpdateArea() {
   }
   if (chip) {
     chip.classList.toggle("has-update", state.update.available);
-    chip.title = state.update.available
+    chip.title = state.error || (state.update.available
       ? "检测到在线价格表有更新，点击查看"
-      : "点击查看 / 编辑价格表";
+      : "点击查看 / 编辑价格表");
+    chip.classList.toggle("has-error", !!state.error);
   }
+  el("#pricing-update-error").textContent = state.error;
+  el("#pricing-update-error").hidden = !state.error;
+  el("#pricing-update-retry").disabled = state.checking;
+  el("#pricing-update-retry").textContent = state.checking ? "正在检查…" : state.error ? "重试检查" : "检查更新";
 }
 
 async function onUpdate() {
@@ -222,28 +230,40 @@ async function onUpdate() {
   setStatus("", "正在拉取在线价格表…");
   try {
     const url = el("#pricing-update-url").value.trim();
-    const view = await invoke("pricing_update_apply", { url: url || null });
+    const view = await invoke("pricing_update_apply", { url });
     notifyPricingChanged();
     applyView(view);
     state.update = { available: false, models: 0 };
+    state.error = "";
     render();
-    syncUpdateArea();
+    syncUpdateArea(true);
     setChip(state.entries.length);
     setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型，用量统计已按新价重算。`);
   } catch (err) {
-    setStatus("bad", `在线更新失败：${resetError(err)}`);
+    state.error = pricingError(err);
+    setStatus("bad", state.error);
+    syncUpdateArea();
   } finally {
     btn.disabled = false;
   }
 }
 
 /** 静默检测一次是否有在线更新（用已保存地址）；网络失败不打扰用户。 */
-async function checkUpdate() {
+async function checkUpdate(manual = false) {
+  if (state.checking) return;
+  state.checking = true;
+  syncUpdateArea();
   try {
-    const res = await invoke("pricing_update_check", { url: null });
+    const res = await invoke("pricing_update_check", { url: manual ? el("#pricing-update-url").value.trim() : null });
     state.update = { available: !!res.hasUpdate, models: Number(res.models) || 0 };
-  } catch {
-    state.update = { available: false, models: 0 };
+    state.error = "";
+    if (manual) setStatus("ok", res.hasUpdate ? "检测到价格表更新，可点击「在线更新」应用。" : "价格表与当前基础表一致。");
+  } catch (err) {
+    // 失败不清除已有缓存、自定义价格或上次已知的更新。
+    state.error = pricingError(err);
+    if (manual) setStatus("bad", state.error);
+  } finally {
+    state.checking = false;
   }
   syncUpdateArea();
 }
@@ -263,6 +283,7 @@ async function onCopyPath() {
 function openModal() {
   el("#pricing-modal").hidden = false;
   clearStatus();
+  syncUpdateArea(true);
   render();
   el("#pricing-search").focus();
 }
@@ -287,13 +308,18 @@ export async function initPricing() {
   el("#pricing-reset").addEventListener("click", onReset);
   el("#pricing-copy-path").addEventListener("click", onCopyPath);
   el("#pricing-update-btn").addEventListener("click", onUpdate);
+  el("#pricing-update-retry").addEventListener("click", () => { void checkUpdate(true); });
+  el("#pricing-update-proxy").addEventListener("click", () => { closeModal(); el("#proxy-btn").click(); });
+  el("#pricing-update-source").addEventListener("click", () => {
+    void invoke("app_update_open_pricing").catch(() => setStatus("bad", "无法打开浏览器，请在 GitHub 公共仓库查看 resources/my-ai-assistant/pricing.json。"));
+  });
   el("#pricing-body").addEventListener("input", onEdit);
   el("#pricing-body").addEventListener("click", onRemove);
 
   try {
     await load();
     setChip(state.entries.length);
-    syncUpdateArea();
+    syncUpdateArea(true);
     chip.addEventListener("click", openModal);
     checkUpdate(); // 启动时静默检测在线更新，不阻塞初始化
   } catch {

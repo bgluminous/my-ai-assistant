@@ -26,7 +26,8 @@
 param(
     [switch]$SkipBuild,
     [switch]$KeepTarget,
-    [switch]$SkipArchive
+    [switch]$SkipArchive,
+    [switch]$Updater
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,7 +49,12 @@ Write-Host "==> Version $version"
 # --- 2. Build ----------------------------------------------------------------
 if (-not $SkipBuild) {
     Write-Host "==> Running tauri build (release)..."
-    npm run build
+    if ($Updater) {
+        if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY is required for updater artifacts" }
+        npm run build -- --config src-tauri/tauri.updater.conf.json
+    } else {
+        npm run build
+    }
     if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit=$LASTEXITCODE)" }
 } else {
     Write-Host "==> SkipBuild: reusing existing build output"
@@ -67,12 +73,22 @@ if (-not $msi) { throw "Missing MSI for version $version under $targetDir/bundle
 $releaseDir = "$root/release"
 $stageName = "my-ai-assistant-v$version-windows-x64"
 $stageDir = "$releaseDir/$stageName"
-if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force }
+$resolvedStage = [IO.Path]::GetFullPath($stageDir)
+$resolvedRelease = [IO.Path]::GetFullPath($releaseDir) + [IO.Path]::DirectorySeparatorChar
+if (-not $resolvedStage.StartsWith($resolvedRelease, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe staging directory" }
+if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
 Copy-Item $portableExe "$stageDir/"
 Copy-Item $nsisSetup.FullName "$stageDir/"
 Copy-Item $msi.FullName "$stageDir/"
+if ($Updater) {
+    foreach ($installer in @($nsisSetup, $msi)) {
+        $signature = $installer.FullName + '.sig'
+        if (-not (Test-Path -LiteralPath $signature)) { throw "Missing updater signature" }
+        Copy-Item -LiteralPath $signature -Destination $stageDir
+    }
+}
 Write-Host "==> Staged artifacts:"
 Get-ChildItem $stageDir | ForEach-Object { Write-Host ("    {0}  ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
 
@@ -110,6 +126,7 @@ $cargoTarget = "$root/src-tauri/target"
 if ($KeepTarget) {
     Write-Host "==> KeepTarget: leaving $cargoTarget in place"
 } elseif (Test-Path $cargoTarget) {
+    if ([IO.Path]::GetFullPath($cargoTarget) -ne [IO.Path]::GetFullPath((Join-Path $root 'src-tauri/target'))) { throw "Unsafe build directory" }
     Write-Host "==> Removing $cargoTarget"
     Remove-Item -LiteralPath $cargoTarget -Recurse -Force
     if (Test-Path $cargoTarget) { throw "Failed to remove $cargoTarget" }

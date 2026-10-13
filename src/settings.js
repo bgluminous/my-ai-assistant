@@ -1,5 +1,6 @@
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
 import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
+import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sync.js";
 
 // 设置弹窗：
 // - Token 数量单位（完整 / K·M·B / 万·亿），存 localStorage，切换时通过 unitchange 事件
@@ -209,6 +210,7 @@ async function doImportApply(path, password) {
     // 设置弹窗内的回显同步导入结果（间隔选择框由 accounts-changed 事件自动更新）
     void loadAutostart();
     void loadClientPaths();
+    void loadSyncSettings();
     const parts = [`新增 ${Number(r && r.imported) || 0} 个账号`];
     const exists = Number(r && r.skippedExists) || 0;
     const invalid = Number(r && r.skippedInvalid) || 0;
@@ -430,6 +432,7 @@ async function onScanCancel() {
 // 点「完成」：保存 Cursor / ChatGPT / Claude Desktop 路径并关闭；路径无效则提示且不关闭。空路径 = 清除配置。
 async function onDone() {
   const modal = el("#settings-modal");
+  if (!await saveSyncSettings(true)) return;
   if (scanning) void onScanCancel();
   for (const c of CLIENT_PATHS) {
     try {
@@ -447,6 +450,7 @@ async function onDone() {
 /* ---------- 初始化 ---------- */
 
 export function initSettings() {
+  initSyncSettings();
   const modal = el("#settings-modal");
   el("#settings-btn").addEventListener("click", () => {
     renderUnitSeg();
@@ -454,6 +458,7 @@ export function initSettings() {
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
     localSyncStatus.clear();
     void loadLocalSyncInterval();
+    void loadSyncSettings();
     autostartStatus.clear();
     backupStatus.clear();
     hidePasswordRow();

@@ -4,9 +4,11 @@
 # Rust / Tauri build output
 /src-tauri/target
 /src-tauri/gen
+/scripts/codex-sync-tests/target
 
 # Release artifacts (scripts/build-release-windows.ps1)
 /release
+/release-out
 
 # Coding rules: local standalone clone, never committed (see AGENTS.md)
 /coding-rule/

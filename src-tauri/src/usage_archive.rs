@@ -612,6 +612,7 @@ pub async fn cursor_usage_fetch(
     mode: String,
     max_age_ms: Option<i64>,
 ) -> Result<UsageSlice, String> {
+    let _operation = crate::operations::begin()?;
     let token = http::normalize_cursor_token(&session_token);
     if token.is_empty() {
         return Err("empty_token".into());
@@ -673,6 +674,7 @@ pub async fn cursor_usage_slice(
     start: Option<i64>,
     end: Option<i64>,
 ) -> Result<UsageSlice, String> {
+    let _operation = crate::operations::begin()?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
@@ -688,12 +690,14 @@ pub async fn cursor_usage_slice(
 
 #[tauri::command]
 pub fn cursor_usage_deleted_list() -> Result<Vec<DeletedUsageRecord>, String> {
+    let _operation = crate::operations::begin()?;
     Ok(deleted_archives().iter().filter_map(deleted_record).collect())
 }
 
 /// 删除一份已删除账户保留的统计数据。在用账户的事件库不经此命令删除（随账户删除时清理）。
 #[tauri::command]
 pub async fn cursor_usage_deleted_remove(account_id: String) -> Result<(), String> {
+    let _operation = crate::operations::begin()?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
@@ -720,6 +724,7 @@ pub async fn cursor_usage_deleted_set_note(
     account_id: String,
     note: String,
 ) -> Result<DeletedUsageRecord, String> {
+    let _operation = crate::operations::begin()?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
@@ -787,6 +792,7 @@ pub async fn cursor_usage_deleted_update(
     note: String,
     remove_api_usage: bool,
 ) -> Result<DeletedUsageUpdateResult, String> {
+    let _operation = crate::operations::begin()?;
     let _deleted_guard = deleted_mutation_lock().lock().await;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
@@ -863,6 +869,7 @@ pub async fn cursor_usage_deleted_set_membership(
     account_id: String,
     membership_type: String,
 ) -> Result<DeletedUsageRecord, String> {
+    let _operation = crate::operations::begin()?;
     let next = normalize_membership_choice(&membership_type)?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
@@ -936,6 +943,7 @@ pub async fn cursor_usage_events(
     start: Option<i64>,
     end: Option<i64>,
 ) -> Result<RawUsageEvents, String> {
+    let _operation = crate::operations::begin()?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let mut archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
@@ -989,6 +997,7 @@ pub struct UsageClearResult {
 /// 下次拉取用量时重新全量同步。已删除账户保留的统计数据走 cursor_usage_deleted_remove。
 #[tauri::command]
 pub async fn cursor_usage_clear(account_id: String) -> Result<UsageClearResult, String> {
+    let _operation = crate::operations::begin()?;
     let lock = account_lock(&account_id);
     let _guard = lock.lock().await;
     let archive = load(&account_id).ok_or_else(|| "no_usage_data".to_string())?;
@@ -1267,6 +1276,7 @@ pub async fn usage_events_export(
     file_name: String,
     content: String,
 ) -> Result<SnapshotSaveResult, String> {
+    let _operation = crate::operations::begin()?;
     if content.is_empty() {
         return Err("empty_content".into());
     }
@@ -1306,6 +1316,7 @@ pub async fn usage_snapshot_save(
     file_name: String,
     data_url: String,
 ) -> Result<SnapshotSaveResult, String> {
+    let _operation = crate::operations::begin()?;
     let b64 = data_url
         .strip_prefix(PNG_DATA_URL_PREFIX)
         .ok_or_else(|| "invalid_image_data".to_string())?;

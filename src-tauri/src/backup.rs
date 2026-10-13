@@ -194,12 +194,15 @@ pub async fn backup_export(
     password: Option<String>,
     ui_prefs: Value,
 ) -> Result<BackupExportResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let password = normalize_password(password);
     let encrypted = password.is_some();
     // 与落盘形态一致：ChatGPT 账户只带加密副本，不带明文 token
     let settings_value = settings::read(|s| {
-        serde_json::to_value(settings::persisted_form(s)).map_err(|e| e.to_string())
+        let mut portable = settings::persisted_form(s);
+        portable.codex_usage_sync = portable.codex_usage_sync.portable();
+        serde_json::to_value(portable).map_err(|e| e.to_string())
     })??;
     let account_count = settings_value
         .get("accounts")
@@ -280,6 +283,7 @@ pub struct BackupInspectResult {
 /// 弹文件框选择备份并校验文件头，返回是否加密；不改动任何数据。
 #[tauri::command]
 pub async fn backup_import_inspect(app: AppHandle) -> Result<BackupInspectResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let app_for_dialog = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
@@ -328,6 +332,7 @@ pub async fn backup_import_apply(
     path: String,
     password: Option<String>,
 ) -> Result<BackupApplyResult, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let parsed = parse_backup(&text)?;
@@ -350,9 +355,13 @@ pub async fn backup_import_apply(
         .get("settings")
         .cloned()
         .ok_or_else(|| "invalid_format".to_string())?;
+    let has_sync_config = settings_value.get("codexUsageSync").is_some();
     let incoming: Settings =
         serde_json::from_value(settings_value).map_err(|_| "invalid_format".to_string())?;
-    let incoming = settings::sanitize_loaded(incoming);
+    let mut incoming = settings::sanitize_loaded(incoming);
+    if has_sync_config {
+        incoming.codex_usage_sync = crate::codex_sync::validate_saved_config(incoming.codex_usage_sync)?;
+    }
     let ui_prefs = data.get("uiPrefs").cloned().unwrap_or(Value::Null);
     let usage_archives: Vec<Value> = data
         .get("usageArchives")
@@ -364,7 +373,7 @@ pub async fn backup_import_apply(
     let mut added: Vec<(String, String, String, String)> = Vec::new();
     let mut skipped_exists = 0usize;
     let mut skipped_invalid = 0usize;
-    let live_identities = settings::mutate(|s| {
+    let import_settings = || settings::mutate(|s| {
         // 账号合并：同身份（离线解析，解析不出回退 token 全等）跳过；
         // 逐个推入 s.accounts，天然覆盖备份文件内部的重复项。
         for acc in incoming.accounts {
@@ -410,12 +419,16 @@ pub async fn backup_import_apply(
         s.proxy = incoming.proxy;
         s.pricing = incoming.pricing;
         s.pricing_remote = incoming.pricing_remote;
+        s.app_update = incoming.app_update;
         s.cursor_client = incoming.cursor_client;
         s.codex_client = incoming.codex_client;
         s.claude_client = incoming.claude_client;
         s.autostart_silent = incoming.autostart_silent;
         // 旧备份没有该字段时反序列化为默认值，直接覆盖即可
         s.codex_local_sync_minutes = incoming.codex_local_sync_minutes;
+        if has_sync_config {
+            s.codex_usage_sync = incoming.codex_usage_sync.restore_local_fields(&s.codex_usage_sync);
+        }
         // 合并后仍在用的 Cursor 账户身份：备份里同身份的已删除统计数据不再恢复
         Ok(s
             .accounts
@@ -423,8 +436,15 @@ pub async fn backup_import_apply(
             .filter(|a| a.kind == "cursor")
             .filter_map(|a| accounts::account_identity(&a.kind, &a.token))
             .collect::<Vec<String>>())
-    })?;
+    });
+    let live_identities = if has_sync_config {
+        crate::codex_sync::update_configuration(import_settings)?
+    } else {
+        import_settings()?
+    };
     accounts::broadcast_changed(&app);
+    crate::app_update::settings_changed(&app);
+    if has_sync_config { crate::codex_sync::configuration_changed(&app); }
     // 先恢复备份里的已删除统计数据（同身份在用账户已跳过），再让新增账户接管本机同身份的保留记录
     let usage_restored = usage_archive::import_deleted(&usage_archives, &live_identities).await;
     let adopted = accounts::adopt_deleted_usage(&app, &added).await;

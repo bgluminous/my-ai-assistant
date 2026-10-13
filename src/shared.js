@@ -164,7 +164,10 @@ export function fmtDateMs(ms) {
 }
 
 export function resetError(err) {
-  return err instanceof Error ? err.message : String(err);
+  const message = err instanceof Error ? err.message : String(err);
+  if (message === "update_in_progress") return "应用正在准备安装更新，请稍后操作。";
+  if (message === "update_required") return "此版本需要更新，请在「关于」页检查更新或前往 GitHub Releases。";
+  return message;
 }
 
 // ---------- 全局提示（toast 与弹窗内状态条） ----------

@@ -79,6 +79,10 @@ const EVENTS: &[(&str, Level, Category, &str)] = &[
     ("codex_adopt_failed", Error, Credential, "采用本机凭据失败"),
     ("codex_auth_migrated", Info, Credential, "凭据存储迁移"),
     ("usage_snapshot", Info, Usage, "用量快照"),
+    ("codex_usage_sync_config", Info, Settings, "用量同步设置"),
+    ("codex_usage_sync_ok", Info, Usage, "GPT 用量同步"),
+    ("codex_usage_sync_failed", Error, Usage, "GPT 用量同步失败"),
+    ("codex_usage_cache_clear", Info, Usage, "GPT 本机缓存清理"),
     ("usage_events_export", Info, Usage, "导出原始账单"),
     ("usage_data_adopt", Info, Usage, "沿用统计数据"),
     ("usage_data_delete", Info, Usage, "删除统计数据"),
@@ -219,6 +223,7 @@ pub struct AuditView {
 
 #[tauri::command]
 pub fn audit_list(limit: Option<usize>) -> Result<AuditView, String> {
+    let _operation = crate::operations::begin()?;
     let path = file_path()?;
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -238,6 +243,7 @@ pub fn audit_list(limit: Option<usize>) -> Result<AuditView, String> {
 
 #[tauri::command]
 pub fn audit_clear() -> Result<(), String> {
+    let _operation = crate::operations::begin()?;
     let path = file_path()?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;

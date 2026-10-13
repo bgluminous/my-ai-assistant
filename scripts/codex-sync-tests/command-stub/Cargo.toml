@@ -1,0 +1,9 @@
+[package]
+name = "command-stub"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+path = "lib.rs"

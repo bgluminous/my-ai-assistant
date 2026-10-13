@@ -235,7 +235,7 @@ export function creditsBrief(status) {
  * - text：「剩余重置 N 次」；
  * - expiresText：最早一次过期时间的短文案（「最早 MM-DD 过期」，已过期则「最早 MM-DD 已过期」），
  *   次数为 0 或没有过期数据时为空串；expired 标记最早一次是否已过期（数据陈旧，应刷新）；
- * - title：悬停说明，含完整过期日期时间。
+ * - title：悬停说明，逐条列出全部重置次数的状态、过期时间及接口提供的获得 / 使用时间。
  */
 export function resetCreditsBrief(status) {
   if (!status || status.alive === false) return null;
@@ -250,8 +250,25 @@ export function resetCreditsBrief(status) {
     const mmdd = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     expired = expiresMs <= Date.now();
     expiresText = expired ? `最早 ${mmdd} 已过期` : `最早 ${mmdd} 过期`;
-    const full = d.toLocaleString("zh-CN", { hour12: false, month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const full = resetCreditDateText(status.resetCreditsExpiresAt);
     titleLines.push(expired ? `最早一次已于 ${full} 过期，请刷新查看最新次数` : `最早一次将于 ${full} 过期`);
+  }
+  const details = Array.isArray(status.resetCreditsDetails) ? status.resetCreditsDetails : null;
+  if (details) {
+    titleLines.push(`重置次数明细（共 ${details.length} 条，当前剩余 ${n} 次）`);
+    if (!details.length) titleLines.push("暂无重置次数记录");
+    details.forEach((credit, index) => {
+      const rawStatus = typeof credit?.status === "string" ? credit.status.trim() : "";
+      const labels = { available: "可用", used: "已使用", consumed: "已使用", expired: "已过期", revoked: "已撤销" };
+      const state = Object.hasOwn(labels, rawStatus.toLowerCase()) ? labels[rawStatus.toLowerCase()] : rawStatus || "状态未知";
+      const parts = [`${index + 1}. ${state}`];
+      if (credit?.grantedAt) parts.push(`获得：${resetCreditDateText(credit.grantedAt)}`);
+      parts.push(`过期：${resetCreditDateText(credit?.expiresAt)}`);
+      if (credit?.usedAt) parts.push(`使用：${resetCreditDateText(credit.usedAt)}`);
+      titleLines.push(parts.join(" · "));
+    });
+  } else {
+    titleLines.push("完整明细尚未获取，请刷新账户后查看");
   }
   return {
     count: n,
@@ -260,4 +277,11 @@ export function resetCreditsBrief(status) {
     expired,
     title: titleLines.join("\n"),
   };
+}
+
+function resetCreditDateText(value) {
+  const ms = value ? Date.parse(value) : NaN;
+  return Number.isFinite(ms)
+    ? new Date(ms).toLocaleString("zh-CN", { hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "未提供";
 }

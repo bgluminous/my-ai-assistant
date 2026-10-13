@@ -21,6 +21,13 @@ use crate::proxy::{self, ProxyConfig};
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(default)]
+    pub app_update: crate::app_update::Preferences,
+    /// 已确认的强制更新要求：重启或关闭自动检查不能绕过；备份导入不覆盖本机记录。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_update: Option<crate::update_protocol::Release>,
+    #[serde(default)]
+    pub codex_usage_sync: crate::codex_sync::SyncConfig,
+    #[serde(default)]
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub interval_minutes: u32,
@@ -103,6 +110,7 @@ pub(crate) fn sanitize_loaded(mut data: Settings) -> Settings {
     data.proxy = proxy::sanitize(data.proxy);
     data.pricing = data.pricing.lowercased();
     data.pricing_remote.table = data.pricing_remote.table.lowercased();
+    data.pricing_remote.url = crate::pricing::normalize_update_url(&data.pricing_remote.url);
     crate::accounts::hydrate_accounts(&mut data.accounts);
     data
 }
@@ -238,3 +246,7 @@ where
         .map_err(|_| "state_lock_poisoned".to_string())?;
     Ok(f(&guard))
 }
+
+#[cfg(test)]
+#[path = "tests/settings.rs"]
+mod tests;

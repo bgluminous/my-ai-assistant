@@ -1,0 +1,787 @@
+//! 中心同步客户端。后台只传规范化用量，不传登录凭据、路径或原会话文件。
+use crate::{
+    audit, codex,
+    codex_store::{
+        self as store, Device, DeviceView, RemoteRecord, Result, WireRecord, MAX_BYTES, MAX_RECORDS,
+    },
+    local_crypto, pricing,
+    session_scan::TimeRange,
+    settings,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SyncConfig {
+    pub server_url: String,
+    pub sealed_key: String,
+    pub interval_minutes: u32,
+    pub source_home: String,
+    pub device_name: String,
+}
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            sealed_key: String::new(),
+            interval_minutes: 5,
+            source_home: String::new(),
+            device_name: String::new(),
+        }
+    }
+}
+impl SyncConfig {
+    pub fn portable(&self) -> Self {
+        Self {
+            source_home: String::new(),
+            device_name: String::new(),
+            ..self.clone()
+        }
+    }
+    pub fn restore_local_fields(mut self, current: &Self) -> Self {
+        self.source_home = current.source_home.clone();
+        self.device_name = current.device_name.clone();
+        self
+    }
+    fn key(&self) -> Result<String> {
+        local_crypto::open(&self.sealed_key)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "sync_key_required".into())
+    }
+    fn configured(&self) -> bool {
+        !self.server_url.is_empty() && !self.sealed_key.is_empty()
+    }
+    fn profile(&self) -> Result<String> {
+        if !self.configured() {
+            return Ok(String::new());
+        }
+        Ok(store::hash(
+            serde_json::to_string(&[&self.server_url, &self.key()?])
+                .map_err(|_| "sync_invalid_config")?
+                .as_bytes(),
+        ))
+    }
+}
+pub fn current() -> Result<SyncConfig> {
+    settings::ensure_loaded()?;
+    settings::read(|s| s.codex_usage_sync.clone())
+}
+fn device(cfg: &SyncConfig) -> Result<Device> {
+    store::with_store(|s| {
+        let id = s.device_id()?;
+        let name = if cfg.device_name.trim().is_empty() {
+            format!("MAA-{}-{}", std::env::consts::OS, &id[..8])
+        } else {
+            cfg.device_name.clone()
+        };
+        Ok(Device {
+            device_id: id,
+            name,
+        })
+    })
+}
+pub fn normalize_url(text: &str) -> Result<String> {
+    if text.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let url = reqwest::Url::parse(text.trim()).map_err(|_| "sync_invalid_url")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("sync_invalid_url".into());
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigInput {
+    pub server_url: String,
+    /// None 保留，空串清除，非空替换。读取设置永不返回密钥或密文。
+    pub key: Option<String>,
+    pub interval_minutes: u32,
+    pub source_home: String,
+    pub device_name: String,
+}
+fn config_from(input: ConfigInput, old: &SyncConfig) -> Result<SyncConfig> {
+    if ![0, 5, 15, 30, 60].contains(&input.interval_minutes) {
+        return Err("sync_invalid_interval".into());
+    }
+    let sealed_key = match input.key {
+        None => old.sealed_key.clone(),
+        Some(k) if k.trim().is_empty() => String::new(),
+        Some(k) => {
+            let k = k.trim();
+            if k.len() > 4096 || !k.bytes().all(|b| (33..=126).contains(&b)) {
+                return Err("sync_invalid_key".into());
+            }
+            local_crypto::seal(k)?
+        }
+    };
+    validate_saved_config(SyncConfig {
+        server_url: normalize_url(&input.server_url)?,
+        sealed_key,
+        interval_minutes: input.interval_minutes,
+        source_home: input.source_home.trim().into(),
+        device_name: input.device_name.trim().into(),
+    })
+}
+/// 备份导入也使用同一校验，不能绕过 HTTPS、间隔或密钥约束。
+pub fn validate_saved_config(mut cfg: SyncConfig) -> Result<SyncConfig> {
+    cfg.server_url = normalize_url(&cfg.server_url)?;
+    if ![0, 5, 15, 30, 60].contains(&cfg.interval_minutes) {
+        return Err("sync_invalid_interval".into());
+    }
+    if cfg.device_name.len() > 128 || cfg.device_name.chars().any(char::is_control) {
+        return Err("sync_invalid_device".into());
+    }
+    if !cfg.server_url.is_empty() || !cfg.sealed_key.is_empty() {
+        let key = cfg.key()?;
+        if key.len() > 4096 || !key.bytes().all(|b| (33..=126).contains(&b)) {
+            return Err("sync_invalid_key".into());
+        }
+    }
+    Ok(cfg)
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigView {
+    server_url: String,
+    has_key: bool,
+    interval_minutes: u32,
+    source_home: String,
+    device_id: String,
+    device_name: String,
+}
+fn config_view(cfg: &SyncConfig) -> Result<ConfigView> {
+    let d = device(cfg)?;
+    Ok(ConfigView {
+        server_url: cfg.server_url.clone(),
+        has_key: !cfg.sealed_key.is_empty(),
+        interval_minutes: cfg.interval_minutes,
+        source_home: cfg.source_home.clone(),
+        device_id: d.device_id,
+        device_name: d.name,
+    })
+}
+
+#[derive(Default)]
+struct Runtime {
+    generation: u64,
+    running: bool,
+    requested: bool,
+    paused: bool,
+    error: Option<String>,
+    failures: usize,
+    next: Option<Instant>,
+}
+impl Runtime {
+    fn record_result(&mut self, result: &Result<()>, interval_minutes: u32) {
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.failures = 0;
+                self.paused = false;
+                self.next =
+                    Some(Instant::now() + Duration::from_secs(interval_minutes as u64 * 60));
+            }
+            Err(e) => {
+                self.paused = matches!(
+                    e.as_str(),
+                    "sync_unauthorized"
+                        | "sync_forbidden"
+                        | "sync_protocol_version"
+                        | "sync_protocol_invalid"
+                        | "sync_invalid_record"
+                        | "sync_invalid_device"
+                        | "sync_invalid_url"
+                        | "sync_key_required"
+                        | "sync_response_too_large"
+                );
+                // v1 使用固定退避阶梯；429 的 Retry-After 不改变 30 分钟上限。
+                self.next = Some(
+                    Instant::now()
+                        + Duration::from_secs([300, 600, 1200, 1800][self.failures.min(3)]),
+                );
+                self.failures = self.failures.saturating_add(1);
+                self.error = Some(e.clone());
+            }
+        }
+    }
+}
+fn runtime() -> &'static Mutex<Runtime> {
+    static R: OnceLock<Mutex<Runtime>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Runtime::default()))
+}
+fn wake() -> &'static tokio::sync::Notify {
+    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    N.get_or_init(tokio::sync::Notify::new)
+}
+fn gate() -> &'static tokio::sync::Mutex<()> {
+    static G: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    G.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+fn checked<T>(generation: u64, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+    if r.generation != generation {
+        return Err("sync_cancelled".into());
+    }
+    f()
+}
+pub fn notify_changed(app: &AppHandle, reason: &str) {
+    let _ = app.emit("codex-usage-changed", serde_json::json!({"reason":reason}));
+}
+pub fn update_configuration<T>(update: impl FnOnce() -> Result<T>) -> Result<T> {
+    // 配置写入与响应落库共用短锁，包括备份导入，消除更新配置到作废旧请求之间的窗口。
+    let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+    let result = update();
+    // settings::mutate 写盘失败时内存可能已变化，因此错误分支也必须作废旧请求。
+    r.generation += 1;
+    r.error = None;
+    r.paused = false;
+    r.failures = 0;
+    r.next = None;
+    r.requested = true;
+    result
+}
+pub fn configuration_changed(app: &AppHandle) {
+    notify_changed(app, "config");
+    wake().notify_one();
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatus {
+    pub state: String,
+    pub last_success_at: Option<i64>,
+    pub pending_records: usize,
+    pub error: Option<String>,
+}
+#[tauri::command]
+pub fn codex_usage_sync_status() -> Result<SyncStatus> {
+    let _operation = crate::operations::begin()?;
+    let cfg = current()?;
+    let profile = cfg.profile()?;
+    let (pending, last) =
+        store::with_store(|s| Ok((s.pending_count(&profile)?, s.success(&profile)?)))?;
+    let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+    let state = if !cfg.configured() {
+        "disabled"
+    } else if r.running {
+        "running"
+    } else if r.paused {
+        "paused"
+    } else if r.error.is_some() {
+        "error"
+    } else {
+        "idle"
+    };
+    Ok(SyncStatus {
+        state: state.into(),
+        last_success_at: last,
+        pending_records: pending,
+        error: r.error.clone(),
+    })
+}
+#[tauri::command]
+pub fn codex_usage_sync_get() -> Result<ConfigView> {
+    let _operation = crate::operations::begin()?;
+    config_view(&current()?)
+}
+#[tauri::command]
+pub fn codex_usage_sync_set(app: AppHandle, config: ConfigInput) -> Result<ConfigView> {
+    let _operation = crate::operations::begin()?;
+    let next = config_from(config, &current()?)?;
+    // 与响应落库共用短锁：设置一变，旧请求不能继续确认或写入任何空间。
+    update_configuration(|| {
+        settings::mutate(|s| {
+            s.codex_usage_sync = next.clone();
+            Ok(())
+        })
+    })?;
+    audit::log(
+        "codex_usage_sync_config",
+        "更新 GPT 用量同步设置".into(),
+        None,
+    );
+    configuration_changed(&app);
+    config_view(&next)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Handshake {
+    pub protocol_version: u32,
+    pub space_id: String,
+    pub epoch: String,
+}
+impl Handshake {
+    fn validate(&self) -> Result<()> {
+        if self.protocol_version != 1 {
+            return Err("sync_protocol_version".into());
+        }
+        if [&self.space_id, &self.epoch]
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 256 || s.chars().any(char::is_control))
+        {
+            return Err("sync_protocol_invalid".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Push {
+    pub protocol_version: u32,
+    pub space_id: String,
+    pub epoch: String,
+    pub device: Device,
+    pub records: Vec<WireRecord>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Acknowledged {
+    pub space_id: String,
+    pub epoch: String,
+    pub acknowledged_ids: Vec<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Page {
+    pub space_id: String,
+    pub epoch: String,
+    pub records: Vec<RemoteRecord>,
+    pub devices: Vec<Device>,
+    pub next_cursor: String,
+    pub has_more: bool,
+}
+
+// 泛型传输边界让测试替身与真实 HTTP 走同一同步状态机，无需正式服务端。
+pub trait Transport {
+    async fn handshake(&self) -> Result<Handshake>;
+    async fn push(&self, payload: &Push) -> Result<Acknowledged>;
+    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page>;
+}
+struct HttpTransport {
+    client: reqwest::Client,
+    base: String,
+    key: String,
+}
+impl HttpTransport {
+    fn new(cfg: &SyncConfig) -> Result<Self> {
+        let base = normalize_url(&cfg.server_url)?;
+        if base.is_empty() {
+            return Err("sync_not_configured".into());
+        }
+        let key = cfg.key()?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(40))
+            .redirect(reqwest::redirect::Policy::none());
+        let proxy = crate::proxy::current();
+        builder = match proxy.mode.as_str() {
+            "direct" => builder.no_proxy(),
+            "custom" => {
+                builder.proxy(reqwest::Proxy::all(&proxy.url).map_err(|_| "sync_invalid_proxy")?)
+            }
+            _ => builder,
+        };
+        Ok(Self {
+            client: builder.build().map_err(|_| "sync_network")?,
+            base,
+            key,
+        })
+    }
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, format!("{}/api/v1/codex-usage/{path}", self.base))
+            .bearer_auth(&self.key)
+            .header("Accept", "application/json")
+    }
+    async fn response<T: serde::de::DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<T> {
+        let mut res = req.send().await.map_err(|_| "sync_network")?;
+        let status = res.status().as_u16();
+        if status != 200 {
+            return Err(match status {
+                401 => "sync_unauthorized",
+                403 => "sync_forbidden",
+                409 => "sync_reset_required",
+                429 => "sync_rate_limited",
+                500..=599 => "sync_server",
+                _ => "sync_protocol_invalid",
+            }
+            .into());
+        }
+        if res.content_length().is_some_and(|n| n > MAX_BYTES as u64) {
+            return Err("sync_response_too_large".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|_| "sync_network")? {
+            if bytes.len() + chunk.len() > MAX_BYTES {
+                return Err("sync_response_too_large".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "sync_protocol_invalid".into())
+    }
+}
+impl Transport for HttpTransport {
+    async fn handshake(&self) -> Result<Handshake> {
+        self.response(self.request(reqwest::Method::GET, "handshake"))
+            .await
+    }
+    async fn push(&self, payload: &Push) -> Result<Acknowledged> {
+        self.response(self.request(reqwest::Method::POST, "push").json(payload))
+            .await
+    }
+    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
+        let mut req = self.request(reqwest::Method::GET, "changes").query(&[
+            ("spaceId", h.space_id.as_str()),
+            ("epoch", h.epoch.as_str()),
+            ("limit", "500"),
+        ]);
+        if let Some(c) = cursor {
+            req = req.query(&[("cursor", c)]);
+        }
+        self.response(req).await
+    }
+}
+
+/// DB 回调包含代次检查；测试可注入内存库。每页事务与每次确认独立提交，失败从断点恢复。
+pub async fn exchange<T: Transport>(
+    transport: &T,
+    profile: &str,
+    device: Device,
+    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+) -> Result<()> {
+    let h = transport.handshake().await?;
+    h.validate()?;
+    db(DbAction::Prepare(h.clone()))?;
+    let mut sent_metadata = false;
+    loop {
+        let DbReply::Pending(mut records) = db(DbAction::Pending)? else {
+            return Err("sync_protocol_invalid".into());
+        };
+        if records.is_empty() && sent_metadata {
+            break;
+        }
+        let had_records = !records.is_empty();
+        let mut payload = Push {
+            protocol_version: 1,
+            space_id: h.space_id.clone(),
+            epoch: h.epoch.clone(),
+            device: device.clone(),
+            records: Vec::new(),
+        };
+        for r in records.drain(..) {
+            payload.records.push(r);
+            if serde_json::to_vec(&payload)
+                .map_err(|_| "sync_invalid_record")?
+                .len()
+                > MAX_BYTES
+            {
+                payload.records.pop();
+                break;
+            }
+        }
+        if had_records && payload.records.is_empty() {
+            return Err("sync_invalid_record".into());
+        }
+        let ack = transport.push(&payload).await?;
+        if ack.space_id != h.space_id || ack.epoch != h.epoch {
+            return Err("sync_reset_required".into());
+        }
+        let mut expected: Vec<_> = payload
+            .records
+            .iter()
+            .map(|r| r.record_id.clone())
+            .collect();
+        expected.sort();
+        let mut actual = ack.acknowledged_ids;
+        actual.sort();
+        if actual != expected {
+            return Err("sync_protocol_invalid".into());
+        }
+        db(DbAction::Ack(payload.records))?;
+        sent_metadata = true;
+    }
+    let DbReply::Cursor(mut cursor) = db(DbAction::Cursor)? else {
+        return Err("sync_protocol_invalid".into());
+    };
+    let mut seen = std::collections::HashSet::new();
+    if let Some(c) = &cursor {
+        seen.insert(c.clone());
+    }
+    loop {
+        let page = transport.changes(&h, cursor.as_deref()).await?;
+        if page.space_id != h.space_id || page.epoch != h.epoch {
+            return Err("sync_reset_required".into());
+        }
+        if page.records.len() + page.devices.len() > MAX_RECORDS
+            || page.next_cursor.is_empty()
+            || page.next_cursor.len() > 4096
+            || (page.has_more
+                && (page.records.is_empty() && page.devices.is_empty()
+                    || !seen.insert(page.next_cursor.clone())))
+        {
+            return Err("sync_protocol_invalid".into());
+        }
+        cursor = Some(page.next_cursor.clone());
+        let more = page.has_more;
+        db(DbAction::Page(page))?;
+        if !more {
+            break;
+        }
+    }
+    let _ = profile; // 空间只由上层的固定 DB 回调选择，服务端不能控制本地存储命名空间。
+    db(DbAction::Finish)?;
+    Ok(())
+}
+
+/// 409 最多恢复一次；本机原始记录保留，清除确认和游标后重新握手。
+async fn exchange_with_recovery<T: Transport>(
+    transport: &T,
+    profile: &str,
+    device: Device,
+    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+) -> Result<()> {
+    let result = exchange(transport, profile, device.clone(), &mut db).await;
+    if result.as_ref().err().map(String::as_str) == Some("sync_reset_required") {
+        db(DbAction::Reset)?;
+        return exchange(transport, profile, device, db).await;
+    }
+    result
+}
+pub enum DbAction {
+    Prepare(Handshake),
+    Reset,
+    Pending,
+    Ack(Vec<WireRecord>),
+    Cursor,
+    Page(Page),
+    Finish,
+}
+pub enum DbReply {
+    Done,
+    Pending(Vec<WireRecord>),
+    Cursor(Option<String>),
+}
+pub fn apply_action(s: &mut store::Store, profile: &str, action: DbAction) -> Result<DbReply> {
+    match action {
+        DbAction::Prepare(h) => s.prepare_profile(profile, &h.space_id, &h.epoch)?,
+        DbAction::Reset => s.reset_sync(profile)?,
+        DbAction::Pending => return Ok(DbReply::Pending(s.pending(profile)?)),
+        DbAction::Ack(records) => s.acknowledge(profile, &records)?,
+        DbAction::Cursor => return Ok(DbReply::Cursor(s.cursor(profile)?)),
+        DbAction::Page(p) => {
+            s.apply_page(profile, &p.records, &p.devices, &p.next_cursor)?;
+        }
+        DbAction::Finish => s.finish(profile)?,
+    }
+    Ok(DbReply::Done)
+}
+
+async fn synchronize(app: &AppHandle) -> Result<()> {
+    if crate::operations::required() {
+        return Err("update_required".into());
+    }
+    let _operation = crate::operations::begin()?;
+    run_once(sync_round(app)).await
+}
+async fn run_once(work: impl std::future::Future<Output = Result<()>>) -> Result<()> {
+    let Ok(_gate) = gate().try_lock() else {
+        return Ok(());
+    };
+    work.await
+}
+async fn sync_round(app: &AppHandle) -> Result<()> {
+    let (cfg, generation) = {
+        let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+        let cfg = current()?;
+        if !cfg.configured() {
+            return Ok(());
+        }
+        r.running = true;
+        r.requested = false;
+        (cfg, r.generation)
+    };
+    let _ = app.emit("codex-usage-sync-status", ());
+    let result: Result<()> = async {
+        let home = cfg.source_home.clone();
+        let (files, _) =
+            tauri::async_runtime::spawn_blocking(move || codex::collect_sessions(Some(home)))
+                .await
+                .map_err(|_| "sync_scan_failed")?;
+        checked(generation, || store::with_store(|s| s.ingest(files)))?;
+        let profile = cfg.profile()?;
+        let transport = HttpTransport::new(&cfg)?;
+        let own = device(&cfg)?;
+        exchange_with_recovery(&transport, &profile, own, |a| {
+            checked(generation, || {
+                store::with_store(|s| apply_action(s, &profile, a))
+            })
+        })
+        .await
+    }
+    .await;
+    {
+        let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+        r.running = false;
+        if r.generation == generation {
+            r.record_result(&result, cfg.interval_minutes);
+        }
+    }
+    if !matches!(
+        result.as_ref().err().map(String::as_str),
+        Some("sync_cancelled")
+    ) {
+        let event = if result.is_ok() {
+            "codex_usage_sync_ok"
+        } else {
+            "codex_usage_sync_failed"
+        };
+        audit::log(
+            event,
+            if result.is_ok() {
+                "GPT 用量同步完成".into()
+            } else {
+                format!("GPT 用量同步失败：{}", result.as_ref().unwrap_err())
+            },
+            None,
+        );
+        notify_changed(app, "sync");
+    }
+    let _ = app.emit("codex-usage-sync-status", ());
+    wake().notify_one();
+    result
+}
+#[tauri::command]
+pub async fn codex_usage_sync_now(app: AppHandle) -> Result<SyncStatus> {
+    let _operation = crate::operations::begin()?;
+    synchronize(&app).await?;
+    codex_usage_sync_status()
+}
+#[tauri::command]
+pub async fn codex_usage_sync_test(config: ConfigInput) -> Result<Handshake> {
+    let _operation = crate::operations::begin()?;
+    let cfg = config_from(config, &current()?)?;
+    let h = HttpTransport::new(&cfg)?.handshake().await?;
+    h.validate()?;
+    Ok(h)
+}
+pub fn start(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if let Ok(cfg) = current() {
+                let due = runtime()
+                    .lock()
+                    .map(|r| {
+                        cfg.configured()
+                            && !r.running
+                            && (r.requested
+                                || (!r.paused
+                                    && cfg.interval_minutes > 0
+                                    && r.next.is_none_or(|t| Instant::now() >= t)))
+                    })
+                    .unwrap_or(false);
+                if due {
+                    let _ = synchronize(&app).await;
+                }
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(15), wake().notified()).await;
+        }
+    });
+}
+
+pub async fn query(
+    days: Option<i64>,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+    home: Option<String>,
+    device_id: Option<String>,
+    scan: bool,
+) -> Result<codex::CodexScan> {
+    let (cfg, generation) = {
+        let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+        (current()?, r.generation)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let (files, roots) = if scan {
+            codex::collect_sessions(home.or(Some(cfg.source_home.clone())))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let count = files.len();
+        let profile = cfg.profile()?;
+        let records = checked(generation, || {
+            store::with_store(|s| {
+                if scan {
+                    s.ingest(files)?;
+                }
+                s.records(&profile)
+            })
+        })?;
+        let (rows, sessions) = store::aggregate_rows(
+            records,
+            device_id.as_deref(),
+            &TimeRange::new(days, since_ms, until_ms),
+        );
+        let hourly = pricing::hourly_dates_for(since_ms, until_ms.map(|u| u - 1));
+        Ok(codex::CodexScan {
+            aggregate: pricing::aggregate_and_price_for(rows, &pricing::load(), hourly.as_deref()),
+            files_scanned: count,
+            sessions,
+            roots,
+            days,
+        })
+    })
+    .await
+    .map_err(|_| "sync_scan_failed")?
+}
+#[tauri::command]
+pub async fn codex_usage_query(
+    days: Option<i64>,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+    device_id: Option<String>,
+) -> Result<codex::CodexScan> {
+    let _operation = crate::operations::begin()?;
+    query(days, since_ms, until_ms, None, device_id, false).await
+}
+#[tauri::command]
+pub fn codex_usage_devices() -> Result<Vec<DeviceView>> {
+    let _operation = crate::operations::begin()?;
+    let cfg = current()?;
+    let own = device(&cfg)?;
+    store::with_store(|s| s.devices(&cfg.profile()?, &own.name))
+}
+#[tauri::command]
+pub fn codex_usage_cache_clear(app: AppHandle, device_id: String) -> Result<usize> {
+    let _operation = crate::operations::begin()?;
+    let n = {
+        let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+        let cfg = current()?;
+        let n = store::with_store(|s| s.clear_device(&cfg.profile()?, &device_id))?;
+        r.generation += 1;
+        n
+    };
+    audit::log(
+        "codex_usage_cache_clear",
+        "清理当前 MAA 的 GPT 设备用量缓存（中心数据保留）".into(),
+        None,
+    );
+    notify_changed(&app, "clear");
+    Ok(n)
+}
+
+#[cfg(test)]
+#[path = "tests/codex_sync.rs"]
+mod tests;

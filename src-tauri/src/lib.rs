@@ -1,10 +1,15 @@
 mod accounts;
+mod app_update;
+mod operations;
+mod update_protocol;
 mod audit;
 mod backup;
 mod claude;
 mod claude_local;
 mod claude_oauth;
 mod codex;
+mod codex_store;
+mod codex_sync;
 mod codex_local;
 mod cursor;
 mod cursor_local;
@@ -53,6 +58,7 @@ pub fn run() {
         }));
     }
     builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -105,7 +111,9 @@ pub fn run() {
             launch::set_silent_launch(silent);
             tray::setup(app.handle())?;
             // 本机 Codex 客户端改写 auth.json 后，把同账号账户的凭据副本跟上（每分钟看一次修改时间）
+            app_update::start(app.handle().clone());
             codex_local::start_local_sync(app.handle().clone());
+            codex_sync::start(app.handle().clone());
             // 最小窗口尺寸运行时兜底（与 tauri.conf.json 的 minWidth/minHeight 一致），
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
             if let Some(win) = app.get_webview_window(main_window::LABEL) {
@@ -142,7 +150,19 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            if let Some(reason) = operations::rejection(invoke.message.command()) {
+                invoke.resolver.reject(reason);
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+            app_update::app_update_status,
+            app_update::app_update_check,
+            app_update::app_update_install,
+            app_update::app_update_cancel,
+            app_update::app_update_settings_set,
+            app_update::app_update_open_releases,
+            app_update::app_update_open_pricing,
             usage_archive::cursor_usage_fetch,
             usage_archive::cursor_usage_slice,
             usage_archive::cursor_usage_deleted_list,
@@ -163,6 +183,14 @@ pub fn run() {
             cursor_local::cursor_client_close,
             cursor_local::cursor_client_launch,
             codex::codex_scan_sessions,
+            codex_sync::codex_usage_sync_get,
+            codex_sync::codex_usage_sync_set,
+            codex_sync::codex_usage_sync_test,
+            codex_sync::codex_usage_sync_now,
+            codex_sync::codex_usage_sync_status,
+            codex_sync::codex_usage_devices,
+            codex_sync::codex_usage_query,
+            codex_sync::codex_usage_cache_clear,
             codex_local::codex_switch_local,
             codex_local::codex_force_write_local,
             codex_local::codex_logout_local,
@@ -213,7 +241,9 @@ pub fn run() {
             backup::backup_import_inspect,
             backup::backup_import_apply,
             app_info,
-        ])
+            ];
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

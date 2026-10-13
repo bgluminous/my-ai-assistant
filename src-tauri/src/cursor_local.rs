@@ -353,6 +353,7 @@ fn view(cfg: &CursorClientConfig) -> CursorClientView {
 
 #[tauri::command]
 pub fn cursor_client_get() -> Result<CursorClientView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
@@ -360,6 +361,7 @@ pub fn cursor_client_get() -> Result<CursorClientView, String> {
 /// 保存手动指定的 Cursor 可执行文件路径；空串 = 清除配置（回到自动搜索）。
 #[tauri::command]
 pub fn cursor_client_set(exe_path: String) -> Result<CursorClientView, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("cursor_exe_invalid".into());
@@ -609,6 +611,7 @@ pub async fn cursor_client_scan_step(
     app: AppHandle,
     restart: bool,
 ) -> Result<StepResult, String> {
+    let _operation = crate::operations::begin()?;
     tauri::async_runtime::spawn_blocking(move || step_blocking(app, restart))
         .await
         .map_err(|e| e.to_string())
@@ -623,6 +626,7 @@ pub fn cursor_client_scan_cancel() {
 /// 查询本地 Cursor 客户端状态（不涉及账户，不因账户问题报错）。
 #[tauri::command]
 pub async fn cursor_client_status() -> Result<ClientStatus, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -636,6 +640,7 @@ pub async fn cursor_client_status() -> Result<ClientStatus, String> {
 /// 关闭本地 Cursor（优雅退出 + 强制兜底 + 轮询确认），最长约 11 秒。
 #[tauri::command]
 pub async fn cursor_client_close() -> Result<CloseResult, String> {
+    let _operation = crate::operations::begin()?;
     // 轮询会阻塞较久，放到阻塞线程池执行，避免占用异步运行时工作线程。
     let closed = tauri::async_runtime::spawn_blocking(close_cursor)
         .await
@@ -646,6 +651,7 @@ pub async fn cursor_client_close() -> Result<CloseResult, String> {
 /// 启动本地 Cursor。找不到可执行文件时 launched=false（不报错）。
 #[tauri::command]
 pub fn cursor_client_launch() -> Result<LaunchResult, String> {
+    let _operation = crate::operations::begin()?;
     Ok(LaunchResult {
         launched: launch_cursor(),
     })
@@ -674,6 +680,7 @@ fn resolve_email(acc: &accounts::Account) -> Option<String> {
 /// 写库要求 Cursor 已关闭（关闭动作由 cursor_client_close 单独负责）。
 #[tauri::command]
 pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
+    let _operation = crate::operations::begin()?;
     // 1) 仅支持 Windows / macOS。
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
@@ -733,6 +740,7 @@ pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
 /// 托管的账户不受影响。
 #[tauri::command]
 pub async fn cursor_logout_local() -> Result<LogoutResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }

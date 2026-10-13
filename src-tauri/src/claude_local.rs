@@ -448,12 +448,14 @@ fn view(cfg: &ClaudeClientConfig) -> ClaudeClientView {
 
 #[tauri::command]
 pub fn claude_client_get() -> Result<ClaudeClientView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     Ok(view(&current()))
 }
 
 #[tauri::command]
 pub fn claude_client_set(exe_path: String) -> Result<ClaudeClientView, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
         return Err("claude_exe_invalid".into());
@@ -478,6 +480,7 @@ pub fn claude_client_detect() -> DetectResult {
 
 #[tauri::command]
 pub async fn claude_client_status() -> Result<ClientStatus, String> {
+    let _operation = crate::operations::begin()?;
     let exe_path = resolve_exe_path()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -490,6 +493,7 @@ pub async fn claude_client_status() -> Result<ClientStatus, String> {
 
 #[tauri::command]
 pub async fn claude_client_close() -> Result<CloseResult, String> {
+    let _operation = crate::operations::begin()?;
     let closed = tauri::async_runtime::spawn_blocking(close_desktop)
         .await
         .map_err(|e| e.to_string())?;
@@ -498,6 +502,7 @@ pub async fn claude_client_close() -> Result<CloseResult, String> {
 
 #[tauri::command]
 pub fn claude_client_launch() -> Result<LaunchResult, String> {
+    let _operation = crate::operations::begin()?;
     Ok(LaunchResult {
         launched: launch_desktop(),
     })
@@ -508,6 +513,7 @@ pub fn claude_client_launch() -> Result<LaunchResult, String> {
 /// 已关闭（关闭由 claude_client_close 单独负责），与 Cursor / Codex 切号一致。
 #[tauri::command]
 pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }
@@ -588,6 +594,7 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
 /// 只动本机凭据，托管的账户不受影响。
 #[tauri::command]
 pub async fn claude_logout_local() -> Result<LogoutResult, String> {
+    let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }

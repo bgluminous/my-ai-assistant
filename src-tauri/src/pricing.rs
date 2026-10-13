@@ -9,7 +9,16 @@ use crate::settings;
 const DEFAULT_JSON: &str = include_str!("../resources/pricing.default.json");
 
 /// 在线价格表默认更新地址（用户未自定义地址时使用）。
-pub const DEFAULT_UPDATE_URL: &str = "https://inf.xil.to/kv/MAA-Price-Table";
+pub const DEFAULT_UPDATE_URL: &str = "https://raw.githubusercontent.com/bgluminous/open-source-registry/main/resources/my-ai-assistant/pricing.json";
+const LEGACY_UPDATE_URL: &str = "https://inf.xil.to/kv/MAA-Price-Table";
+
+/// 只迁移旧官方来源；保留用户自定义地址。设置载入、备份导入与请求解析共用。
+pub(crate) fn normalize_update_url(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() || url == DEFAULT_UPDATE_URL || url == LEGACY_UPDATE_URL {
+        String::new()
+    } else { url.to_string() }
+}
 
 /// 每百万 token 的美元单价。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -473,6 +482,7 @@ fn price_eq(a: &ModelPrice, b: &ModelPrice) -> bool {
 /// 读取“默认 + 在线 + 用户覆盖”的有效价格表，按键排序返回，供应用内编辑。
 #[tauri::command]
 pub fn pricing_get() -> Result<PricingView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let defaults = defaults();
     let base = base();
@@ -548,6 +558,7 @@ fn diff_overrides(
 /// （保持精简，未改动的模型仍随默认表与在线表更新）。数值需为有限非负数。
 #[tauri::command]
 pub fn pricing_save(models: Vec<PricingEntry>, note: Option<String>) -> Result<PricingStatus, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let overrides = diff_overrides(&base(), &models)?;
 
@@ -574,6 +585,7 @@ pub fn pricing_save(models: Vec<PricingEntry>, note: Option<String>) -> Result<P
 /// 清空用户价格覆盖与在线表缓存，恢复为内置默认表（不删除 settings.json）。
 #[tauri::command]
 pub fn pricing_reset() -> Result<PricingView, String> {
+    let _operation = crate::operations::begin()?;
     settings::mutate(|s| {
         s.pricing = PricingTable::default();
         s.pricing_remote = PricingRemote::default();
@@ -597,10 +609,10 @@ fn tables_eq(a: &PricingTable, b: &PricingTable) -> bool {
 /// 解析更新地址：None → 用已保存地址；空白或等于默认地址 → 默认地址（保存为空，
 /// 以便默认地址将来变化时自动跟随）。返回（请求地址, 落盘地址）。
 fn resolve_update_url(url: Option<String>) -> Result<(String, String), String> {
-    let raw = match url {
+    let raw = normalize_update_url(&match url {
         Some(u) => u.trim().to_string(),
         None => settings::read(|s| s.pricing_remote.url.trim().to_string())?,
-    };
+    });
     if raw.is_empty() || raw == DEFAULT_UPDATE_URL {
         return Ok((DEFAULT_UPDATE_URL.to_string(), String::new()));
     }
@@ -612,19 +624,26 @@ fn resolve_update_url(url: Option<String>) -> Result<(String, String), String> {
 
 /// 拉取并校验在线价格表，返回小写化后的表。
 async fn fetch_remote_table(url: &str) -> Result<PricingTable, String> {
-    let resp = crate::http::client()
+    let mut resp = crate::http::client()
         .get(url)
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| format!("fetch_failed: {e}"))?;
+        .map_err(|e| if e.is_timeout() { "fetch_timeout" } else { "fetch_failed" }.to_string())?;
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(format!("http_status_{status}"));
     }
-    let text = resp.text().await.map_err(|e| format!("read_failed: {e}"))?;
-    let table = serde_json::from_str::<PricingTable>(&text)
-        .map_err(|e| format!("parse_failed: {e}"))?
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| if e.is_timeout() { "fetch_timeout" } else { "read_failed" }.to_string())? {
+        if bytes.len() + chunk.len() > 2 * 1024 * 1024 { return Err("parse_failed".into()); }
+        bytes.extend_from_slice(&chunk);
+    }
+    parse_remote_table(&bytes)
+}
+fn parse_remote_table(bytes: &[u8]) -> Result<PricingTable, String> {
+    let table = serde_json::from_slice::<PricingTable>(bytes)
+        .map_err(|_| "parse_failed".to_string())?
         .lowercased();
     if table.models.is_empty() {
         return Err("remote_table_empty".into());
@@ -653,6 +672,7 @@ pub struct PricingUpdateCheck {
 /// 拉取远端表并与当前基础层（默认+已缓存在线表）比较，判断是否有更新。不写盘。
 #[tauri::command]
 pub async fn pricing_update_check(url: Option<String>) -> Result<PricingUpdateCheck, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let (fetch_url, _) = resolve_update_url(url)?;
     let fetched = fetch_remote_table(&fetch_url).await?;
@@ -668,6 +688,7 @@ pub async fn pricing_update_check(url: Option<String>) -> Result<PricingUpdateCh
 /// 拉取远端表并写入在线缓存层（用户覆盖保持不变），返回最新视图。
 #[tauri::command]
 pub async fn pricing_update_apply(url: Option<String>) -> Result<PricingView, String> {
+    let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let (fetch_url, store_url) = resolve_update_url(url)?;
     let fetched = fetch_remote_table(&fetch_url).await?;
@@ -682,7 +703,7 @@ pub async fn pricing_update_apply(url: Option<String>) -> Result<PricingView, St
     })?;
     audit::log(
         "pricing_update",
-        format!("在线价格表已更新：{count} 个模型（{fetch_url}）"),
+        format!("在线价格表已更新：{count} 个模型"),
         None,
     );
     pricing_get()
