@@ -362,7 +362,7 @@ fn live_server_interoperability() {
         let result = a.sync().await;
         assert_eq!(result.as_ref().unwrap_err(), "sync_forbidden");
         let mut state = Runtime::default();
-        state.record_result(&result, 5);
+        state.record_result(&result);
         assert!(state.paused);
         assert_eq!(a.rows(None, None).len(), 505);
         harness
@@ -374,7 +374,7 @@ fn live_server_interoperability() {
             .await;
         let result = a.sync().await;
         result.as_ref().unwrap();
-        state.record_result(&result, 5);
+        state.record_result(&result);
         assert!(!state.paused);
         let identity = a.http.handshake().await.unwrap();
         let reset = harness

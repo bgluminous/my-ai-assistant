@@ -1,5 +1,5 @@
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
-import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
+import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts, onAccountsChanged } from "./accounts.js";
 import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sync.js";
 
 // 设置弹窗：
@@ -14,6 +14,53 @@ import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sy
 //   localStorage，由本模块随备份收集与应用。
 
 const SAMPLE = 1234567890;
+
+/* ---------- 设置分类 ---------- */
+
+function selectSettingsSection(section, focus = false) {
+  const modal = el("#settings-modal");
+  const tabs = [...modal.querySelectorAll("[data-settings-section]")];
+  const selected = tabs.find((tab) => tab.dataset.settingsSection === section);
+  if (!selected) return;
+  for (const tab of tabs) {
+    const active = tab === selected;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    el(`#${tab.getAttribute("aria-controls")}`).hidden = !active;
+  }
+  el("#settings-content").scrollTop = 0;
+  if (focus) selected.focus();
+}
+
+function initSettingsSections() {
+  const nav = el("#settings-nav");
+  const tabs = [...nav.querySelectorAll("[data-settings-section]")];
+  const narrow = window.matchMedia("(max-width: 680px)");
+  const updateOrientation = () => nav.setAttribute("aria-orientation", narrow.matches ? "horizontal" : "vertical");
+  updateOrientation();
+  narrow.addEventListener("change", updateOrientation);
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => selectSettingsSection(tab.dataset.settingsSection));
+    tab.addEventListener("keydown", (event) => {
+      const previous = narrow.matches ? "ArrowLeft" : "ArrowUp";
+      const next = narrow.matches ? "ArrowRight" : "ArrowDown";
+      let target;
+      if (event.key === previous) target = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === next) target = (index + 1) % tabs.length;
+      else if (event.key === "Home") target = 0;
+      else if (event.key === "End") target = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      selectSettingsSection(tabs[target].dataset.settingsSection, true);
+    });
+  });
+}
+
+function closeSettings() {
+  if (scanning) void onScanCancel();
+  el("#settings-modal").hidden = true;
+  el("#settings-btn").focus();
+}
 
 /** 弹窗内某一区块的状态条：set(kind, text) 填充并显示，clear() 隐藏并清空。 */
 function statusBox(selector) {
@@ -47,6 +94,13 @@ function renderUnitSeg() {
 /** 刷新间隔文案：不足 1 小时按分钟，整小时按小时（60 → 1 小时，1440 → 24 小时）。 */
 function intervalText(minutes) {
   return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
+}
+
+function renderSyncInterval() {
+  const minutes = getRefreshIntervalMinutes();
+  el("#gpt-sync-schedule").textContent = minutes > 0
+    ? `跟随定时刷新：每 ${intervalText(minutes)}同步一次。`
+    : "定时刷新已关闭。手动刷新、Tray 总览过期刷新及「立即同步」仍可同步用量。";
 }
 
 async function onIntervalChange() {
@@ -431,8 +485,11 @@ async function onScanCancel() {
 
 // 点「完成」：保存 Cursor / ChatGPT / Claude Desktop 路径并关闭；路径无效则提示且不关闭。空路径 = 清除配置。
 async function onDone() {
-  const modal = el("#settings-modal");
-  if (!await saveSyncSettings(true)) return;
+  if (!await saveSyncSettings(true)) {
+    selectSettingsSection("sync");
+    el("#gpt-sync-result").focus();
+    return;
+  }
   if (scanning) void onScanCancel();
   for (const c of CLIENT_PATHS) {
     try {
@@ -440,22 +497,33 @@ async function onDone() {
     } catch (error) {
       if (resetError(error) === c.invalid) {
         c.status.set("bad", "路径无效或文件不存在，请修正或清空后再完成。");
-        return;
+      } else {
+        c.status.set("bad", `保存路径失败：${resetError(error)}`);
       }
+      selectSettingsSection("clients");
+      el(c.input).focus();
+      return;
     }
   }
-  modal.hidden = true;
+  closeSettings();
 }
 
 /* ---------- 初始化 ---------- */
 
 export function initSettings() {
+  initSettingsSections();
   initSyncSettings();
+  onAccountsChanged(renderSyncInterval);
+  el("#gpt-sync-open-refresh").addEventListener("click", () => {
+    selectSettingsSection("accounts");
+    el("#accounts-interval").focus();
+  });
   const modal = el("#settings-modal");
   el("#settings-btn").addEventListener("click", () => {
     renderUnitSeg();
     intervalStatus.clear();
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
+    renderSyncInterval();
     localSyncStatus.clear();
     void loadLocalSyncInterval();
     void loadSyncSettings();
@@ -469,19 +537,16 @@ export function initSettings() {
     updateScanButton();
     el("#cursor-scan-cancel").hidden = true;
     modal.hidden = false;
+    el("#settings-nav [aria-selected='true']").focus();
     void loadAutostart();
     void loadClientPaths();
   });
   for (const node of modal.querySelectorAll("[data-close]")) {
-    node.addEventListener("click", () => {
-      if (scanning) void onScanCancel();
-      modal.hidden = true;
-    });
+    node.addEventListener("click", closeSettings);
   }
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !modal.hidden) {
-      if (scanning) void onScanCancel();
-      modal.hidden = true;
+      closeSettings();
     }
   });
   for (const seg of el("#unit-mode").querySelectorAll(".seg")) {

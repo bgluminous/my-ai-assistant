@@ -73,13 +73,16 @@ jobs:
         with:
           node-version: lts/*
 
+      # Actions Secrets: TAURI_SIGNING_PRIVATE_KEY 与密码必须匹配 tauri.conf.json 中的公钥。
+      # 备份并复用原私钥，重跑不能重新生成；换公钥会使已安装客户端无法验证后续更新。
+      # 这是 Tauri 更新签名，Windows Authenticode / Apple 代码签名仍未配置。
       - name: Check updater signing credentials
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-            echo '::error::Configure updater signing secrets before building (see docs/releasing.md)'
+            echo '::error::Configure updater signing secrets before building (see README.md)'
             exit 1
           fi
 
@@ -87,13 +90,16 @@ jobs:
         if: steps.meta.outputs.publish == 'true'
         run: node ci/check-pricing-source.mjs
 
+      # RELEASE_REGISTRY_TOKEN 需要公共索引仓库的 Contents 写权限；当前仓库 token 不能跨仓写入。
+      # 可选 RELEASE_TOKEN 用于项目 Release 的 Contents 写入；发布目标含工作流变更时，
+      # fine-grained / App token 还需 Workflows 写权限，classic PAT 需 workflow scope。
       - name: Check registry credential is configured
         if: steps.meta.outputs.publish == 'true'
         env:
           GITHUB_REGISTRY_TOKEN: ${{ secrets.RELEASE_REGISTRY_TOKEN }}
         run: |
           if [ -z "$GITHUB_REGISTRY_TOKEN" ]; then
-            echo '::error::Configure RELEASE_REGISTRY_TOKEN before publishing (see docs/releasing.md)'
+            echo '::error::Configure RELEASE_REGISTRY_TOKEN before publishing (see README.md)'
             exit 1
           fi
 
@@ -341,6 +347,8 @@ jobs:
           gh release edit "$TAG" --draft=false
           gh release view "$TAG" --json url,tagName,targetCommitish --jq '"published \(.tagName) at \(.targetCommitish): \(.url)"'
 
+  # Release 已公开后只重跑失败的登记 job，复用 prepare 保存的 release-registration 输入。
+  # 不重新构建、不改写已发布附件或更新说明；该输入 artifact 仅保留 1 天，应及时修复重试。
   register:
     name: Register ${{ matrix.platform }} version
     needs: [prepare, publish]

@@ -1,4 +1,5 @@
-// 随应用打包的离线搭建文档；与 docs/gpt-usage-sync-v1.md 和服务端交接文档保持一致。
+// 随应用打包的离线搭建提示词；契约对应 src-tauri/src/codex_store.rs 与 codex_sync.rs。
+// 修改协议时同步检查 src-tauri/src/tests/codex_*.rs 的哈希向量与传输回归。
 // 只复制固定协议内容，不拼接本机设置、同步密钥或用量记录。
 export const GPT_SYNC_SERVER_PROMPT = String.raw`# 为我搭建 MAA GPT 用量同步服务端
 

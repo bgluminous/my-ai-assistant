@@ -29,7 +29,8 @@ function setupTabs() {
   // （自带 tablist 容器与选中态管理），若一并绑定，点击会以 undefined panelId
   // 调 select——所有面板被隐藏、导航选中态被清空，页面看起来「全部消失」。
   const tabs = [...document.querySelectorAll("[role='tab'][data-panel]")];
-  const panels = [...document.querySelectorAll("[role='tabpanel']")];
+  // 面板同样限定在主导航，避免切换页面时隐藏设置弹窗内的分类。
+  const panels = tabs.map((tab) => document.getElementById(tab.dataset.panel));
   function select(panelId) {
     for (const tab of tabs) {
       const selected = tab.dataset.panel === panelId;

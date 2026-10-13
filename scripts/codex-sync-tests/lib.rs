@@ -48,6 +48,7 @@ mod settings {
     #[serde(default, rename_all = "camelCase")]
     pub struct Settings {
         pub codex_usage_sync: crate::codex_sync::SyncConfig,
+        pub interval_minutes: u32,
         pub pricing: crate::pricing::PricingTable,
         pub pricing_remote: crate::pricing::PricingRemote,
         pub proxy: crate::proxy::ProxyConfig,

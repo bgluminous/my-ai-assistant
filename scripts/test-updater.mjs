@@ -69,6 +69,57 @@ test("installation requires confirmation and keeps the confirmed version", async
   assert.equal(f.calls.at(-1).command, "app_update_install");
   assert.equal(f.calls.at(-1).args.version, "1.4.0");
 });
+test("the installed version keeps its notes when no upgrade is available", async () => {
+  const f = await fixture();
+  assert.match(f.nodes.get("#app-update-current-notes").textContent, /检查更新后/);
+  f.emit({ revision: 1, phase: "checking" });
+  assert.match(f.nodes.get("#app-update-current-notes").textContent, /正在获取/);
+  f.emit({ revision: 2, phase: "upToDate", latestVersion: null, currentChangelog: "修复启动异常" });
+  assert.equal(f.nodes.get("#app-update-current-notes-title").textContent, "当前版本 1.3.0 · 更新日志");
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "修复启动异常");
+  assert.equal(f.nodes.get("#app-update-new-notes").hidden, true);
+  assert.equal(f.nodes.get("#app-update-install").hidden, true);
+  assert.equal(f.nodes.get("#app-update-chip").hidden, true);
+  assert.equal(f.nodes.get("#app-update-current-notes-status").hidden, true);
+});
+test("only current and new release notes are shown as plain text", async () => {
+  const f = await fixture();
+  f.emit({ revision: 3, phase: "available", latestVersion: "1.4.0", canInstall: true,
+    currentChangelog: "当前版本说明", changelog: "<script>untrusted</script>\n新增功能" });
+  assert.equal(f.nodes.get("#app-update-new-notes").hidden, false);
+  assert.equal(f.nodes.get("#app-update-notes-title").textContent, "新版本 1.4.0 · 更新日志");
+  assert.equal(f.nodes.get("#app-update-notes").textContent, "<script>untrusted</script>\n新增功能");
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "当前版本说明");
+  assert.equal(f.nodes.get("#app-update-install").hidden, false);
+  f.emit({ revision: 2, phase: "upToDate", currentChangelog: "迟到的旧事件" });
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "当前版本说明");
+  assert.equal(f.calls.length, 1, "rendering notes must not fetch release history");
+});
+test("missing or empty notes have explicit states without showing older releases", async () => {
+  const f = await fixture();
+  f.emit({ revision: 1, phase: "upToDate", currentVersion: "1.4.0", latestVersion: null,
+    changelog: "更旧版本的日志", currentChangelogError: { code: "not_published" } });
+  assert.equal(f.nodes.get("#app-update-new-notes").hidden, true);
+  assert.equal(f.nodes.get("#app-update-current-notes-title").textContent, "当前版本 1.4.0 · 更新日志");
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "当前版本暂无已发布的更新日志。");
+  f.emit({ revision: 2, phase: "available", latestVersion: "1.5.0", changelog: " \n", currentChangelog: "" });
+  assert.equal(f.nodes.get("#app-update-notes").textContent, "该版本未提供更新日志。");
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "该版本未提供更新日志。");
+});
+test("current notes failures retain cached text without blocking the new version", async () => {
+  const f = await fixture();
+  const currentChangelogError = { code: "network", message: "无法连接更新源，请重试。" };
+  f.emit({ revision: 1, phase: "available", latestVersion: "1.4.0", canInstall: true,
+    changelog: "新版本说明", currentChangelog: "已读取的当前版本说明", currentChangelogError });
+  assert.equal(f.nodes.get("#app-update-current-notes").textContent, "已读取的当前版本说明");
+  assert.equal(f.nodes.get("#app-update-current-notes-status").hidden, false);
+  assert.match(f.nodes.get("#app-update-current-notes-status").textContent, /获取失败.*已保留/);
+  assert.equal(f.nodes.get("#app-update-install").hidden, false);
+  assert.equal(f.nodes.get("#app-update-install").disabled, false);
+  f.emit({ revision: 2, phase: "available", latestVersion: "1.4.0", currentChangelogError });
+  assert.match(f.nodes.get("#app-update-current-notes").textContent, /获取失败.*请重试/);
+  assert.equal(f.nodes.get("#app-update-current-notes-status").hidden, true);
+});
 test("progress, cancellation, stale events and required updates remain visible", async () => {
   const f = await fixture();
   f.emit({ revision: 4, phase: "downloading", downloadedBytes: 50, totalBytes: 100 });

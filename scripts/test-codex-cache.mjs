@@ -93,3 +93,70 @@ test("main and tray caches reload the same all-device archive after sync", async
   }
   assert.ok(calls.slice(-2).every((c) => c.cmd === "codex_usage_query" && c.args.deviceId === null));
 });
+
+test("explicit sync finishes before archive query; filters only affect the query", async () => {
+  let finish;
+  const calls = [];
+  const f = await fixture((cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === "codex_usage_sync_now") return new Promise((resolve) => { finish = resolve; });
+    return Promise.resolve(scan(45));
+  });
+  const synchronization = f.api.syncCodexUsage("viewing");
+  const read = f.api.fetchSyncedCodexScan({ key: "day:2026-10-01", deviceId: "remote", sinceMs: 1, untilMs: 2 }, synchronization);
+  assert.deepEqual(calls.map(c => c.cmd), ["codex_usage_sync_now"]);
+  assert.equal(JSON.stringify(calls[0].args), '{"trigger":"viewing"}');
+  f.change("sync");
+  finish({ state: "idle", error: null });
+  assert.equal((await read).scan.aggregate.totalTokens, 45);
+  assert.equal(calls[1].cmd, "codex_usage_query");
+  assert.equal(calls[1].args.deviceId, "remote");
+  assert.equal(calls[1].args.sinceMs, 1);
+});
+
+test("network failure or paused automatic retry keeps newly collected local statistics", async () => {
+  for (const paused of [false, true]) {
+    const f = await fixture(async (cmd) => {
+      if (cmd === "codex_usage_sync_now") {
+        if (paused) return { state: "paused", error: "sync_forbidden" };
+        throw new Error("sync_network");
+      }
+      assert.equal(cmd, "codex_usage_query");
+      return scan(35);
+    });
+    const result = f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage("interval"));
+    await assert.rejects(result, (error) => {
+      assert.match(String(error), paused ? /sync_forbidden/ : /sync_network/);
+      assert.equal(error.usageCache.scan.aggregate.totalTokens, 35);
+      return true;
+    });
+    assert.equal(f.api.getCachedScan("all", "").scan.aggregate.totalTokens, 35);
+  }
+});
+
+test("configuration change cancels an awaited sync without querying the replacement space", async () => {
+  let finish;
+  const calls = [];
+  const f = await fixture((cmd) => {
+    calls.push(cmd);
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  const result = f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage());
+  f.change("config");
+  finish({ state: "idle" });
+  await assert.rejects(result, /sync_cancelled/);
+  assert.deepEqual(calls, ["codex_usage_sync_now"]);
+});
+
+test("unconfigured sync still reads collected local usage and later events never resync", async () => {
+  const calls = [];
+  const f = await fixture(async (cmd) => {
+    calls.push(cmd);
+    return cmd === "codex_usage_sync_now" ? { state: "disabled" } : scan(15);
+  });
+  const entry = await f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage());
+  assert.equal(entry.scan.aggregate.totalTokens, 15);
+  f.change("sync");
+  await f.api.fetchCodexScan({ key: "all" });
+  assert.deepEqual(calls, ["codex_usage_sync_now", "codex_usage_query", "codex_usage_query"]);
+});

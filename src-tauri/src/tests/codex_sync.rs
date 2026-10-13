@@ -231,7 +231,6 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
     let input = |key: Option<String>| ConfigInput {
         server_url: String::new(),
         key,
-        interval_minutes: 5,
         source_home: String::new(),
         device_name: String::new(),
     };
@@ -245,7 +244,25 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
         .is_empty());
     let old: settings::Settings = serde_json::from_str("{}").unwrap();
     assert!(!old.codex_usage_sync.configured());
-    assert_eq!(old.codex_usage_sync.interval_minutes, 5);
+    assert_eq!(old.interval_minutes, 0);
+    for interval in [0, 15, 1440] {
+        let old: settings::Settings = serde_json::from_value(serde_json::json!({
+            "intervalMinutes": interval,
+            "codexUsageSync": { "intervalMinutes": 7 }
+        }))
+        .unwrap();
+        assert_eq!(old.interval_minutes, interval);
+        let restored = validate_saved_config(old.codex_usage_sync).unwrap();
+        assert!(serde_json::to_value(restored)
+            .unwrap()
+            .get("intervalMinutes")
+            .is_none());
+    }
+    let legacy_input: ConfigInput = serde_json::from_value(serde_json::json!({
+        "serverUrl": "", "key": null, "intervalMinutes": 7, "sourceHome": "", "deviceName": ""
+    }))
+    .unwrap();
+    assert!(config_from(legacy_input, &SyncConfig::default()).is_ok());
 }
 
 #[test]
@@ -255,7 +272,6 @@ fn backup_carries_connection_but_preserves_target_machine_fields() {
         sealed_key: local_crypto::seal("backup-key").unwrap(),
         source_home: "source-path".into(),
         device_name: "source-name".into(),
-        interval_minutes: 15,
     };
     let portable = original.portable();
     assert!(portable.source_home.is_empty());
@@ -272,10 +288,10 @@ fn backup_carries_connection_but_preserves_target_machine_fields() {
     assert_eq!(restored.source_home, target.source_home);
     assert_eq!(restored.device_name, target.device_name);
     assert_eq!(restored.server_url, original.server_url);
-    assert_eq!(restored.interval_minutes, 15);
     let wire = serde_json::to_value(restored).unwrap();
     assert!(wire.get("deviceId").is_none());
     assert!(wire.get("cursor").is_none());
+    assert!(wire.get("intervalMinutes").is_none());
     assert!(validate_saved_config(SyncConfig {
         server_url: "http://example.test".into(),
         ..original
@@ -386,37 +402,86 @@ fn incomplete_ack_and_configuration_change_cannot_commit_progress() {
 
 #[test]
 fn concurrent_triggers_execute_one_round() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Barrier,
-    };
-    let active = Arc::new(AtomicUsize::new(0));
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let owner = {
-        let active = active.clone();
-        let entered = entered.clone();
-        let release = release.clone();
-        std::thread::spawn(move || {
-            tauri::async_runtime::block_on(run_once(async {
-                active.fetch_add(1, Ordering::SeqCst);
-                entered.wait();
-                release.wait();
+    tauri::async_runtime::block_on(async {
+        for result in [Ok(()), Err("sync_network".into())] {
+            let mut state = Runtime::default();
+            let (release, pending) = tokio::sync::oneshot::channel();
+            let expected = result.clone();
+            let owner = state.start(
+                async move {
+                    pending.await.unwrap();
+                    result
+                },
+                || {},
+            );
+            let mut waiters = Vec::new();
+            for _ in 0..10 {
+                waiters.push(state.start(async { panic!("duplicate round") }, || {}));
+            }
+            // 其它窗口必须等待真实结果；原 IPC 等待者取消也不取消后台任务。
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), wait_for_round(owner))
+                    .await
+                    .is_err()
+            );
+            release.send(()).unwrap();
+            for done in waiters {
+                assert_eq!(wait_for_round(done).await, expected);
+            }
+            assert!(state.join().is_none());
+            assert_eq!(
+                wait_for_round(state.start(async { Ok(()) }, || {})).await,
                 Ok(())
-            }))
-        })
-    };
-    entered.wait();
-    for _ in 0..10 {
-        tauri::async_runtime::block_on(run_once(async {
-            active.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }))
-        .unwrap();
+            );
+        }
+    });
+}
+
+#[test]
+fn new_configuration_gets_its_own_round_and_old_waiters_keep_their_result() {
+    tauri::async_runtime::block_on(async {
+        let mut state = Runtime::default();
+        let (release, pending) = tokio::sync::oneshot::channel();
+        let old = state.start(
+            async move {
+                pending.await.unwrap();
+                Err("sync_cancelled".into())
+            },
+            || {},
+        );
+        state.generation += 1;
+        let fresh = state.start(async { Ok(()) }, || {});
+        assert_eq!(wait_for_round(fresh).await, Ok(()));
+        release.send(()).unwrap();
+        assert_eq!(wait_for_round(old).await.unwrap_err(), "sync_cancelled");
+        assert!(state.join().is_none());
+    });
+}
+
+#[test]
+fn unified_schedule_and_viewing_freshness_respect_pause_and_backoff() {
+    let mut state = Runtime::default();
+    let now = 1_000_000;
+    assert!(!state.should_sync(SyncTrigger::Interval, 0, None, now));
+    for interval in [5, 15, 30, 60, 360, 720, 1440] {
+        assert!(state.should_sync(SyncTrigger::Interval, interval, Some(now), now));
     }
-    release.wait();
-    owner.join().unwrap().unwrap();
-    assert_eq!(active.load(Ordering::SeqCst), 1);
+    assert!(state.should_sync(SyncTrigger::Viewing, 0, None, now));
+    assert!(!state.should_sync(SyncTrigger::Viewing, 0, Some(now - 299_999), now));
+    assert!(state.should_sync(SyncTrigger::Viewing, 0, Some(now - 300_000), now));
+    for error in ["sync_network", "sync_forbidden"] {
+        state.record_result(&Err(error.into()));
+        assert!(!state.should_sync(SyncTrigger::Interval, 5, None, now));
+        assert!(!state.should_sync(SyncTrigger::Viewing, 0, None, now));
+        assert!(state.should_sync(SyncTrigger::Manual, 0, Some(now), now));
+        state.next = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(
+            state.should_sync(SyncTrigger::Interval, 5, None, now),
+            !state.paused
+        );
+        state.record_result(&Ok(()));
+        assert!(state.next.is_none());
+    }
 }
 
 // 单连接、自动关闭的本机 HTTP 替身。只在测试中绕过 HTTPS URL 构造，生产校验保持不变。
@@ -721,13 +786,13 @@ fn account_disable_rotation_and_switch_keep_history_and_isolate_progress() {
     assert_eq!(account.center.uploaded_records.get(), uploaded);
     assert_eq!(a.records(&profile).unwrap().len(), 5);
     let mut state = Runtime::default();
-    state.record_result(&result, 5);
+    state.record_result(&result);
     assert!(state.paused);
 
     account.enabled.set(true);
     let result = sync_account(&account, &mut a, &config);
     result.as_ref().unwrap();
-    state.record_result(&result, 5);
+    state.record_result(&result);
     assert!(!state.paused);
     assert!(state.error.is_none());
     assert_eq!(a.pending_count(&profile).unwrap(), 0);
@@ -916,10 +981,10 @@ fn authentication_pauses_and_transient_failures_back_off_until_success() {
         "sync_forbidden",
         "sync_protocol_invalid",
     ] {
-        state.record_result(&Err(code.into()), 5);
+        state.record_result(&Err(code.into()));
         assert!(state.paused);
         assert_eq!(state.error.as_deref(), Some(code));
-        state.record_result(&Ok(()), 5);
+        state.record_result(&Ok(()));
         assert!(!state.paused);
         assert!(state.error.is_none());
         assert_eq!(state.failures, 0);
@@ -932,14 +997,14 @@ fn authentication_pauses_and_transient_failures_back_off_until_success() {
         ("sync_network", 1800),
     ] {
         let before = Instant::now();
-        state.record_result(&Err(code.into()), 5);
+        state.record_result(&Err(code.into()));
         let after = Instant::now();
         assert!(!state.paused);
         let next = state.next.unwrap();
         assert!(next >= before + Duration::from_secs(seconds));
         assert!(next <= after + Duration::from_secs(seconds));
     }
-    state.record_result(&Ok(()), 15);
+    state.record_result(&Ok(()));
     assert!(state.error.is_none());
     assert_eq!(state.failures, 0);
 }

@@ -113,7 +113,6 @@ pub fn run() {
             // 本机 Codex 客户端改写 auth.json 后，把同账号账户的凭据副本跟上（每分钟看一次修改时间）
             app_update::start(app.handle().clone());
             codex_local::start_local_sync(app.handle().clone());
-            codex_sync::start(app.handle().clone());
             // 最小窗口尺寸运行时兜底（与 tauri.conf.json 的 minWidth/minHeight 一致），
             // 防止个别环境下窗口配置未生效导致界面被压得过小。
             if let Some(win) = app.get_webview_window(main_window::LABEL) {

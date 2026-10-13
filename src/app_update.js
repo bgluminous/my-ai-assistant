@@ -12,6 +12,21 @@ function setUpdateStatus(text, kind = "") {
   status.className = `app-update-state ${kind}`.trim();
   status.textContent = text;
 }
+function renderChangelogs(view) {
+  el("#app-update-new-notes").hidden = !view.latestVersion;
+  el("#app-update-notes-title").textContent = `新版本 ${view.latestVersion || ""} · 更新日志`;
+  el("#app-update-notes").textContent = view.changelog?.trim() || "该版本未提供更新日志。";
+  el("#app-update-current-notes-title").textContent = `当前版本 ${view.currentVersion} · 更新日志`;
+  const error = view.currentChangelogError;
+  const errorMessage = error?.code === "not_published" ? "当前版本暂无已发布的更新日志。" :
+    error ? `当前版本更新日志获取失败。${error.message || "请稍后重试。"}` : "";
+  const hasNotes = view.currentChangelog != null;
+  el("#app-update-current-notes").textContent = hasNotes ?
+    (view.currentChangelog.trim() || "该版本未提供更新日志。") :
+    errorMessage || (view.phase === "checking" ? "正在获取当前版本的更新日志…" : "检查更新后显示当前版本的更新日志。");
+  el("#app-update-current-notes-status").textContent = hasNotes && error ? `${errorMessage}已保留上次读取的内容。` : "";
+  el("#app-update-current-notes-status").hidden = !hasNotes || !error;
+}
 function render(view) {
   if (!view || (state && view.revision < state.revision)) return;
   state = view;
@@ -19,8 +34,7 @@ function render(view) {
   setUpdateStatus(ui.text, ui.failed ? "bad" : view.phase === "upToDate" ? "ok" :
     ui.busy ? "busy" : view.latestVersion ? "available" : "");
   el("#app-update-meta").textContent = `当前版本 ${view.currentVersion}${view.checkedAtMs ? ` · 最近检查 ${fmtDateMs(view.checkedAtMs)}` : ""}`;
-  el("#app-update-notes").textContent = view.changelog || (view.latestVersion ? "该版本未提供更新说明。" : "");
-  el("#app-update-notes").hidden = !view.latestVersion;
+  renderChangelogs(view);
   el("#app-update-manual").textContent = view.manualReason || "";
   el("#app-update-manual").hidden = !view.manualReason;
   el("#app-update-required").hidden = !view.forceUpdate;

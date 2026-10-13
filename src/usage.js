@@ -33,6 +33,8 @@ import {
   updateDeletedUsageAccount,
   setDeletedUsageMembership,
   fetchCodexScan,
+  fetchSyncedCodexScan,
+  syncCodexUsage,
   fetchClaudeScan,
   purgeAccountCache,
   purgeMissingAccounts,
@@ -1364,8 +1366,11 @@ function scanParams(home, force) {
   };
 }
 
-function fetchLocal(key, home, force) {
-  return LOCAL_SOURCES[key].fetch({ ...scanParams(home, force), ...(key === "local" ? { deviceId: selectedCodexDevice() } : {}) });
+function fetchLocal(key, home, force, synchronization = null) {
+  const options = { ...scanParams(home, force), ...(key === "local" ? { deviceId: selectedCodexDevice() } : {}) };
+  return key === "local" && synchronization
+    ? fetchSyncedCodexScan(options, synchronization)
+    : LOCAL_SOURCES[key].fetch(options);
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -1822,7 +1827,7 @@ function deletedFailedCount() {
  * 合并视图加载：全部总览 / 多选子集 / 仅已删除账户共用。参与来源由 activeSources 决定，
  * 每个来源完成后立即合并重绘；「已删除」是整体项，包含全部已删除账户保留的数据。
  */
-async function loadOverview(force, seq) {
+async function loadOverview(force, seq, synchronization = null) {
   const startKey = selectionKey();
   const { cursorAccounts, localKeys, includeDeleted } = activeSources();
   el("#usage-overview").hidden = false;
@@ -1871,11 +1876,13 @@ async function loadOverview(force, seq) {
   // 2) 本地 Codex / Claude 扫描与各 Cursor 账户并行拉取，每个来源完成后立即合并重绘
   //   （有效期内的来源在 usage_data 中直接命中缓存，不会走网络）
   const scanJobs = localKeys.map((key) =>
-    fetchLocal(key, null, force)
+    fetchLocal(key, null, force, synchronization)
       .then((entry) => {
+        if (seq !== loadSeq) return;
         overviewResults.set(key, { state: "ok", scan: entry.scan, at: entry.at });
       })
       .catch((error) => {
+        if (seq !== loadSeq) return;
         const prev = overviewResults.get(key) || {};
         const fallback = error && error.usageCache;
         overviewResults.set(key, {
@@ -2017,7 +2024,7 @@ function renderLocalScan(key, scan, at) {
   }
 }
 
-async function loadLocalScan(key, force, seq) {
+async function loadLocalScan(key, force, seq, synchronization = null) {
   const home = localHomeRaw(key) || null;
   // 先渲染缓存（含过期缓存），再后台重新扫描（进度不弹 toast，见骨架屏与「更新中…」）
   const cached = getCachedLocal(key, home);
@@ -2025,7 +2032,7 @@ async function loadLocalScan(key, force, seq) {
   const btn = el(LOCAL_SOURCES[key].scanBtn);
   btn.disabled = true;
   try {
-    const entry = await fetchLocal(key, home, force);
+    const entry = await fetchLocal(key, home, force, synchronization);
     if (seq !== loadSeq) return;
     clearStatus();
     renderLocalScan(key, entry.scan, entry.at);
@@ -2039,7 +2046,7 @@ async function loadLocalScan(key, force, seq) {
   }
 }
 
-async function loadCurrent(force) {
+async function loadCurrent(force, synchronization = null) {
   // 结果区仍展示着当前选择且未过期时无需重载。
   // 此判断必须在递增 loadSeq 之前：否则一次「无操作」的调用（如重复点击当前 chip）
   // 会作废在途加载却不开启新加载——lanes 提前退出、loading 永远无法复位，
@@ -2052,19 +2059,23 @@ async function loadCurrent(force) {
   setLoadingHint(true);
   try {
     if (isMergedView()) {
-      await loadOverview(force, seq);
+      await loadOverview(force, seq, synchronization);
     } else if (isLocalSelection()) {
-      await loadLocalScan(selection, force, seq);
+      await loadLocalScan(selection, force, seq, synchronization);
     } else {
       const account = currentAccount();
       if (!account) {
         selectedKeys.clear();
         rebuildChips();
         applyVisibility();
-        await loadOverview(force, seq);
+        await loadOverview(force, seq, synchronization);
       } else {
         await loadCursorAccount(account, force, seq);
       }
+    }
+    if (synchronization) {
+      const { error } = await synchronization;
+      if (error && seq === loadSeq) setStatus("warn", `GPT 用量同步失败：${syncError(error)}`);
     }
   } catch (error) {
     // 统计编排本身异常（各来源的拉取失败已在内部消化）——必须可见，
@@ -2095,11 +2106,34 @@ function setLoadingHint(on) {
  * 走完后结果区仍隐藏说明新视图 / 新跨度无任何缓存，露出骨架占位并提示「统计中…」；
  * 已有旧数据在展示则提示「更新中…」。首个结果渲染（renderAggregate）时骨架自动隐藏。
  */
-function loadView(force) {
-  void loadCurrent(!!force);
+function loadView(force, synchronization = null) {
+  const done = loadCurrent(!!force, synchronization);
   const nothingShown = el("#usage-results").hidden;
   el("#usage-skeleton").hidden = !nothingShown;
   el("#usage-loading-text").textContent = nothingShown ? "统计中…" : "更新中…";
+  return done;
+}
+
+let manualRefresh = null;
+let manualSyncPending = false;
+function refreshUsage() {
+  if (manualRefresh) return manualRefresh;
+  const initialSelection = selectionKey();
+  // 与所选来源无关；Codex 查询等待这轮同步，Cursor / Claude 立即并行刷新。
+  manualSyncPending = true;
+  const synchronization = syncCodexUsage("manual").finally(() => { manualSyncPending = false; });
+  manualRefresh = loadView(true, synchronization).finally(() => {
+    manualRefresh = null;
+    if (initialSelection !== selectionKey()) {
+      renderedFor = "";
+      if (panelVisible) loadView(false);
+    }
+  });
+  const ids = isMergedView()
+    ? activeSources().cursorAccounts.map((a) => a.id)
+    : currentAccount() ? [selection] : [];
+  if (ids.length) void refreshAccounts(ids);
+  return manualRefresh;
 }
 
 /* ---------- 统一刷新：账户刷新联动预取 / 跨窗口缓存联动 ---------- */
@@ -2391,7 +2425,13 @@ export function initUsage() {
     try { await invoke("codex_usage_cache_clear", { deviceId }); }
     catch (error) { setStatus("bad", syncError(error)); }
   });
-  window.addEventListener(CODEX_USAGE_CHANGED_EVENT, () => {
+  window.addEventListener(CODEX_USAGE_CHANGED_EVENT, (event) => {
+    if (event.detail?.reason !== "sync") manualSyncPending = false;
+    if (event.detail?.reason === "sync" && manualSyncPending) {
+      // 本轮查询已等待同步，不能用自己的完成通知作废并行加载。
+      void refreshCodexDevices();
+      return;
+    }
     loadSeq += 1;
     loading = false;
     setLoadingHint(false);
@@ -2401,16 +2441,7 @@ export function initUsage() {
     renderedFor = "";
     void refreshCodexDevices().then(() => { if (panelVisible) loadView(false); });
   });
-  el("#usage-refresh").addEventListener("click", () => {
-    // 统一刷新：重新统计当前视图，并顺带刷新视图相关账户的状态（合并视图取参与合并的账户）
-    loadView(true);
-    const ids = isMergedView()
-      ? activeSources().cursorAccounts.map((a) => a.id)
-      : currentAccount()
-      ? [selection]
-      : [];
-    if (ids.length) void refreshAccounts(ids);
-  });
+  el("#usage-refresh").addEventListener("click", refreshUsage);
   // 原始账单：单账户视图下查看该账户在当前时间范围内的逐笔用量事件（弹窗见 raw_events.js）
   el("#usage-raw").addEventListener("click", () => {
     const account = currentAccount();

@@ -69,6 +69,7 @@ test("connection test uses the form without saving or starting sync", async () =
   assert.equal(actions[0].command, "codex_usage_sync_test");
   assert.equal(actions[0].args.config.serverUrl, "https://sync.example.test/maa");
   assert.equal(actions[0].args.config.key, "replacement-test-key");
+  assert.equal("intervalMinutes" in actions[0].args.config, false);
   assert.match(f.el("#gpt-sync-result").textContent, /未上传数据或登记设备/);
 });
 

@@ -1451,9 +1451,117 @@ input.price-input {
 #proxy-test-result.test-bad { color: var(--bad); }
 #proxy-status { margin-top: 14px; }
 
-/* 设置弹窗内的分区分隔线；.row 中需要占满剩余宽度的输入框加 .grow */
+/* 弹窗分隔线；.row 中需要占满剩余宽度的输入框加 .grow */
 .modal-divider { border: 0; border-top: 1px solid var(--border); margin: 18px 0 2px; }
 .row > .grow { flex: 1; width: auto; min-width: 220px; }
+
+/* 设置使用独立分类，导航与底部操作固定，仅内容区滚动。 */
+.settings-card { max-width: 960px; height: min(760px, 88vh); }
+.settings-card > .modal-head,
+.settings-card > .modal-foot { flex-shrink: 0; }
+.settings-layout {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 12px;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--well);
+}
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-tab svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.settings-tab:hover { background: var(--surface-2); color: var(--text); }
+.settings-tab[aria-selected="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 650;
+}
+.settings-tab:focus-visible,
+.settings-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  padding: 24px 26px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.settings-panel { display: flex; flex-direction: column; gap: 16px; }
+.settings-panel-head { margin-bottom: 4px; }
+.settings-panel-head h3 { margin: 0 0 6px; font-size: 19px; }
+.settings-panel-head p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.settings-group {
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--well);
+}
+.settings-group h4 { margin: 0 0 14px; color: var(--text-strong); font-size: 13.5px; }
+.settings-group > label { margin-top: 14px; }
+.settings-group > h4 + label { margin-top: 0; }
+.settings-group > p { margin: 10px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
+.settings-group > .toggle,
+.settings-group .toggle-group .toggle { margin: 0; }
+.settings-group .toggle-group { gap: 14px; margin: 0; }
+.settings-group .compact-select { width: min(100%, 240px); }
+.settings-group .settings-path-row { margin-top: 0; gap: 8px; }
+.settings-group .settings-key-clear { margin-top: 10px; }
+.settings-path-row > .grow { flex-basis: 200px; min-width: 0; }
+.settings-sync-status { padding-top: 12px; border-top: 1px solid var(--border); }
+.settings-panel > .sync-setup,
+.settings-panel > .status { margin: 0; }
+.settings-password-row { margin: 0; padding: 16px; border-radius: var(--radius); background: var(--well); }
+.settings-password-row > .grow { min-width: 160px; }
+.settings-save-note { margin: 0; }
+
+@media (max-width: 680px) {
+  #settings-modal { padding: 12px; }
+  .settings-card { height: 92vh; max-height: 92vh; }
+  .settings-layout { display: flex; flex-direction: column; }
+  .settings-nav {
+    flex-direction: row;
+    flex-shrink: 0;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-tab { flex-shrink: 0; width: auto; padding: 9px 10px; }
+  .settings-content { flex: 1; padding: 18px 16px; }
+  .settings-group { padding: 16px; }
+  .settings-card > .modal-head,
+  .settings-card > .modal-foot { padding: 16px; }
+  .settings-save-note { max-width: 240px; }
+}
 
 /* 同步设置内的搭建文档入口，窄窗口时按钮自动换行。 */
 .sync-setup {
@@ -1627,8 +1735,11 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .app-update-state.busy, .app-update-state.available { color: var(--accent); }
 .app-update-state.busy::before { animation: pulse 1.3s ease-in-out infinite; }
 .app-update-message { margin: 14px 0 0; overflow-wrap: anywhere; }
+.app-update-notes-section { margin-top: 16px; }
+.app-update-notes-section h4 { margin: 0; font-size: 13px; font-weight: 600; }
+#app-update-current-notes-status { margin: 8px 0 0; overflow-wrap: anywhere; }
 .update-notes {
-  margin: 16px 0 0;
+  margin: 8px 0 0;
   padding: 14px 16px;
   max-height: 260px;
   overflow-y: auto;

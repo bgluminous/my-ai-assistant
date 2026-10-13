@@ -442,7 +442,15 @@
           </div>
           <p id="app-update-required" class="status bad" hidden>此版本要求更新。请完成更新后继续使用；可先在设置中导出备份。</p>
           <p id="app-update-manual" class="muted small app-update-message" hidden></p>
-          <pre id="app-update-notes" class="update-notes" aria-label="更新说明" hidden></pre>
+          <section id="app-update-new-notes" class="app-update-notes-section" aria-labelledby="app-update-notes-title" hidden>
+            <h4 id="app-update-notes-title">新版本更新日志</h4>
+            <pre id="app-update-notes" class="update-notes"></pre>
+          </section>
+          <section class="app-update-notes-section" aria-labelledby="app-update-current-notes-title">
+            <h4 id="app-update-current-notes-title">当前版本更新日志</h4>
+            <p id="app-update-current-notes-status" class="muted small" role="status" hidden></p>
+            <pre id="app-update-current-notes" class="update-notes">检查更新后显示当前版本的更新日志。</pre>
+          </section>
           <progress id="app-update-progress" max="100" hidden aria-label="更新下载进度"></progress>
           <p id="app-update-progress-text" class="muted small" aria-live="polite" hidden></p>
           <div class="app-update-footer">
@@ -650,165 +658,236 @@
     <!-- ============ 设置弹窗 ============ -->
     <div id="settings-modal" class="modal" hidden>
       <div class="modal-backdrop" data-close></div>
-      <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+      <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
         <div class="modal-head">
           <div>
             <h3 id="settings-modal-title">设置</h3>
-            <p class="muted small">应用设置，保存在本机。</p>
+            <p class="muted small">按需调整，让应用更合你的习惯。</p>
           </div>
           <button id="settings-close" class="icon-btn" type="button" aria-label="关闭" data-close>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
-        <div class="modal-body">
-          <label>Token 数量单位</label>
-          <div id="unit-mode" class="segmented segmented-full" role="group" aria-label="Token 数量单位">
-            <button class="seg" type="button" data-unit="full">完整数字</button>
-            <button class="seg" type="button" data-unit="en">K / M / B</button>
-            <button class="seg" type="button" data-unit="zh">万 / 亿</button>
+        <div class="settings-layout">
+          <nav id="settings-nav" class="settings-nav" role="tablist" aria-label="设置分类" aria-orientation="vertical">
+            <button id="settings-tab-general" class="settings-tab" type="button" role="tab" data-settings-section="general" aria-controls="settings-general" aria-selected="true">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+              <span>通用</span>
+            </button>
+            <button id="settings-tab-accounts" class="settings-tab" type="button" role="tab" data-settings-section="accounts" aria-controls="settings-accounts" aria-selected="false" tabindex="-1">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21v-2a7 7 0 0 1 12-5M16 16h5v-5M21 16a6 6 0 0 0-5-6M21 20a6 6 0 0 1-6 1"/></svg>
+              <span>账户与刷新</span>
+            </button>
+            <button id="settings-tab-sync" class="settings-tab" type="button" role="tab" data-settings-section="sync" aria-controls="settings-sync" aria-selected="false" tabindex="-1">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-7M20 7V0M4 17h7M4 17v7M4.5 8a8 8 0 0 1 13-3L20 7M4 17l2.5 2a8 8 0 0 0 13-3"/></svg>
+              <span>GPT 用量同步</span>
+            </button>
+            <button id="settings-tab-clients" class="settings-tab" type="button" role="tab" data-settings-section="clients" aria-controls="settings-clients" aria-selected="false" tabindex="-1">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 8h18M8 12l3 3-3 3M14 18h3"/></svg>
+              <span>客户端</span>
+            </button>
+            <button id="settings-tab-backup" class="settings-tab" type="button" role="tab" data-settings-section="backup" aria-controls="settings-backup" aria-selected="false" tabindex="-1">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>
+              <span>数据备份</span>
+            </button>
+          </nav>
+
+          <div id="settings-content" class="settings-content">
+            <section id="settings-general" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-general" tabindex="0">
+              <div class="settings-panel-head">
+                <h3>通用</h3>
+                <p>显示偏好、启动方式与应用更新，更改即时生效。</p>
+              </div>
+              <section class="settings-group" aria-labelledby="settings-display-title">
+                <h4 id="settings-display-title">数字显示</h4>
+                <label id="unit-mode-label">Token 数量单位</label>
+                <div id="unit-mode" class="segmented segmented-full" role="group" aria-labelledby="unit-mode-label">
+                  <button class="seg" type="button" data-unit="full">完整数字</button>
+                  <button class="seg" type="button" data-unit="en">K / M / B</button>
+                  <button class="seg" type="button" data-unit="zh">万 / 亿</button>
+                </div>
+                <p class="muted small">示例：<span id="unit-sample"></span>；缩写时悬停可查看完整值。</p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-startup-title">
+                <h4 id="settings-startup-title">启动方式</h4>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input id="autostart-enabled" type="checkbox" />
+                    <span class="toggle-track" aria-hidden="true"></span>
+                    <span class="toggle-text">开机自启动</span>
+                  </label>
+                  <label class="toggle">
+                    <input id="autostart-silent" type="checkbox" />
+                    <span class="toggle-track" aria-hidden="true"></span>
+                    <span class="toggle-text">静默启动，仅在托盘运行</span>
+                  </label>
+                </div>
+                <p class="muted small">随系统登录自动运行。静默启动时不弹出主窗口，双击托盘图标即可打开。</p>
+                <p id="autostart-status" class="status" hidden></p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-update-title">
+                <h4 id="settings-update-title">应用更新</h4>
+                <label class="toggle">
+                  <input id="app-update-auto" type="checkbox" checked />
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <span class="toggle-text">自动检查新版本</span>
+                </label>
+                <p class="muted small">启动 30 秒后检查，此后每 24 小时检查一次。下载、安装和重启前需要确认。</p>
+              </section>
+            </section>
+
+            <section id="settings-accounts" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-accounts" tabindex="0" hidden>
+              <div class="settings-panel-head">
+                <h3>账户与刷新</h3>
+                <p>管理账户状态与本机凭据的更新频率，更改即时生效。</p>
+              </div>
+              <section class="settings-group" aria-labelledby="settings-refresh-title">
+                <h4 id="settings-refresh-title">账户状态与用量</h4>
+                <label for="accounts-interval">定时刷新</label>
+                <select id="accounts-interval" class="compact-select">
+                  <option value="0" selected>关闭</option>
+                  <option value="5">5 分钟</option>
+                  <option value="15">15 分钟</option>
+                  <option value="30">30 分钟</option>
+                  <option value="60">1 小时</option>
+                  <option value="360">6 小时</option>
+                  <option value="720">12 小时</option>
+                  <option value="1440">24 小时</option>
+                </select>
+                <p class="muted small">按设定间隔自动刷新全部账户状态，并重新统计用量数据。</p>
+                <p id="interval-status" class="status" hidden></p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-credentials-title">
+                <h4 id="settings-credentials-title">本机 ChatGPT 凭据</h4>
+                <label for="local-sync-interval">同步间隔</label>
+                <select id="local-sync-interval" class="compact-select">
+                  <option value="1">1 分钟</option>
+                  <option value="5" selected>5 分钟</option>
+                  <option value="10">10 分钟</option>
+                  <option value="30">30 分钟</option>
+                  <option value="60">1 小时</option>
+                  <option value="360">6 小时</option>
+                  <option value="1440">1 天</option>
+                </select>
+                <p class="muted small">ChatGPT Desktop / Codex CLI 续期后，按此间隔检查本机 auth.json 的变化，更新同账号的凭据副本。此过程不联网。</p>
+                <p id="local-sync-status" class="status" hidden></p>
+              </section>
+            </section>
+
+            <section id="settings-sync" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-sync" tabindex="0" hidden>
+              <div class="settings-panel-head">
+                <h3>GPT 用量同步</h3>
+                <p>在多台设备之间同步用量明细，未配置服务器时不联网。</p>
+              </div>
+              <section class="settings-group" aria-labelledby="settings-server-title">
+                <h4 id="settings-server-title">服务器连接</h4>
+                <label for="gpt-sync-url">中心服务器地址（留空停用）</label>
+                <input id="gpt-sync-url" type="url" spellcheck="false" placeholder="https://sync.example.com" />
+                <label for="gpt-sync-key">账户同步密钥</label>
+                <input id="gpt-sync-key" type="password" autocomplete="new-password" spellcheck="false" />
+                <label class="inline settings-key-clear"><input id="gpt-sync-clear-key" type="checkbox" />清除已保存的同步密钥</label>
+                <p class="muted small">由服务端管理后台生成，同一账户的所有机器填写同一个密钥。与 OpenAI API Key 或 GPT 登录凭据无关；重置后需更新所有机器，服务端历史保留。</p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-device-title">
+                <h4 id="settings-device-title">本机采集</h4>
+                <label for="gpt-sync-device-name">本机设备名称</label>
+                <input id="gpt-sync-device-name" type="text" maxlength="128" />
+                <label for="gpt-sync-home">本机采集目录（CODEX_HOME）</label>
+                <input id="gpt-sync-home" type="text" spellcheck="false" placeholder="留空沿用环境变量和默认 ~/.codex" />
+              </section>
+              <section class="settings-group" aria-labelledby="settings-sync-frequency-title">
+                <h4 id="settings-sync-frequency-title">同步方式</h4>
+                <p id="gpt-sync-schedule" class="muted small" aria-live="polite"></p>
+                <button id="gpt-sync-open-refresh" class="secondary" type="button">前往「账户与刷新」调整周期</button>
+                <div class="row wrap">
+                  <button id="gpt-sync-save" class="secondary" type="button">保存同步设置</button>
+                  <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
+                  <button id="gpt-sync-now" class="secondary" type="button">立即同步</button>
+                </div>
+                <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。保存配置后同步一次；之后跟随定时刷新、Tray 和统计页刷新。打开 Tray 总览或切换日期时，超过 5 分钟未成功同步会自动补拉。测试连接只验证账户。</p>
+                <p id="gpt-sync-status" class="muted small settings-sync-status"></p>
+                <p id="gpt-sync-result" class="status" tabindex="-1" aria-live="polite" hidden></p>
+              </section>
+              <section class="sync-setup" aria-labelledby="gpt-sync-setup-title">
+                <div class="sync-setup-text">
+                  <h4 id="gpt-sync-setup-title">自行搭建同步服务端</h4>
+                  <p class="muted small">复制搭建文档交给你的 agent，完成后将它提供的服务器地址和同步密钥填入上方。</p>
+                </div>
+                <button id="gpt-sync-copy-prompt" class="secondary compact" type="button">复制提示词</button>
+              </section>
+            </section>
+
+            <section id="settings-clients" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-clients" tabindex="0" hidden>
+              <div class="settings-panel-head">
+                <h3>客户端</h3>
+                <p>设置切换账户后启动的客户端，留空时自动检测安装位置。</p>
+              </div>
+              <section class="settings-group" aria-labelledby="settings-cursor-title">
+                <h4 id="settings-cursor-title">Cursor</h4>
+                <label for="cursor-exe-path">客户端路径</label>
+                <div class="row settings-path-row">
+                  <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" placeholder="Cursor.exe / Cursor.app 完整路径" />
+                  <button id="cursor-detect" class="secondary compact" type="button">自动搜索</button>
+                  <button id="cursor-scan-cancel" class="secondary compact" type="button" hidden>取消</button>
+                </div>
+                <p class="muted small">自动搜索会遍历磁盘目录，找到后填入路径，可继续搜索下一个或随时取消。</p>
+                <p id="cursor-scan-progress" class="muted small scan-progress" hidden></p>
+                <p id="cursor-path-status" class="status" hidden></p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-codex-title">
+                <h4 id="settings-codex-title">ChatGPT</h4>
+                <label for="codex-exe-path">客户端路径</label>
+                <div class="row settings-path-row">
+                  <input id="codex-exe-path" class="grow" type="text" spellcheck="false" placeholder="ChatGPT.exe / ChatGPT.app / Codex.app 完整路径" />
+                  <button id="codex-detect" class="secondary compact" type="button">自动搜索</button>
+                </div>
+                <p class="muted small">自动检测 Microsoft Store 与常见安装位置。</p>
+                <p id="codex-path-status" class="status" hidden></p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-claude-title">
+                <h4 id="settings-claude-title">Claude Desktop</h4>
+                <label for="claude-exe-path">客户端路径</label>
+                <div class="row settings-path-row">
+                  <input id="claude-exe-path" class="grow" type="text" spellcheck="false" placeholder="claude.exe / Claude.app 完整路径" />
+                  <button id="claude-detect" class="secondary compact" type="button">自动搜索</button>
+                </div>
+                <p class="muted small">切换账户时写入 Claude Code 凭据，完成后启动 Claude Desktop。</p>
+                <p id="claude-path-status" class="status" hidden></p>
+              </section>
+            </section>
+
+            <section id="settings-backup" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-backup" tabindex="0" hidden>
+              <div class="settings-panel-head">
+                <h3>数据备份</h3>
+                <p>将本机数据保存为备份，或从已有备份恢复。</p>
+              </div>
+              <section class="settings-group" aria-labelledby="settings-export-title">
+                <h4 id="settings-export-title">导出备份</h4>
+                <p class="muted small">保存为单个 JSON 文件，包含全部设置、账号与 Token、界面偏好，以及已删除 Cursor 账户保留的统计数据。可设置密码加密。</p>
+                <div class="row">
+                  <button id="backup-export" class="secondary" type="button">导出全部数据…</button>
+                </div>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-import-title">
+                <h4 id="settings-import-title">导入备份</h4>
+                <p class="muted small">账号去重后合并，已删除账户的统计数据按账号身份合并。其余设置以备份文件为准，导入后立即生效。</p>
+                <div class="row">
+                  <button id="backup-import" class="secondary" type="button">导入全部数据…</button>
+                </div>
+              </section>
+              <div id="backup-password-row" class="row settings-password-row" hidden>
+                <input id="backup-password" class="grow" type="password" spellcheck="false" autocomplete="off" aria-label="备份密码" placeholder="" />
+                <button id="backup-password-ok" class="secondary compact" type="button">确认</button>
+                <button id="backup-password-cancel" class="secondary compact" type="button">取消</button>
+              </div>
+              <p id="backup-status" class="status" hidden></p>
+            </section>
           </div>
-          <p class="muted small">示例：<span id="unit-sample"></span>；缩写时悬停数字可查看完整值。</p>
-
-          <hr class="modal-divider" />
-
-          <label for="accounts-interval">定时刷新</label>
-          <select id="accounts-interval" class="compact-select">
-            <option value="0" selected>关闭</option>
-            <option value="5">5 分钟</option>
-            <option value="15">15 分钟</option>
-            <option value="30">30 分钟</option>
-            <option value="60">1 小时</option>
-            <option value="360">6 小时</option>
-            <option value="720">12 小时</option>
-            <option value="1440">24 小时</option>
-          </select>
-          <p class="muted small">按设定间隔自动刷新全部账户状态，并重新统计用量数据。</p>
-          <p id="interval-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label>GPT 用量同步</label>
-          <label for="gpt-sync-url" class="muted small">中心服务器地址（留空停用）</label>
-          <input id="gpt-sync-url" type="url" spellcheck="false" placeholder="https://sync.example.com" />
-          <label for="gpt-sync-key" class="muted small">账户同步密钥</label>
-          <input id="gpt-sync-key" type="password" autocomplete="new-password" spellcheck="false" />
-          <label class="inline"><input id="gpt-sync-clear-key" type="checkbox" />清除已保存的同步密钥</label>
-          <p class="muted small">由服务端管理后台生成，同一账户的所有机器填写同一个密钥。与 OpenAI API Key 或 GPT 登录凭据无关；重置后需更新所有机器，服务端历史保留。</p>
-          <label for="gpt-sync-device-name" class="muted small">本机设备名称</label>
-          <input id="gpt-sync-device-name" type="text" maxlength="128" />
-          <label for="gpt-sync-home" class="muted small">本机采集目录（CODEX_HOME）</label>
-          <input id="gpt-sync-home" type="text" spellcheck="false" placeholder="留空沿用环境变量和默认 ~/.codex" />
-          <label for="gpt-sync-interval" class="muted small">自动同步</label>
-          <select id="gpt-sync-interval" class="compact-select">
-            <option value="0">关闭（仅手动）</option>
-            <option value="5" selected>每 5 分钟</option>
-            <option value="15">每 15 分钟</option>
-            <option value="30">每 30 分钟</option>
-            <option value="60">每 1 小时</option>
-          </select>
-          <div class="row wrap">
-            <button id="gpt-sync-save" class="secondary" type="button">保存同步设置</button>
-            <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
-            <button id="gpt-sync-now" class="secondary" type="button">立即同步</button>
-          </div>
-          <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。测试连接只验证账户；保存配置后同步历史并登记设备，MAA 在托盘运行时继续自动同步。</p>
-          <p id="gpt-sync-status" class="muted small"></p>
-          <p id="gpt-sync-result" class="status" hidden></p>
-          <section class="sync-setup" aria-labelledby="gpt-sync-setup-title">
-            <div class="sync-setup-text">
-              <h4 id="gpt-sync-setup-title">自行搭建同步服务端</h4>
-              <p class="muted small">复制搭建文档交给你的 agent，完成后将它提供的服务器地址和同步密钥填入上方。</p>
-            </div>
-            <button id="gpt-sync-copy-prompt" class="secondary compact" type="button">复制提示词</button>
-          </section>
-          <hr class="modal-divider" />
-
-          <h4>应用更新</h4>
-          <label class="inline"><input id="app-update-auto" type="checkbox" checked />自动检查新版本</label>
-          <p class="muted small">启动 30 秒后检查，此后每 24 小时检查一次；下载、安装和重启前需要确认。</p>
-          <hr class="modal-divider" />
-
-          <label for="local-sync-interval">同步本机 ChatGPT 凭据</label>
-          <select id="local-sync-interval" class="compact-select">
-            <option value="1">1 分钟</option>
-            <option value="5" selected>5 分钟</option>
-            <option value="10">10 分钟</option>
-            <option value="30">30 分钟</option>
-            <option value="60">1 小时</option>
-            <option value="360">6 小时</option>
-            <option value="1440">1 天</option>
-          </select>
-          <p class="muted small">ChatGPT Desktop / Codex CLI 运行时会自行续期并改写本机 auth.json；按此间隔检查文件变化，把同账号账户的凭据副本更新过来（不联网）。</p>
-          <p id="local-sync-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label>开机启动</label>
-          <div class="toggle-group">
-            <label class="toggle">
-              <input id="autostart-enabled" type="checkbox" />
-              <span class="toggle-track" aria-hidden="true"></span>
-              <span class="toggle-text">开机自启动</span>
-            </label>
-            <label class="toggle">
-              <input id="autostart-silent" type="checkbox" />
-              <span class="toggle-track" aria-hidden="true"></span>
-              <span class="toggle-text">静默启动（不弹主窗口，仅托盘运行）</span>
-            </label>
-          </div>
-          <p class="muted small">随系统登录自动运行本应用；开启「静默启动」后开机拉起时只挂托盘图标，双击托盘可随时打开主窗口。</p>
-          <p id="autostart-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label for="cursor-exe-path">Cursor 客户端路径</label>
-          <div class="row">
-            <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 Cursor.exe / Cursor.app 完整路径" />
-            <button id="cursor-detect" class="secondary compact" type="button">自动搜索</button>
-            <button id="cursor-scan-cancel" class="secondary compact" type="button" hidden>取消</button>
-          </div>
-          <p class="muted small">用于切换账户后启动 Cursor；留空则自动搜索常见安装位置。自动搜索会真实遍历磁盘目录，命中即填入，可随时取消；点「完成」保存。</p>
-          <p id="cursor-scan-progress" class="muted small scan-progress" hidden></p>
-          <p id="cursor-path-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label for="codex-exe-path">ChatGPT 客户端路径</label>
-          <div class="row">
-            <input id="codex-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 ChatGPT.exe / ChatGPT.app / Codex.app 完整路径" />
-            <button id="codex-detect" class="secondary compact" type="button">自动搜索</button>
-          </div>
-          <p class="muted small">用于切换账户后启动 ChatGPT；留空则自动检测 Microsoft Store / 常见安装位置。点「完成」保存。</p>
-          <p id="codex-path-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label for="claude-exe-path">Claude Desktop 路径</label>
-          <div class="row">
-            <input id="claude-exe-path" class="grow" type="text" spellcheck="false" placeholder="留空自动搜索；或指定 claude.exe / Claude.app 完整路径" />
-            <button id="claude-detect" class="secondary compact" type="button">自动搜索</button>
-          </div>
-          <p class="muted small">用于切换 Claude 账户后启动 Claude Desktop（切号写入的是 Claude Code 凭据）；留空则自动检测常见安装位置。点「完成」保存。</p>
-          <p id="claude-path-status" class="status" hidden></p>
-
-          <hr class="modal-divider" />
-
-          <label>数据备份</label>
-          <div class="row">
-            <button id="backup-export" class="secondary" type="button">导出全部数据…</button>
-            <button id="backup-import" class="secondary" type="button">导入全部数据…</button>
-          </div>
-          <div id="backup-password-row" class="row" hidden>
-            <input id="backup-password" class="grow" type="password" spellcheck="false" autocomplete="off" placeholder="" />
-            <button id="backup-password-ok" class="secondary compact" type="button">确认</button>
-            <button id="backup-password-cancel" class="secondary compact" type="button">取消</button>
-          </div>
-          <p class="muted small">导出为单个 JSON 文件，包含全部设置、账号（含 Token，可选密码加密）、界面偏好与已删除 Cursor 账户保留的统计数据。导入为合并模式：账号去重后合并，已删除账户的统计数据按账号身份合并，其余设置以备份文件为准，导入后立即生效。</p>
-          <p id="backup-status" class="status" hidden></p>
         </div>
 
         <div class="modal-foot">
+          <p class="muted small settings-save-note">同步配置与客户端路径需点「完成」保存。</p>
           <div class="modal-actions">
             <button id="settings-done" class="primary" type="button">完成</button>
           </div>

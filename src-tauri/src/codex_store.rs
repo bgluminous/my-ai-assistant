@@ -22,6 +22,7 @@ pub fn random_id() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// v1 的同步白名单；不加入路径、对话、凭据或价格。跨语言哈希向量见 tests/codex_store.rs。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Record {
@@ -36,10 +37,13 @@ pub enum Record {
         session_id: String,
         timestamp_ms: Option<i64>,
         model: String,
+        // 输入不含缓存；输出已含推理 Token，不能再次累加推理值。
         input_tokens: u64,
         cache_read_tokens: u64,
         output_tokens: u64,
+        // 原日志累计快照：[input, cached_input, output, reasoning_output, total]，不得重算。
         total_usage: Option<[u64; 5]>,
+        // 有累计快照时为 0；否则区分内容相同但确实重复发生的事件。
         occurrence: u32,
     },
 }
@@ -50,7 +54,8 @@ impl Record {
             Self::Session { session_id, .. } | Self::Usage { session_id, .. } => session_id,
         }
     }
-    /// 数字均为整数、UTF-8、紧凑 JSON 数组，无斜杠/非 ASCII 转义；顺序见协议文档。
+    /// v1 哈希固定为下列有序数组的紧凑 UTF-8 JSON：整数、无 BOM 或换行、不转义斜杠与非 ASCII。
+    /// 字符串不归一化，未知值保留 null；设备不参与哈希，相同内容的来源另外保存。
     pub fn id(&self) -> String {
         let value = match self {
             Self::Session {
@@ -413,6 +418,7 @@ impl Store {
             }
             .validate()?;
         }
+        // 内容相同也保留每台设备的来源；记录、设备和游标同一事务提交，失败后可重读本页。
         let tx = self.db.transaction().map_err(db_err)?;
         let mut added = 0;
         for r in records {

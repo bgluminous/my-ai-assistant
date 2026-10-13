@@ -25,7 +25,8 @@ import {
   cursorIdentity,
   compareAccounts,
 } from "./account_format.js";
-import { clearCursorLocalData, syncCursorUsageFilters } from "./usage_data.js";
+import { clearCursorLocalData, syncCursorUsageFilters, syncCodexUsage } from "./usage_data.js";
+import { syncError } from "./usage_sync.js";
 
 // 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
@@ -802,22 +803,25 @@ function displayOrderIds() {
  * 顺序与界面一致：Cursor 组刷完再刷 ChatGPT 组、Claude 组，不按存储顺序在类型间来回跳。
  */
 async function refreshAll() {
-  if (refreshAllRunning || switching || importing) return;
+  if (refreshAllRunning || switching || importing || intervalMinutes <= 0) return;
   const ids = displayOrderIds();
-  if (!ids.length) return;
   refreshAllRunning = true;
   clearStatus();
   render();
-  const failed = await refreshIds(ids);
-  refreshAllRunning = false;
-  if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
-  render();
+  try {
+    const [failed, sync] = await Promise.all([refreshIds(ids), syncCodexUsage("interval")]);
+    if (sync.error) setStatus("warn", `GPT 用量同步失败：${syncError(sync.error)}`);
+    else if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
+  } finally {
+    refreshAllRunning = false;
+    render();
+  }
 }
 
 // 现行定时器对应的间隔（分钟），applyView 据此判断是否需要重建
 let timerMinutes = 0;
 
-// 这是全应用唯一的定时刷新器：到点逐个刷新账户状态，每个账户刷新完成后经 notifyChange
+// 全应用共用此定时器：每轮同步一次 GPT 用量（无账户也执行），并逐个刷新账户状态，经 notifyChange
 // 通知用量统计页按当前跨度预取该账户的用量（用量页不再自带定时器，避免两条链重复拉取）。
 function rebuildTimer() {
   timerMinutes = intervalMinutes;

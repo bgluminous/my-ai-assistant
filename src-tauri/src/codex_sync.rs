@@ -18,7 +18,6 @@ use tauri::{AppHandle, Emitter};
 pub struct SyncConfig {
     pub server_url: String,
     pub sealed_key: String,
-    pub interval_minutes: u32,
     pub source_home: String,
     pub device_name: String,
 }
@@ -27,7 +26,6 @@ impl Default for SyncConfig {
         Self {
             server_url: String::new(),
             sealed_key: String::new(),
-            interval_minutes: 5,
             source_home: String::new(),
             device_name: String::new(),
         }
@@ -105,14 +103,10 @@ pub struct ConfigInput {
     pub server_url: String,
     /// None 保留，空串清除，非空替换。读取设置永不返回密钥或密文。
     pub key: Option<String>,
-    pub interval_minutes: u32,
     pub source_home: String,
     pub device_name: String,
 }
 fn config_from(input: ConfigInput, old: &SyncConfig) -> Result<SyncConfig> {
-    if ![0, 5, 15, 30, 60].contains(&input.interval_minutes) {
-        return Err("sync_invalid_interval".into());
-    }
     let sealed_key = match input.key {
         None => old.sealed_key.clone(),
         Some(k) if k.trim().is_empty() => String::new(),
@@ -127,17 +121,13 @@ fn config_from(input: ConfigInput, old: &SyncConfig) -> Result<SyncConfig> {
     validate_saved_config(SyncConfig {
         server_url: normalize_url(&input.server_url)?,
         sealed_key,
-        interval_minutes: input.interval_minutes,
         source_home: input.source_home.trim().into(),
         device_name: input.device_name.trim().into(),
     })
 }
-/// 备份导入也使用同一校验，不能绕过 HTTPS、间隔或密钥约束。
+/// 备份导入也使用同一校验；旧配置中的独立周期由 serde 忽略。
 pub fn validate_saved_config(mut cfg: SyncConfig) -> Result<SyncConfig> {
     cfg.server_url = normalize_url(&cfg.server_url)?;
-    if ![0, 5, 15, 30, 60].contains(&cfg.interval_minutes) {
-        return Err("sync_invalid_interval".into());
-    }
     if cfg.device_name.len() > 128 || cfg.device_name.chars().any(char::is_control) {
         return Err("sync_invalid_device".into());
     }
@@ -154,7 +144,6 @@ pub fn validate_saved_config(mut cfg: SyncConfig) -> Result<SyncConfig> {
 pub struct ConfigView {
     server_url: String,
     has_key: bool,
-    interval_minutes: u32,
     source_home: String,
     device_id: String,
     device_name: String,
@@ -164,32 +153,86 @@ fn config_view(cfg: &SyncConfig) -> Result<ConfigView> {
     Ok(ConfigView {
         server_url: cfg.server_url.clone(),
         has_key: !cfg.sealed_key.is_empty(),
-        interval_minutes: cfg.interval_minutes,
         source_home: cfg.source_home.clone(),
         device_id: d.device_id,
         device_name: d.name,
     })
 }
 
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncTrigger {
+    #[default]
+    Manual,
+    Interval,
+    Viewing,
+}
+
+type RoundReceiver = tokio::sync::watch::Receiver<Option<Result<()>>>;
+
 #[derive(Default)]
 struct Runtime {
     generation: u64,
-    running: bool,
-    requested: bool,
+    active: Option<(u64, RoundReceiver)>,
     paused: bool,
     error: Option<String>,
     failures: usize,
     next: Option<Instant>,
 }
 impl Runtime {
-    fn record_result(&mut self, result: &Result<()>, interval_minutes: u32) {
+    fn join(&self) -> Option<RoundReceiver> {
+        self.active
+            .as_ref()
+            .filter(|(generation, done)| {
+                *generation == self.generation
+                    && done.borrow().is_none()
+                    && done.has_changed().is_ok()
+            })
+            .map(|(_, done)| done.clone())
+    }
+    fn start(
+        &mut self,
+        work: impl std::future::Future<Output = Result<()>> + Send + 'static,
+        finished: impl FnOnce() + Send + 'static,
+    ) -> RoundReceiver {
+        if let Some(done) = self.join() {
+            return done;
+        }
+        let (sender, done) = tokio::sync::watch::channel(None);
+        self.active = Some((self.generation, done.clone()));
+        // 同步任务独立于 IPC 等待者；关闭窗口不会取消写盘或使其它入口提前返回。
+        tauri::async_runtime::spawn(async move {
+            sender.send_replace(Some(work.await));
+            finished();
+        });
+        done
+    }
+    fn should_sync(
+        &self,
+        trigger: SyncTrigger,
+        interval: u32,
+        last: Option<i64>,
+        now: i64,
+    ) -> bool {
+        if trigger == SyncTrigger::Manual {
+            return true;
+        }
+        if self.paused || self.next.is_some_and(|t| Instant::now() < t) {
+            return false;
+        }
+        match trigger {
+            SyncTrigger::Interval => interval > 0,
+            SyncTrigger::Viewing => last.is_none_or(|at| now.saturating_sub(at) >= 5 * 60_000),
+            SyncTrigger::Manual => true,
+        }
+    }
+    fn record_result(&mut self, result: &Result<()>) {
         match result {
             Ok(()) => {
                 self.error = None;
                 self.failures = 0;
                 self.paused = false;
-                self.next =
-                    Some(Instant::now() + Duration::from_secs(interval_minutes as u64 * 60));
+                self.next = None;
             }
             Err(e) => {
                 self.paused = matches!(
@@ -219,10 +262,6 @@ fn runtime() -> &'static Mutex<Runtime> {
     static R: OnceLock<Mutex<Runtime>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(Runtime::default()))
 }
-fn wake() -> &'static tokio::sync::Notify {
-    static N: OnceLock<tokio::sync::Notify> = OnceLock::new();
-    N.get_or_init(tokio::sync::Notify::new)
-}
 fn gate() -> &'static tokio::sync::Mutex<()> {
     static G: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     G.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -247,12 +286,15 @@ pub fn update_configuration<T>(update: impl FnOnce() -> Result<T>) -> Result<T> 
     r.paused = false;
     r.failures = 0;
     r.next = None;
-    r.requested = true;
     result
 }
 pub fn configuration_changed(app: &AppHandle) {
     notify_changed(app, "config");
-    wake().notify_one();
+    // 保存与备份恢复后仅同步一次，不再维护独立周期或失败重试定时器。
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = synchronize(&app, SyncTrigger::Manual).await;
+    });
 }
 
 #[derive(Serialize)]
@@ -273,7 +315,7 @@ pub fn codex_usage_sync_status() -> Result<SyncStatus> {
     let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
     let state = if !cfg.configured() {
         "disabled"
-    } else if r.running {
+    } else if r.join().is_some() {
         "running"
     } else if r.paused {
         "paused"
@@ -358,6 +400,7 @@ pub struct Page {
     pub epoch: String,
     pub records: Vec<RemoteRecord>,
     pub devices: Vec<Device>,
+    // 不解析服务端游标：中间页固定本轮上界，末页检查点供下一轮捕获新的上界。
     pub next_cursor: String,
     pub has_more: bool,
 }
@@ -398,6 +441,7 @@ impl HttpTransport {
         })
     }
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        // v1 的记录语义与内容哈希必须兼容；改变字段、计数口径或删除语义需使用新协议路径。
         self.client
             .request(method, format!("{}/api/v1/codex-usage/{path}", self.base))
             .bearer_auth(&self.key)
@@ -473,6 +517,7 @@ pub async fn exchange<T: Transport>(
         if records.is_empty() && sent_metadata {
             break;
         }
+        // 首轮空 push 仍登记设备或改名；handshake（含“测试连接”）只验证身份。
         let had_records = !records.is_empty();
         let mut payload = Push {
             protocol_version: 1,
@@ -495,6 +540,7 @@ pub async fn exchange<T: Transport>(
         if had_records && payload.records.is_empty() {
             return Err("sync_invalid_record".into());
         }
+        // 服务端整批持久提交后才确认，包含已存在的 ID 且每个恰好一次；响应丢失可幂等重传。
         let ack = transport.push(&payload).await?;
         if ack.space_id != h.space_id || ack.epoch != h.epoch {
             return Err("sync_reset_required".into());
@@ -513,6 +559,7 @@ pub async fn exchange<T: Transport>(
         db(DbAction::Ack(payload.records))?;
         sent_metadata = true;
     }
+    // 上传确认不能推进下载游标；服务端读取不消费数据，各客户端分别保存检查点。
     let DbReply::Cursor(mut cursor) = db(DbAction::Cursor)? else {
         return Err("sync_protocol_invalid".into());
     };
@@ -589,84 +636,111 @@ pub fn apply_action(s: &mut store::Store, profile: &str, action: DbAction) -> Re
     Ok(DbReply::Done)
 }
 
-async fn synchronize(app: &AppHandle) -> Result<()> {
+async fn wait_for_round(mut done: RoundReceiver) -> Result<()> {
+    loop {
+        if let Some(result) = done.borrow().clone() {
+            return result;
+        }
+        done.changed().await.map_err(|_| "sync_task_failed")?;
+    }
+}
+
+async fn synchronize(app: &AppHandle, trigger: SyncTrigger) -> Result<()> {
     if crate::operations::required() {
         return Err("update_required".into());
     }
-    let _operation = crate::operations::begin()?;
-    run_once(sync_round(app)).await
-}
-async fn run_once(work: impl std::future::Future<Output = Result<()>>) -> Result<()> {
-    let Ok(_gate) = gate().try_lock() else {
-        return Ok(());
-    };
-    work.await
-}
-async fn sync_round(app: &AppHandle) -> Result<()> {
-    let (cfg, generation) = {
+    let done = {
         let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
-        let cfg = current()?;
-        if !cfg.configured() {
-            return Ok(());
-        }
-        r.running = true;
-        r.requested = false;
-        (cfg, r.generation)
-    };
-    let _ = app.emit("codex-usage-sync-status", ());
-    let result: Result<()> = async {
-        let home = cfg.source_home.clone();
-        let (files, _) =
-            tauri::async_runtime::spawn_blocking(move || codex::collect_sessions(Some(home)))
-                .await
-                .map_err(|_| "sync_scan_failed")?;
-        checked(generation, || store::with_store(|s| s.ingest(files)))?;
-        let profile = cfg.profile()?;
-        let transport = HttpTransport::new(&cfg)?;
-        let own = device(&cfg)?;
-        exchange_with_recovery(&transport, &profile, own, |a| {
-            checked(generation, || {
-                store::with_store(|s| apply_action(s, &profile, a))
-            })
-        })
-        .await
-    }
-    .await;
-    {
-        let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
-        r.running = false;
-        if r.generation == generation {
-            r.record_result(&result, cfg.interval_minutes);
-        }
-    }
-    if !matches!(
-        result.as_ref().err().map(String::as_str),
-        Some("sync_cancelled")
-    ) {
-        let event = if result.is_ok() {
-            "codex_usage_sync_ok"
+        if let Some(done) = r.join() {
+            done
         } else {
-            "codex_usage_sync_failed"
-        };
-        audit::log(
-            event,
-            if result.is_ok() {
-                "GPT 用量同步完成".into()
-            } else {
-                format!("GPT 用量同步失败：{}", result.as_ref().unwrap_err())
-            },
-            None,
-        );
-        notify_changed(app, "sync");
-    }
+            let cfg = current()?;
+            let interval = settings::read(|s| s.interval_minutes)?;
+            let last = store::with_store(|s| s.success(&cfg.profile()?))?;
+            if !r.should_sync(
+                trigger,
+                interval,
+                last,
+                chrono::Utc::now().timestamp_millis(),
+            ) {
+                return Ok(());
+            }
+            let generation = r.generation;
+            let app = app.clone();
+            let finished_app = app.clone();
+            r.start(
+                async move {
+                    // 新配置可排队，但旧请求退出前不并发执行另一轮网络交换。
+                    let _gate = gate().lock().await;
+                    let result = async {
+                        checked(generation, || Ok(()))?;
+                        let _operation = crate::operations::begin()?;
+                        sync_round(&cfg, generation).await
+                    }
+                    .await;
+                    let result = {
+                        let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
+                        if r.generation != generation {
+                            Err("sync_cancelled".into())
+                        } else {
+                            r.record_result(&result);
+                            result
+                        }
+                    };
+                    if result.as_ref().err().map(String::as_str) != Some("sync_cancelled") {
+                        audit::log(
+                            if result.is_ok() {
+                                "codex_usage_sync_ok"
+                            } else {
+                                "codex_usage_sync_failed"
+                            },
+                            match &result {
+                                Ok(()) => "GPT 用量同步完成".into(),
+                                Err(e) => format!("GPT 用量同步失败：{e}"),
+                            },
+                            None,
+                        );
+                        // 网络失败时本机采集仍可能已入库，同样通知界面读取存档。
+                        notify_changed(&app, "sync");
+                    }
+                    result
+                },
+                move || {
+                    let _ = finished_app.emit("codex-usage-sync-status", ());
+                },
+            )
+        }
+    };
     let _ = app.emit("codex-usage-sync-status", ());
-    wake().notify_one();
-    result
+    wait_for_round(done).await
+}
+async fn sync_round(cfg: &SyncConfig, generation: u64) -> Result<()> {
+    let home = cfg.source_home.clone();
+    let (files, _) =
+        tauri::async_runtime::spawn_blocking(move || codex::collect_sessions(Some(home)))
+            .await
+            .map_err(|_| "sync_scan_failed")?;
+    checked(generation, || store::with_store(|s| s.ingest(files)))?;
+    if !cfg.configured() {
+        return Ok(());
+    }
+    let profile = cfg.profile()?;
+    let transport = HttpTransport::new(&cfg)?;
+    let own = device(&cfg)?;
+    exchange_with_recovery(&transport, &profile, own, |a| {
+        checked(generation, || {
+            store::with_store(|s| apply_action(s, &profile, a))
+        })
+    })
+    .await
 }
 #[tauri::command]
-pub async fn codex_usage_sync_now(app: AppHandle) -> Result<SyncStatus> {
+pub async fn codex_usage_sync_now(
+    app: AppHandle,
+    trigger: Option<SyncTrigger>,
+) -> Result<SyncStatus> {
     let _operation = crate::operations::begin()?;
-    synchronize(&app).await?;
+    synchronize(&app, trigger.unwrap_or_default()).await?;
     codex_usage_sync_status()
 }
 #[tauri::command]
@@ -677,30 +751,6 @@ pub async fn codex_usage_sync_test(config: ConfigInput) -> Result<Handshake> {
     h.validate()?;
     Ok(h)
 }
-pub fn start(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            if let Ok(cfg) = current() {
-                let due = runtime()
-                    .lock()
-                    .map(|r| {
-                        cfg.configured()
-                            && !r.running
-                            && (r.requested
-                                || (!r.paused
-                                    && cfg.interval_minutes > 0
-                                    && r.next.is_none_or(|t| Instant::now() >= t)))
-                    })
-                    .unwrap_or(false);
-                if due {
-                    let _ = synchronize(&app).await;
-                }
-            }
-            let _ = tokio::time::timeout(Duration::from_secs(15), wake().notified()).await;
-        }
-    });
-}
-
 pub async fn query(
     days: Option<i64>,
     since_ms: Option<i64>,

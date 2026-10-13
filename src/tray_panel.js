@@ -1,6 +1,7 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
 import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
+import { syncError } from "./usage_sync.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -28,6 +29,8 @@ import {
   fetchArchivedAggregate,
   listDeletedUsage,
   fetchCodexScan,
+  fetchSyncedCodexScan,
+  syncCodexUsage,
   fetchClaudeScan,
   sliceDay,
   modelsOnDay,
@@ -497,7 +500,7 @@ async function refreshDeletedRecords() {
 }
 
 /** 重载账户列表与已删除记录（缓存状态，不刷新账户）；面板被唤起属于主动查看，总览按 5 分钟新鲜度补拉。 */
-async function load() {
+async function load({ viewing = true } = {}) {
   try {
     const [view] = await Promise.all([invoke("accounts_list"), refreshDeletedRecords()]);
     accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
@@ -505,7 +508,7 @@ async function load() {
     const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
     render();
-    if (trayTab === "overview") void loadOverview({ viewing: true });
+    if (trayTab === "overview") void loadOverview({ viewing });
   } catch (error) {
     setStatus("bad", `加载失败：${resetError(error)}`);
   }
@@ -533,25 +536,33 @@ async function refreshOne(id) {
 }
 
 async function refreshAll() {
-  if (refreshing || switching || refreshingIds.size || !accounts.length) return;
+  if (refreshing || switching || refreshingIds.size) return;
   refreshing = true;
   render();
+  const synchronization = syncCodexUsage("manual");
+  const overview = trayTab === "overview" ? loadOverview({ force: true, synchronization }) : Promise.resolve();
   // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
   // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按套餐排序，不在类型间来回跳
   const ids = ["cursor", "codex", "claude"].flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
   let failed = 0;
-  for (let i = 0; i < ids.length; i += 1) {
-    setStatus("", `正在刷新账户 ${i + 1}/${ids.length}…`);
-    try {
-      await invoke("account_refresh", { id: ids[i] });
-    } catch {
-      failed += 1;
+  try {
+    for (let i = 0; i < ids.length; i += 1) {
+      setStatus("", `正在刷新账户 ${i + 1}/${ids.length}…`);
+      try {
+        await invoke("account_refresh", { id: ids[i] });
+      } catch {
+        failed += 1;
+      }
     }
+    const [sync] = await Promise.all([synchronization, overview]);
+    await load({ viewing: false });
+    if (sync.error) setStatus("bad", `GPT 用量同步失败：${syncError(sync.error)}`);
+    else if (failed > 0) setStatus("bad", `刷新完成，${failed} 个账户失败。`);
+    else setStatus("ok", "已刷新账户与用量。");
+  } finally {
+    refreshing = false;
+    render();
   }
-  refreshing = false;
-  if (failed > 0) setStatus("bad", `刷新完成，${failed} 个账户失败。`);
-  else setStatus("ok", "已刷新全部账户。");
-  await load();
 }
 
 /* ---------- 总览：今天 / 昨天 token 用量（与主窗口用量页共用 usage_data 缓存） ---------- */
@@ -1267,12 +1278,17 @@ function needsDayFetch(peeked, { force, maxAgeMs }) {
 }
 
 let overviewTail = Promise.resolve();
+let overviewSyncing = false;
+let overviewCodexError = null;
 
 /**
  * 排队加载总览。opts.force 为刷新按钮的强制刷新（全部来源立即重拉）；
  * opts.viewing 为用户主动查看：超过 VIEW_MAX_AGE_MS 的来源强制同步，其余用缓存。
  */
 function loadOverview(opts = {}) {
+  if (!opts.synchronization && (opts.force || opts.viewing)) {
+    opts = { ...opts, synchronization: syncCodexUsage(opts.force ? "manual" : "viewing") };
+  }
   const run = () => loadOverviewInner(opts);
   overviewTail = overviewTail.then(run, run);
   return overviewTail;
@@ -1283,7 +1299,8 @@ function loadOverview(opts = {}) {
  * （今天写 today: 键、昨天写 day: 键，与主窗口用量页互通）。加载期间用户切了统计日，
  * 本轮结果不再渲染，交给随后排队的新一轮。
  */
-async function loadOverviewInner({ force = false, viewing = false } = {}) {
+async function loadOverviewInner({ force = false, viewing = false, synchronization = null } = {}) {
+  overviewSyncing = !!synchronization;
   const scope = dayScope();
   const revision = deletedRevision;
   const gptRevision = codexViewRevision;
@@ -1294,7 +1311,8 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
   // 主动查看时过期的来源要真正同步（sync 模式），不能让后端按更长的有效期判定为新鲜而只切片
   const fetchForce = force || viewing;
 
-  const cached = buildOverviewData(scope);
+  const fetchErrors = new Map(overviewCodexError ? [["local", overviewCodexError]] : []);
+  const cached = buildOverviewData(scope, fetchErrors);
 
   // 今天拉到当前时刻；昨天拉完整自然日 [0 点, 次日 0 点)，终点退 1ms 与主窗口口径一致
   const aggRange = scope.past
@@ -1305,7 +1323,6 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
     : { sinceMs: scope.start, force: fetchForce };
 
   const jobs = [];
-  const fetchErrors = new Map();
   for (const a of cursorAccounts) {
     const peeked = peek.agg(a.id);
     // 已失效账户无法再同步事件库，syncedAt 停在最后一次成功时间，按有效期会永远过期。
@@ -1333,11 +1350,21 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
         })
     );
   }
-  if (needsDayFetch(peek.scan(""), rule)) {
+  if (synchronization || needsDayFetch(peek.scan(""), rule)) {
     jobs.push(
-      fetchCodexScan(scanArgs).catch((error) => {
-        fetchErrors.set("local", resetError(error));
-      })
+      (synchronization ? fetchSyncedCodexScan(scanArgs, synchronization) : fetchCodexScan(scanArgs))
+        .then(() => {
+          if (synchronization && stillCurrent()) {
+            overviewCodexError = null;
+            fetchErrors.delete("local");
+          }
+        })
+        .catch((error) => {
+          const text = syncError(error);
+          if (synchronization && stillCurrent()) overviewCodexError = text;
+          fetchErrors.set("local", text);
+        })
+        .finally(() => { overviewSyncing = false; })
     );
   }
   if (needsDayFetch(peek.claude(""), rule)) {
@@ -1348,6 +1375,7 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
     );
   }
 
+  applyOverviewErrors(cached.data, fetchErrors, cursorAccounts);
   if (cached.data.rows.length) renderOverview(cached.data, cached.at, scope);
   else if (!jobs.length) overviewTip("暂无用量数据", cached.at);
 
@@ -1363,6 +1391,7 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
     // 没有任何来源成功时不冒充「刚更新」，数据时间留空
     renderOverview(next.data, next.at, scope);
   } finally {
+    overviewSyncing = false;
     overviewLoading = false;
     syncHeaderRefresh();
   }
@@ -1710,16 +1739,9 @@ async function doSwitch(id) {
 /* ---------- 初始化 ---------- */
 
 setupDesktopGuards();
-// 统一刷新：总览 tab = 刷新全部账户状态 + 忽略缓存重算今日用量；账户 tab = 刷新全部账户状态
+// 账户标签页和总览都同步 GPT 用量并刷新账户；总览同时重算所选日的其它来源。
 // （账户状态刷新会广播 accounts-changed，主窗口据此按其当前跨度预取用量，各处数据一并更新）
-el("#tray-refresh").addEventListener("click", () => {
-  if (trayTab === "overview") {
-    if (accounts.length) void refreshAll();
-    void loadOverview({ force: true });
-    return;
-  }
-  void refreshAll();
-});
+el("#tray-refresh").addEventListener("click", refreshAll);
 el("#tray-open").addEventListener("click", () => { void invoke("tray_open_main"); });
 for (const btn of document.querySelectorAll(".tray-tab")) {
   btn.addEventListener("click", () => setTab(btn.dataset.tab));
@@ -1781,8 +1803,19 @@ listen("account-refreshing", (event) => {
   /* 非 Tauri 环境无事件桥 */
 });
 let usageCacheTimer = null;
-window.addEventListener(CODEX_USAGE_CHANGED_EVENT, () => {
+window.addEventListener(CODEX_USAGE_CHANGED_EVENT, async (event) => {
+  if (event.detail?.reason === "sync" && overviewSyncing) return;
+  overviewSyncing = false;
+  overviewCodexError = null;
   codexViewRevision += 1;
+  const revision = codexViewRevision;
+  if (event.detail?.reason === "sync") {
+    try {
+      const status = await invoke("codex_usage_sync_status");
+      if (revision !== codexViewRevision) return;
+      overviewCodexError = status.error ? syncError(status.error) : null;
+    } catch { /* 读取状态失败仍重读存档 */ }
+  }
   if (trayTab === "overview") void loadOverview();
 });
 function scheduleOverviewFromCache(key) {

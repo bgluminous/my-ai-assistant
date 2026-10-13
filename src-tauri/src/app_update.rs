@@ -48,6 +48,8 @@ pub struct View {
     pub revision: u64,
     pub phase: String,
     pub current_version: String,
+    pub current_changelog: Option<String>,
+    pub current_changelog_error: Option<Failure>,
     pub latest_version: Option<String>,
     pub changelog: String,
     pub force_update: bool,
@@ -63,6 +65,7 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         Self { revision: 0, phase: "idle".into(), current_version: env!("CARGO_PKG_VERSION").into(),
+            current_changelog: None, current_changelog_error: None,
             latest_version: None, changelog: String::new(), force_update: false, checked_at_ms: None,
             error: None, downloaded_bytes: 0, total_bytes: None, can_install: false,
             manual_reason: None, releases_url: protocol::RELEASES.into(), automatic: true }
@@ -169,9 +172,12 @@ fn install_error(error: tauri_plugin_updater::Error) -> Failure {
     }
     Failure::new("install")
 }
-async fn fetch_index(platform: &str) -> Result<Release> {
-    let url = format!("{}/projects/my-ai-assistant/{platform}/latest.json", protocol::REGISTRY);
-    fetch_index_with(client()?, &url, platform).await
+async fn fetch_index(platform: &str, version: Option<&str>) -> Result<Release> {
+    let file = version.map(|v| format!("versions/{v}.json")).unwrap_or_else(|| "latest.json".into());
+    let url = format!("{}/projects/my-ai-assistant/{platform}/{file}", protocol::REGISTRY);
+    let release = fetch_index_with(client()?, &url, platform).await?;
+    if version.is_some_and(|v| v != release.version) { return Err(Failure::new("index_version")); }
+    Ok(release)
 }
 async fn fetch_index_with(client: update_http::Client, url: &str, platform: &str) -> Result<Release> {
     let mut response = client.get(url).header("Cache-Control", "no-cache").send().await.map_err(network_error)?;
@@ -185,6 +191,20 @@ async fn fetch_index_with(client: update_http::Client, url: &str, platform: &str
     let release: Release = serde_json::from_slice(&bytes).map_err(|_| Failure::new("invalid_json"))?;
     release.validate(platform).map_err(Failure::new)?;
     Ok(release)
+}
+fn update_current_changelog(view: &mut View, latest: Option<&Release>, current: Result<Release>) {
+    // latest 与当前版本相同时复用其日志，避免版本快照暂不可读时丢失内容。
+    let notes = match latest.filter(|release| release.version == view.current_version) {
+        Some(release) => Ok(release.changelog.clone().unwrap_or_default()),
+        None => current.and_then(|release| {
+            if release.version != view.current_version { return Err(Failure::new("index_version")); }
+            Ok(release.changelog.unwrap_or_default())
+        }),
+    };
+    match notes {
+        Ok(notes) => { view.current_changelog = Some(notes); view.current_changelog_error = None; }
+        Err(error) => { view.current_changelog_error = Some(error); }
+    }
 }
 async fn prepare(app: &AppHandle, release: &Release, target: &str) -> Result<Update> {
     let endpoint = protocol::manifest_url(&release.version, &release.platform_code)
@@ -227,7 +247,13 @@ pub async fn app_update_check(app: AppHandle) -> Result<View> {
     change(&app, |r| { r.view.phase = "checking".into(); r.view.error = None; r.view.can_install = false; r.release = None; });
     let result = async {
         let platform = platform()?;
-        let release = fetch_index(platform).await?;
+        // 只读取当前版本和最新索引；日志失败不阻断升级检查，也不枚举历史版本。
+        let (release, current_release) = tokio::join!(
+            fetch_index(platform, None),
+            fetch_index(platform, Some(env!("CARGO_PKG_VERSION"))),
+        );
+        change(&app, |r| update_current_changelog(&mut r.view, release.as_ref().ok(), current_release));
+        let release = release?;
         let current = protocol::version_code(env!("CARGO_PKG_VERSION")).ok_or_else(|| Failure::new("index_version"))?;
         let required = settings::read(|s| s.required_update.clone()).ok().flatten();
         if required.as_ref().is_some_and(|old| valid_required(old, platform, current) && old.version_code > release.version_code) {
@@ -427,6 +453,32 @@ mod tests {
         assert!(valid_required(&r, "windows-x64", protocol::version_code("8.0.0").unwrap()));
         assert!(!valid_required(&r, "windows-x64", r.version_code));
         assert!(!valid_required(&r, "macos-arm64", 0));
+    }
+
+    #[test]
+    fn current_notes_use_only_the_installed_version_and_survive_failures() {
+        let release = fixture();
+        let mut view = View { current_version: "9.0.0".into(), ..View::default() };
+        update_current_changelog(&mut view, Some(&release), Err(Failure::new("not_published")));
+        assert_eq!(view.current_changelog.as_deref(), Some("test"));
+        assert!(view.current_changelog_error.is_none());
+
+        let mut newer = release.clone();
+        newer.version = "9.1.0".into();
+        newer.changelog = Some("new version".into());
+        update_current_changelog(&mut view, Some(&newer), Err(Failure::new("network")));
+        assert_eq!(view.current_changelog.as_deref(), Some("test"));
+        assert_eq!(view.current_changelog_error.as_ref().unwrap().code, "network");
+        update_current_changelog(&mut view, Some(&newer), Ok(release));
+        assert_eq!(view.current_changelog.as_deref(), Some("test"));
+        assert!(view.current_changelog_error.is_none());
+
+        let mut development = View { current_version: "9.2.0".into(), ..View::default() };
+        update_current_changelog(&mut development, Some(&newer), Err(Failure::new("not_published")));
+        assert!(development.current_changelog.is_none());
+        update_current_changelog(&mut development, None, Ok(newer));
+        assert!(development.current_changelog.is_none());
+        assert_eq!(development.current_changelog_error.unwrap().code, "index_version");
     }
 
     fn server(status: u16, body: String, delay: Duration) -> (String, std::thread::JoinHandle<()>) {

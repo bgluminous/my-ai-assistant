@@ -1,27 +1,29 @@
-# Build a Windows release of my-ai-assistant and pack it into a 7z archive.
-#
-# Usage:
-#   npm run release:windows        # full build + pack
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1 [-SkipBuild] [-KeepTarget] [-SkipArchive]
-#
-# Options:
-#   -SkipBuild    Reuse existing build output under src-tauri/target/release,
-#                 only re-collect artifacts and recreate the 7z archive.
-#   -KeepTarget   Do not delete src-tauri/target afterwards (CI uses this so the
-#                 Rust build cache can pick up the compiled dependencies).
-#   -SkipArchive  Collect portable / NSIS / MSI only; do not create the 7z
-#                 (CI uses this — GitHub Release 上按文件单独下载).
-#
-# Output (kept after the script finishes):
-#   release/my-ai-assistant-v<version>-windows-x64/      portable exe, NSIS, MSI
-#   release/my-ai-assistant-v<version>-windows-x64.7z    archive of the staged folder
-#
-# After a successful pack, src-tauri/target is deleted (build intermediates)
-# unless -KeepTarget is given.
-#
-# Requirements: Node.js + npm deps installed, Rust MSVC toolchain.
-# 7-Zip: uses the repo-bundled tools/7zip/7za.exe by default; falls back to
-# a system-installed 7z (PATH or Program Files) if the bundled one is missing.
+<#
+.SYNOPSIS
+Build a Windows release and collect portable, NSIS and MSI packages.
+.DESCRIPTION
+Writes release/my-ai-assistant-v<version>-windows-x64/ and a matching .7z archive.
+After success, deletes src-tauri/target unless -KeepTarget is set, even with -SkipBuild.
+Requires Node.js, installed npm dependencies and the Rust MSVC toolchain.
+Uses tools/7zip/7za.exe, falling back to 7-Zip from PATH or Program Files.
+.PARAMETER SkipBuild
+Reuse src-tauri/target/release; re-collect packages and recreate the archive.
+.PARAMETER KeepTarget
+Preserve src-tauri/target and its Rust build cache after success.
+.PARAMETER SkipArchive
+Collect individual packages without creating a 7z archive (used by CI).
+.PARAMETER Updater
+Build with src-tauri/tauri.updater.conf.json and collect updater signatures.
+Requires TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD in the environment.
+Reuse the key matching plugins.updater.pubkey in tauri.conf.json; never regenerate it for a retry.
+These updater signatures are separate from Windows Authenticode signing.
+.EXAMPLE
+npm run release:windows
+.EXAMPLE
+npm run release:windows -- -SkipBuild -KeepTarget
+.EXAMPLE
+npm run release:windows -- -KeepTarget -SkipArchive -Updater
+#>
 
 param(
     [switch]$SkipBuild,

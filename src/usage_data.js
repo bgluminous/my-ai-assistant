@@ -437,17 +437,17 @@ function makeScanSource({ prefix, command, codex = false }) {
     return peekForDay(ymd, h);
   };
 
-  const fetch = ({ key: explicitKey, days, sinceMs, untilMs, home, deviceId, force } = {}) => {
+  const fetch = ({ key: explicitKey, days, sinceMs, untilMs, home, deviceId, force, archiveOnly = false } = {}) => {
     const h = home || "";
     const rangeKey = explicitKey || scanRangeKey(days, sinceMs, untilMs);
     const key = `${rangeKey}:${h}${codex ? `:${deviceId || ""}` : ""}`;
     const cached = getCached(rangeKey, h, deviceId);
     if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
-    const inflightKey = `${prefix}${key}`;
+    const inflightKey = `${prefix}${key}${archiveOnly ? ":archive" : ""}`;
     if (inflight.has(inflightKey)) return inflight.get(inflightKey);
     const revision = codexRevision;
-    if (codex && force) codexArchiveOnly = false;
-    const scanCommand = codex && codexArchiveOnly ? "codex_usage_query" : command;
+    if (codex && force && !archiveOnly) codexArchiveOnly = false;
+    const scanCommand = codex && (archiveOnly || codexArchiveOnly) ? "codex_usage_query" : command;
     const p = withTimeout(
       invoke(scanCommand, {
         days: days == null || days === 0 ? null : days,
@@ -478,6 +478,7 @@ function makeScanSource({ prefix, command, codex = false }) {
 }
 
 let codexRevision = 0;
+let codexConfigRevision = 0;
 let codexArchiveOnly = false;
 export const CODEX_USAGE_CHANGED_EVENT = "codex-usage-view-changed";
 const codexScan = makeScanSource({ prefix: "scan2:", command: "codex_scan_sessions", codex: true });
@@ -486,6 +487,7 @@ const SCAN_SOURCES = [codexScan, claudeScan];
 
 function invalidateCodex(reason) {
   codexRevision += 1;
+  if (reason !== "sync") codexConfigRevision += 1;
   codexArchiveOnly = reason === "clear" || reason === "sync";
   codexScan.mem.clear();
   for (const key of [...inflight.keys()]) if (key.startsWith("scan2:")) inflight.delete(key);
@@ -506,6 +508,35 @@ export const peekScanForDay = codexScan.peekForDay;
 export const peekScanForPastDay = codexScan.peekForPastDay;
 export const peekScanSeries = codexScan.peekSeries;
 export const fetchCodexScan = codexScan.fetch;
+
+/** 只有明确的刷新入口调用远端同步；缓存通知和统计切片不会调用此入口。 */
+export async function syncCodexUsage(trigger = "manual") {
+  const revision = codexConfigRevision;
+  try {
+    const status = await withTimeout(invoke("codex_usage_sync_now", { trigger }), "codex_usage_sync");
+    if (revision !== codexConfigRevision) throw new Error("sync_cancelled");
+    return { status, error: status.error ? new Error(status.error) : null };
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** 同步先采集本机再交换增量；无论网络是否成功，都从存档读取当前展示范围。 */
+export async function fetchSyncedCodexScan(options, synchronization) {
+  const revision = codexConfigRevision;
+  const { error } = await synchronization;
+  if (revision !== codexConfigRevision || String(error).includes("sync_cancelled")) throw new Error("sync_cancelled");
+  const read = () => codexScan.fetch({ ...options, force: true, archiveOnly: true });
+  let entry;
+  try { entry = await read(); }
+  catch (failure) {
+    // 同步事件可能晚于 IPC 结果到达；只允许同一配置的存档重读，不能恢复旧空间。
+    if (revision !== codexConfigRevision || !String(failure).includes("sync_cancelled")) throw failure;
+    entry = await read();
+  }
+  if (error) throw attachUsageCache(error, entry);
+  return entry;
+}
 
 export const getCachedClaudeScan = claudeScan.getCached;
 export const peekClaudeScanForDay = claudeScan.peekForDay;
