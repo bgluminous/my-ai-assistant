@@ -444,17 +444,32 @@
           <p id="app-update-manual" class="muted small app-update-message" hidden></p>
           <section id="app-update-new-notes" class="app-update-notes-section" aria-labelledby="app-update-notes-title" hidden>
             <h4 id="app-update-notes-title">新版本更新日志</h4>
-            <pre id="app-update-notes" class="update-notes"></pre>
+            <div id="app-update-notes" class="update-notes" tabindex="0" aria-labelledby="app-update-notes-title"></div>
           </section>
           <section class="app-update-notes-section" aria-labelledby="app-update-current-notes-title">
             <h4 id="app-update-current-notes-title">当前版本更新日志</h4>
             <p id="app-update-current-notes-status" class="muted small" role="status" hidden></p>
-            <pre id="app-update-current-notes" class="update-notes">检查更新后显示当前版本的更新日志。</pre>
+            <div id="app-update-current-notes" class="update-notes" tabindex="0" aria-labelledby="app-update-current-notes-title">检查更新后显示当前版本的更新日志。</div>
+          </section>
+          <section id="app-update-history" class="app-update-notes-section" aria-labelledby="app-update-history-title" hidden>
+            <div class="app-update-history-heading">
+              <h4 id="app-update-history-title">历史更新日志</h4>
+              <button id="app-update-history-refresh" class="secondary compact" type="button">刷新列表</button>
+            </div>
+            <div class="app-update-history-controls">
+              <label for="app-update-history-version">版本</label>
+              <select id="app-update-history-version" disabled></select>
+              <button id="app-update-history-retry" class="secondary compact" type="button" hidden>重试日志</button>
+            </div>
+            <p id="app-update-history-status" class="muted small" role="status" hidden></p>
+            <div id="app-update-history-notes" class="update-notes" tabindex="0" aria-label="历史版本更新日志" hidden></div>
+            <p class="muted small">显示当前平台已登记的版本；更早版本可前往 GitHub Releases 查看。</p>
           </section>
           <progress id="app-update-progress" max="100" hidden aria-label="更新下载进度"></progress>
           <p id="app-update-progress-text" class="muted small" aria-live="polite" hidden></p>
           <div class="app-update-footer">
             <div class="app-update-links">
+              <button id="app-update-history-toggle" type="button" aria-expanded="false" aria-controls="app-update-history">历史更新日志</button>
               <button id="app-update-releases" class="secondary compact" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
                 GitHub Releases
@@ -499,6 +514,7 @@
                 <tr><td>pbkdf2</td><td>0.12.2</td><td>备份密码派生密钥</td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>tokio</td><td>1.53.1</td><td>异步运行时</td><td>MIT</td></tr>
                 <tr><td>chart.js</td><td>4.5.1</td><td>用量图表</td><td>MIT</td></tr>
+                <tr><td>marked</td><td>18.1.1</td><td>更新日志 Markdown 解析</td><td>MIT</td></tr>
                 <tr><td>@kurkle/color</td><td>0.3.4</td><td>Chart.js 颜色（随 UMD 打进 vendor）</td><td>MIT</td></tr>
               </tbody>
             </table>
@@ -515,6 +531,7 @@
               <tbody>
                 <tr><td>tauri-build</td><td>2.7.2</td><td>Cargo build.rs</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>@tauri-apps/cli</td><td>2.11.4</td><td>npm run tauri</td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>linkedom</td><td>0.18.13</td><td>更新界面 DOM 回归测试</td><td>ISC</td></tr>
               </tbody>
             </table>
           </div>

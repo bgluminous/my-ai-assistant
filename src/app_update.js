@@ -1,5 +1,7 @@
 import { el, invoke, listen, fmtDateMs, toast, copyText } from "./shared.js";
 import { updatePresentation } from "./update_status.js";
+import { renderReleaseNotes } from "./release_notes.js";
+import { initUpdateHistory, updateHistoryState } from "./update_history.js";
 
 let state = null;
 let confirmingVersion = null;
@@ -15,15 +17,15 @@ function setUpdateStatus(text, kind = "") {
 function renderChangelogs(view) {
   el("#app-update-new-notes").hidden = !view.latestVersion;
   el("#app-update-notes-title").textContent = `新版本 ${view.latestVersion || ""} · 更新日志`;
-  el("#app-update-notes").textContent = view.changelog?.trim() || "该版本未提供更新日志。";
+  renderReleaseNotes(el("#app-update-notes"), view.changelog?.trim() || "该版本未提供更新日志。");
   el("#app-update-current-notes-title").textContent = `当前版本 ${view.currentVersion} · 更新日志`;
   const error = view.currentChangelogError;
   const errorMessage = error?.code === "not_published" ? "当前版本暂无已发布的更新日志。" :
     error ? `当前版本更新日志获取失败。${error.message || "请稍后重试。"}` : "";
   const hasNotes = view.currentChangelog != null;
-  el("#app-update-current-notes").textContent = hasNotes ?
+  renderReleaseNotes(el("#app-update-current-notes"), hasNotes ?
     (view.currentChangelog.trim() || "该版本未提供更新日志。") :
-    errorMessage || (view.phase === "checking" ? "正在获取当前版本的更新日志…" : "检查更新后显示当前版本的更新日志。");
+    errorMessage || (view.phase === "checking" ? "正在获取当前版本的更新日志…" : "检查更新后显示当前版本的更新日志。"));
   el("#app-update-current-notes-status").textContent = hasNotes && error ? `${errorMessage}已保留上次读取的内容。` : "";
   el("#app-update-current-notes-status").hidden = !hasNotes || !error;
 }
@@ -35,6 +37,9 @@ function render(view) {
     ui.busy ? "busy" : view.latestVersion ? "available" : "");
   el("#app-update-meta").textContent = `当前版本 ${view.currentVersion}${view.checkedAtMs ? ` · 最近检查 ${fmtDateMs(view.checkedAtMs)}` : ""}`;
   renderChangelogs(view);
+  el("#app-update-notes").inert = ui.paused;
+  el("#app-update-current-notes").inert = ui.paused;
+  updateHistoryState(view, ui.paused);
   el("#app-update-manual").textContent = view.manualReason || "";
   el("#app-update-manual").hidden = !view.manualReason;
   el("#app-update-required").hidden = !view.forceUpdate;
@@ -100,7 +105,22 @@ async function install() {
   try { render(await invoke("app_update_install", { version })); } catch (error) { report(error); }
 }
 
+function openChangelogLink(event) {
+  if (event.type === "auxclick" && event.button !== 1) return;
+  const link = event.target.closest?.("a[href]");
+  if (!link || !window.__TAURI__?.core) return;
+  // 不在具有本机权限的 WebView 内导航，也不依赖各平台的 target=_blank 行为。
+  event.preventDefault();
+  if (state && updatePresentation(state).paused) return;
+  void invoke("app_update_open_link", { url: link.getAttribute("href") }).catch(report);
+}
+
 export async function initAppUpdate() {
+  initUpdateHistory();
+  for (const selector of ["#app-update-notes", "#app-update-current-notes", "#app-update-history-notes"]) {
+    el(selector).addEventListener("click", openChangelogLink);
+    el(selector).addEventListener("auxclick", openChangelogLink);
+  }
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { confirmingVersion = null; el("#app-update-confirm").hidden = true; }
   });

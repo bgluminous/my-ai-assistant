@@ -60,8 +60,8 @@ function validate(r, tag,    i, key, n, v) {
         else url(V[n])
     }
     n = member(r, "extra")
-    # emit uses ASCII Unicode escapes, but the service measures JSON.stringify
-    # in UTF-16 units. Count decoded escapes, retaining JSON escape overhead.
+    # Strings use canonical Unicode escapes internally, while emit writes UTF-8.
+    # Count decoded UTF-16 units, retaining required JSON escape overhead.
     if (n && json_units(n) > 16000) die("E_EXTRA")
     return r
 }

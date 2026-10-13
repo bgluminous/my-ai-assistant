@@ -21,6 +21,24 @@ pub struct Release {
     pub force_update: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryVersion {
+    pub version: String,
+    pub version_code: u32,
+}
+
+pub fn validate_history(mut versions: Vec<HistoryVersion>) -> Result<Vec<HistoryVersion>, &'static str> {
+    if versions.iter().any(|v| version_code(&v.version) != Some(v.version_code)) {
+        return Err("index_version");
+    }
+    versions.sort_by_key(|v| std::cmp::Reverse(v.version_code));
+    if versions.windows(2).any(|pair| pair[0].version_code == pair[1].version_code) {
+        return Err("index_version");
+    }
+    Ok(versions)
+}
+
 pub fn version_code(version: &str) -> Option<u32> {
     let parts: Vec<_> = version.split('.').collect();
     if parts.len() != 3 { return None; }
@@ -75,6 +93,20 @@ impl Release {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_rejects_duplicates_and_sorts_valid_versions_numerically() {
+        let entry = |version: &str| HistoryVersion {
+            version: version.into(), version_code: version_code(version).unwrap(),
+        };
+        let versions = validate_history(vec![entry("1.9.0"), entry("1.10.0"), entry("1.3.1")]).unwrap();
+        assert_eq!(versions.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.10.0", "1.9.0", "1.3.1"]);
+        assert!(validate_history(Vec::new()).unwrap().is_empty());
+        assert!(validate_history(vec![entry("1.3.1"), entry("1.3.1")]).is_err());
+        assert!(validate_history(vec![HistoryVersion { version: "../../latest".into(), version_code: 1 }]).is_err());
+        let mut invalid = entry("1.3.1");
+        invalid.version_code += 1;
+        assert!(validate_history(vec![invalid]).is_err());
+    }
     fn fixture() -> Release {
         serde_json::from_value(serde_json::json!({
             "projectCode":"my-ai-assistant", "platformCode":"windows-x64",

@@ -156,12 +156,15 @@ pub fn run() {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             app_update::app_update_status,
+            app_update::app_update_history,
+            app_update::app_update_changelog,
             app_update::app_update_check,
             app_update::app_update_install,
             app_update::app_update_cancel,
             app_update::app_update_settings_set,
             app_update::app_update_open_releases,
             app_update::app_update_open_pricing,
+            app_update::app_update_open_link,
             usage_archive::cursor_usage_fetch,
             usage_archive::cursor_usage_slice,
             usage_archive::cursor_usage_deleted_list,

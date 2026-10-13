@@ -1736,21 +1736,51 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .app-update-state.busy::before { animation: pulse 1.3s ease-in-out infinite; }
 .app-update-message { margin: 14px 0 0; overflow-wrap: anywhere; }
 .app-update-notes-section { margin-top: 16px; }
-.app-update-notes-section h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.app-update-notes-section > h4 { margin: 0; font-size: 13px; font-weight: 600; }
 #app-update-current-notes-status { margin: 8px 0 0; overflow-wrap: anywhere; }
 .update-notes {
   margin: 8px 0 0;
   padding: 14px 16px;
   max-height: 260px;
   overflow-y: auto;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
   font: inherit;
   font-size: 13px;
+  line-height: 1.65;
   background: var(--well);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
+.update-notes-plain { white-space: pre-wrap; }
+.update-notes :is(h1, h2, h3, h4, h5, h6) { margin: 18px 0 8px; color: var(--text-strong); font-weight: 600; line-height: 1.4; }
+.update-notes h1 { font-size: 20px; }
+.update-notes h2 { font-size: 18px; }
+.update-notes h3 { font-size: 16px; }
+.update-notes :is(h4, h5, h6) { font-size: 14px; }
+.update-notes :is(p, ul, ol, blockquote, pre, table) { margin: 10px 0; }
+.update-notes :is(ul, ol) { padding-left: 24px; }
+.update-notes li + li { margin-top: 4px; }
+.update-notes li > :is(ul, ol) { margin: 4px 0; }
+.update-notes li > p { margin: 6px 0; }
+.update-notes code { padding: 2px 5px; border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: 0.92em; }
+.update-notes pre { padding: 10px 12px; overflow-x: auto; white-space: pre; background: var(--surface-2); border-radius: 6px; }
+.update-notes pre code { padding: 0; background: transparent; overflow-wrap: normal; }
+.update-notes blockquote { padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.update-notes a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.update-notes a:hover { color: var(--text-strong); }
+.update-notes table { width: 100%; border-collapse: collapse; }
+.update-notes :is(th, td) { padding: 6px 10px; border: 1px solid var(--border); text-align: left; }
+.update-notes th { background: var(--surface-2); font-weight: 600; }
+.update-notes hr { margin: 16px 0; border: 0; border-top: 1px solid var(--border); }
+.update-notes > :first-child { margin-top: 0; }
+.update-notes > :last-child { margin-bottom: 0; }
+.app-update-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.app-update-history-heading h4 { margin: 0; font-size: 13px; }
+.app-update-history-controls { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.app-update-history-controls select { width: auto; min-width: 160px; max-width: 100%; }
+#app-update-history { border-top: 1px solid var(--border); padding-top: 16px; }
+#app-update-history-status { margin: 10px 0 0; }
 #app-update-progress { display: block; width: 100%; height: 8px; margin-top: 16px; accent-color: var(--accent); }
 #app-update-progress-text { margin: 6px 0 0; }
 .app-update-footer {

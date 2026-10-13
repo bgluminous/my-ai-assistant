@@ -158,10 +158,28 @@ class ReleaseTests(unittest.TestCase):
     def test_prepare_both_platforms_offline(self):
         self.prepare()
         for platform in ['windows-x64', 'macos-arm64']:
-            body = json.loads((self.work / 'release-out' / platform / 'release.json').read_text(encoding="utf-8"))
+            raw = (self.work / 'release-out' / platform / 'release.json').read_text(encoding="utf-8")
+            self.assertIn('版本发布测试', raw)
+            self.assertNotIn(r'\u7248\u672c', raw)
+            body = json.loads(raw)
             manifest = f'https://github.com/bgluminous/my-ai-assistant/releases/download/v{self.version}/updater-{platform}.json'
             self.assertEqual(body, dict(version=self.version, changelog='版本发布测试\n', forceUpdate=False,
                                        extra={'updater': {'manifestUrl': manifest}}))
+
+    def test_canonical_json_outputs_utf8_and_required_escapes(self):
+        value = {'中文键': '更新"路径\\测试\n😀', 'control': '\x01'}
+        self.write('unicode.json', json.dumps(value) + '\n')
+        raw = self.run_sh('scripts/version-publish/json-tool.sh', 'canonical', 'unicode.json').stdout
+        self.assertIn('中文键', raw)
+        self.assertIn('更新', raw)
+        self.assertIn('😀', raw)
+        self.assertNotIn(r'\u4e2d', raw)
+        self.assertNotIn(r'\ud83d', raw)
+        self.assertIn(r'\"', raw)
+        self.assertIn(r'\\', raw)
+        self.assertIn(r'\n', raw)
+        self.assertIn(r'\u0001', raw)
+        self.assertEqual(json.loads(raw), value)
 
     def test_publish_rejects_missing_or_wrong_saved_input(self):
         self.run_sh('ci/register-release.sh', 'publish', self.branch, 'windows-x64', expected=2)
@@ -169,6 +187,28 @@ class ReleaseTests(unittest.TestCase):
         self.write('release-out/windows-x64/release.json', '{"version":"0.0.0"}\n')
         result = self.run_sh('ci/register-release.sh', 'publish', self.branch, 'windows-x64', expected=2)
         self.assertIn('E_PREPARED_VERSION_MISMATCH', result.stderr)
+
+    def test_registry_plan_saves_pretty_utf8_json(self):
+        body = {'version': self.version, 'downloadUrl': 'https://example.com/app',
+                'changelog': '更新 😀\n"说明"\\路径',
+                'extra': {'中文键': [False, 0, None, {}, [], {'large': 9007199254740993}], 'control': '\x01'}}
+        self.write('input.json', json.dumps(body) + '\n')
+        self.write('old.json', 'null\n')
+        self.write('latest.json', 'null\n')
+        self.write('index.json', '[]\n')
+        (self.work / 'plan').mkdir()
+        self.write('plan.sh', 'LC_ALL=C; export LC_ALL\n'
+                   'exec awk -f scripts/version-publish/json.awk -f scripts/version-publish/release.awk\n')
+        env = dict(self.env, VP_OP='plan', VP_FILE='input.json', VP_FILE2='old.json',
+                   VP_LATEST='latest.json', VP_INDEX='index.json', VP_DIR='plan',
+                   RELEASE_PROJECT_CODE='my-ai-assistant', RELEASE_PLATFORM_CODE='windows-x64')
+        self.run_sh('plan.sh', env=env)
+        for name in ('record.json', 'latest.json', 'index.json'):
+            raw = (self.work / 'plan' / name).read_bytes().decode('utf-8')
+            self.assertEqual(raw, json.dumps(json.loads(raw), ensure_ascii=False, indent=2) + '\n')
+        record = json.loads((self.work / 'plan/record.json').read_text(encoding='utf-8'))
+        for key, value in body.items():
+            self.assertEqual(record[key], value)
 
     def test_registration_uses_saved_input_and_platform_specific_existing_asset(self):
         self.prepare()

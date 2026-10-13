@@ -1,5 +1,6 @@
 # Portable JSON tree. Run with LC_ALL=C; no gawk extensions or external commands.
-# Strings are stored as canonical escaped ASCII, never as executable shell text.
+# Strings are stored internally as canonical escaped ASCII, never as executable
+# shell text. JSON output restores readable UTF-8 while retaining required escapes.
 BEGIN {
     for (ji = 1; ji < 256; ji++) ORD[sprintf("%c", ji)] = ji
     HEX = "0123456789abcdef"
@@ -148,6 +149,27 @@ function decoded(s,    i, out, cp, low) {
     }
     return out
 }
+function json_string(s,    i, out, cp, low) {
+    out = "\""
+    for (i = 1; i <= length(s); i++) {
+        if (substr(s, i, 1) != "\\") { out = out substr(s, i, 1); continue }
+        cp = hex4(substr(s, i + 2, 4)); i += 5
+        if (cp >= 55296 && cp <= 56319) {
+            low = hex4(substr(s, i + 3, 4)); i += 6
+            cp = 65536 + (cp - 55296) * 1024 + low - 56320
+        }
+        if (cp == 34) out = out "\\\""
+        else if (cp == 92) out = out "\\\\"
+        else if (cp == 8) out = out "\\b"
+        else if (cp == 9) out = out "\\t"
+        else if (cp == 10) out = out "\\n"
+        else if (cp == 12) out = out "\\f"
+        else if (cp == 13) out = out "\\r"
+        else if (cp < 32) out = out sprintf("\\u%04x", cp)
+        else out = out utf8(cp)
+    }
+    return out "\""
+}
 function text(n) {
     if (T[n] != "string") die("E_EXPECT_STRING")
     return decoded(V[n])
@@ -169,14 +191,17 @@ function numeric(s,    sign, parts, count, exponent, dot, digits) {
     if (exponent == 0) return sign digits
     return sign digits "e" sprintf("%.0f", exponent)
 }
-function emit(n,    out, i, j, keys, tmp, key) {
-    if (T[n] == "string") return "\"" V[n] "\""
+# Comparisons and API payloads stay compact; saved registry files use two spaces.
+function emit(n, pretty, indent,    out, i, j, keys, tmp, key, line, tail) {
+    if (T[n] == "string") return json_string(V[n])
     if (T[n] == "number") return numeric(V[n])
     if (T[n] == "boolean" || T[n] == "null") return V[n]
+    line = pretty ? "\n" indent "  " : ""
+    tail = pretty && N[n] ? "\n" indent : ""
     if (T[n] == "array") {
         out = "["
-        for (i = 1; i <= N[n]; i++) out = out (i > 1 ? "," : "") emit(C[n, i])
-        return out "]"
+        for (i = 1; i <= N[n]; i++) out = out (i > 1 ? "," : "") line emit(C[n, i], pretty, indent "  ")
+        return out tail "]"
     }
     if (T[n] != "object") die("E_JSON_NODE")
     # Locale is C and keys have canonical escaped spellings. Force string ordering.
@@ -188,8 +213,9 @@ function emit(n,    out, i, j, keys, tmp, key) {
     }
     out = "{"
     for (i = 1; i <= N[n]; i++) {
-        key = keys[i]; out = out (i > 1 ? "," : "") "\"" key "\":" emit(M[n, key])
+        key = keys[i]
+        out = out (i > 1 ? "," : "") line json_string(key) (pretty ? ": " : ":") emit(M[n, key], pretty, indent "  ")
     }
-    return out "}"
+    return out tail "}"
 }
-function savejson(n, path) { print emit(n) > path; close(path) }
+function savejson(n, path) { print emit(n, 1, "") > path; close(path) }

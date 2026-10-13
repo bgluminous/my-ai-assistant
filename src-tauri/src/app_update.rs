@@ -35,6 +35,7 @@ impl Failure {
             "unsupported_platform" => "当前平台暂不支持在线更新，请前往 GitHub Releases 查看。",
             "cancelled" => "已取消下载，当前版本保持不变。",
             "open_failed" => "无法打开浏览器，请复制页面中的 GitHub 地址。",
+            "invalid_link" => "更新日志中的链接无效，仅允许 HTTP 或 HTTPS 网页。",
             "settings" => "保存更新设置失败，请检查用户数据目录权限。",
             _ => "更新操作失败，请重试或前往 GitHub Releases。",
         };
@@ -173,6 +174,7 @@ fn install_error(error: tauri_plugin_updater::Error) -> Failure {
     Failure::new("install")
 }
 async fn fetch_index(platform: &str, version: Option<&str>) -> Result<Release> {
+    if version.is_some_and(|v| protocol::version_code(v).is_none()) { return Err(Failure::new("index_version")); }
     let file = version.map(|v| format!("versions/{v}.json")).unwrap_or_else(|| "latest.json".into());
     let url = format!("{}/projects/my-ai-assistant/{platform}/{file}", protocol::REGISTRY);
     let release = fetch_index_with(client()?, &url, platform).await?;
@@ -180,6 +182,11 @@ async fn fetch_index(platform: &str, version: Option<&str>) -> Result<Release> {
     Ok(release)
 }
 async fn fetch_index_with(client: update_http::Client, url: &str, platform: &str) -> Result<Release> {
+    let release: Release = fetch_json_with(client, url).await?;
+    release.validate(platform).map_err(Failure::new)?;
+    Ok(release)
+}
+async fn fetch_json_with<T: serde::de::DeserializeOwned>(client: update_http::Client, url: &str) -> Result<T> {
     let mut response = client.get(url).header("Cache-Control", "no-cache").send().await.map_err(network_error)?;
     if response.status().as_u16() == 404 { return Err(Failure::new("not_published")); }
     if !response.status().is_success() { return Err(Failure::new("http")); }
@@ -188,9 +195,15 @@ async fn fetch_index_with(client: update_http::Client, url: &str, platform: &str
         if bytes.len() + chunk.len() > 512 * 1024 { return Err(Failure::new("invalid_json")); }
         bytes.extend_from_slice(&chunk);
     }
-    let release: Release = serde_json::from_slice(&bytes).map_err(|_| Failure::new("invalid_json"))?;
-    release.validate(platform).map_err(Failure::new)?;
-    Ok(release)
+    serde_json::from_slice(&bytes).map_err(|_| Failure::new("invalid_json"))
+}
+async fn fetch_history_with(client: update_http::Client, url: &str) -> Result<Vec<protocol::HistoryVersion>> {
+    let versions = match fetch_json_with(client, url).await {
+        Ok(versions) => versions,
+        Err(error) if error.code == "not_published" => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    protocol::validate_history(versions).map_err(Failure::new)
 }
 fn update_current_changelog(view: &mut View, latest: Option<&Release>, current: Result<Release>) {
     // latest 与当前版本相同时复用其日志，避免版本快照暂不可读时丢失内容。
@@ -233,6 +246,19 @@ async fn prepare(app: &AppHandle, release: &Release, target: &str) -> Result<Upd
 
 #[tauri::command]
 pub fn app_update_status() -> View { snapshot() }
+
+// 历史浏览仅在用户打开入口时查询，不改运行中的更新候选或强制更新状态。
+#[tauri::command]
+pub async fn app_update_history() -> Result<Vec<protocol::HistoryVersion>> {
+    if operations::paused() { return Err(Failure::new("update_busy")); }
+    let url = format!("{}/projects/my-ai-assistant/{}/index.json", protocol::REGISTRY, platform()?);
+    fetch_history_with(client()?, &url).await
+}
+#[tauri::command]
+pub async fn app_update_changelog(version: String) -> Result<Release> {
+    if operations::paused() { return Err(Failure::new("update_busy")); }
+    fetch_index(platform()?, Some(&version)).await
+}
 
 #[tauri::command]
 pub fn app_update_settings_set(app: AppHandle, enabled: bool) -> Result<View> {
@@ -384,6 +410,21 @@ pub fn app_update_open_pricing() -> Result<()> {
     open_browser(protocol::PRICING_PAGE).map_err(|_| Failure::new("open_failed"))
 }
 
+fn changelog_link(value: &str) -> Result<update_http::Url> {
+    let url = update_http::Url::parse(value).map_err(|_| Failure::new("invalid_link"))?;
+    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some() {
+        return Err(Failure::new("invalid_link"));
+    }
+    Ok(url)
+}
+#[tauri::command]
+pub fn app_update_open_link(url: String) -> Result<()> {
+    if operations::paused() { return Err(Failure::new("update_busy")); }
+    // IPC 边界再次校验，不能把日志里的 file: / javascript: / 自定义协议交给系统。
+    open_browser(changelog_link(&url)?.as_str()).map_err(|_| Failure::new("open_failed"))
+}
+
 fn valid_required(release: &Release, platform: &str, current: u32) -> bool {
     release.force_update && release.version_code > current && release.validate(platform).is_ok()
 }
@@ -423,6 +464,17 @@ where F: FnMut() -> Fut, Fut: std::future::Future<Output = ()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn changelog_links_only_allow_absolute_web_urls_without_credentials() {
+        for value in ["https://example.com/releases?v=1#notes", "http://example.com/"] {
+            assert_eq!(changelog_link(value).unwrap().as_str(), value);
+        }
+        for value in ["javascript:alert(1)", "data:text/html,test", "file:///C:/Windows/test.exe",
+            "ms-settings:privacy", "//example.com", "/local", "https://user:pass@example.com"] {
+            assert_eq!(changelog_link(value).unwrap_err().code, "invalid_link");
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn scheduler_waits_thirty_seconds_then_twenty_four_hours() {
@@ -494,6 +546,25 @@ mod tests {
             let _ = socket.write_all(reply.as_bytes());
         });
         (url, thread)
+    }
+    #[tokio::test]
+    async fn history_handles_empty_missing_invalid_and_failed_responses() {
+        for (status, body, expected) in [
+            (200, "[]".into(), None),
+            (404, "missing".into(), None),
+            (503, "unavailable".into(), Some("http")),
+            (200, "{}".into(), Some("invalid_json")),
+            (200, r#"[{"version":"../../latest","versionCode":1}]"#.into(), Some("index_version")),
+            (200, " ".repeat(512 * 1024 + 1), Some("invalid_json")),
+        ] {
+            let (url, thread) = server(status, body, Duration::ZERO);
+            let result = fetch_history_with(update_http::Client::builder().no_proxy().build().unwrap(), &url).await;
+            match expected {
+                Some(code) => assert_eq!(result.unwrap_err().code, code),
+                None => assert!(result.unwrap().is_empty()),
+            }
+            thread.join().unwrap();
+        }
     }
     #[tokio::test]
     async fn http_errors_invalid_json_identity_and_timeouts_are_distinct() {

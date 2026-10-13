@@ -8,7 +8,8 @@
 并按模型汇总 token 用量与费用。
 
 程序基于 [Tauri](https://tauri.app/) 2，前端为原生 HTML / CSS / JavaScript，
-图表使用 [Chart.js](https://www.chartjs.org/)，网络请求由 Rust 侧 `reqwest` 发出。
+图表使用 [Chart.js](https://www.chartjs.org/)，更新日志使用
+[Marked](https://marked.js.org/) 解析并以安全 DOM 渲染；网络请求由 Rust 侧 `reqwest` 发出。
 当前面向 **Windows** 与 **macOS**。安装包见
 [GitHub Releases](https://github.com/bgluminous/my-ai-assistant/releases)
 （Windows x64 与 macOS Apple Silicon）；安装包未做代码签名。
@@ -206,7 +207,7 @@
 
 ## 运行要求
 
-- [Node.js](https://nodejs.org/) 18 或更高（用于 `@tauri-apps/cli`）。
+- [Node.js](https://nodejs.org/) 20.19 或更高（用于前端依赖与开发工具）。
 - [Rust](https://rustup.rs/) 工具链（`rustup`）。
 - 平台链接器：
   - **Windows**：Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」（MSVC 与 Windows SDK）。
@@ -272,7 +273,10 @@ GPT 同步的数据结构与内容哈希见 [codex_store.rs](src-tauri/src/codex
 ## 应用更新
 
 启动 30 秒后自动检查一次，此后每 24 小时检查。可在「设置」关闭自动检查，
-或随时在「关于」页手动检查。更新日志只展示当前版本与可升级的新版本，不列出历史版本。
+或随时在「关于」页手动检查。当前版本与可升级的新版本说明支持 Markdown 排版。
+点击「历史更新日志」后，按需读取当前平台已登记的版本，可切换版本、刷新列表或重试日志；
+已读取的历史说明会在本次运行中缓存。未登记的更早版本可前往 GitHub Releases 查看。
+浏览历史不会改变待安装版本；日志中的网页链接在系统浏览器打开，原始 HTML 不执行。
 已是最新版时仍显示当前版本日志。确认更新后下载安装并重启，下载期间可取消。
 检查失败会保留原因，提供重试、代理设置与 GitHub Releases 入口。
 后台失败不弹窗、不打开浏览器，静默启动时继续保持窗口隐藏。
@@ -329,14 +333,14 @@ Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
 ```
 my-ai-assistant/
 ├── LICENSE                   # GNU GPLv3
-├── package.json              # npm 脚本与 @tauri-apps/cli、chart.js
+├── package.json              # npm 脚本、前端依赖与测试工具
 ├── app-icon.png              # 应用图标源图
 ├── docs/screenshots/         # README 界面示例图
 ├── scripts/                  # JS 语法检查、Windows 本地打包
 ├── src/                      # 前端（Tauri frontendDist）
 │   ├── index.html            # 主窗口
 │   ├── tray.html             # 托盘面板
-│   └── vendor/               # Chart.js UMD
+│   └── vendor/               # 离线打包的 Chart.js、Marked 与许可说明
 └── src-tauri/                # Rust 后端
     ├── Cargo.toml
     ├── tauri.conf.json
