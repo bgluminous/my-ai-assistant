@@ -335,6 +335,7 @@ pub async fn app_update_install(app: AppHandle, version: String) -> Result<View>
         // Windows updater 成功启动安装器后退出；macOS 安装完成需显式重启。
         #[cfg(target_os = "macos")]
         app.restart();
+        #[cfg(not(target_os = "macos"))]
         Ok(snapshot())
     }.await;
     result.map_err(|e| fail(&app, e))
