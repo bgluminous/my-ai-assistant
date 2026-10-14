@@ -64,6 +64,10 @@ hook "$version_hook"
 raw_version=$(sh "$version_hook" 2> "$tmp/version.stderr") || fail 2 E_VERSION_HOOK
 version=$(sh "$dir/json-tool.sh" version "$raw_version") || fail 2 E_VERSION
 [ "$version" = "$expected" ] || fail 2 E_BRANCH_VERSION_MISMATCH
+# This project's release text must be authored and reviewed before publishing.
+hook ci/read-release-notes.sh
+sh ci/read-release-notes.sh "$version" > "$tmp/changelog.md" || fail 2 E_CHANGELOG
+RELEASE_CHANGELOG_FILE=$tmp/changelog.md; export RELEASE_CHANGELOG_FILE
 mode=${RELEASE_ASSET_MODE:-upload}
 case "$mode" in upload|existing) ;; *) fail 2 E_ASSET_MODE ;; esac
 asset_name=${RELEASE_ASSET_FILE:-app.tar.gz}

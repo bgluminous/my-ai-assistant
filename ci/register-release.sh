@@ -25,6 +25,8 @@ version=$(sh "$RELEASE_VERSION_HOOK") || fail 2 E_VERSION_HOOK
 
 if [ "$phase" = prepare ]; then
     [ -f "$detail" ] && [ -r "$detail" ] || fail 2 E_CHANGELOG_FILE
+    sh ci/read-release-notes.sh "$version" > "$tmp/changelog.md" || fail 2 E_CHANGELOG
+    cmp -s "$detail" "$tmp/changelog.md" || fail 2 E_CHANGELOG_MISMATCH
     RELEASE_CHANGELOG_FILE=$detail; export RELEASE_CHANGELOG_FILE
     for platform in $RELEASE_PLATFORMS; do
         RELEASE_PLATFORM_CODE=$platform; export RELEASE_PLATFORM_CODE

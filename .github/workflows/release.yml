@@ -10,8 +10,8 @@
 #     不创建 Release，用于试跑。
 #   - 推送 master 或其它分支不触发。
 #
-# Release 说明 = 固定的下载指引 + 自动生成的变更列表（上一个 v* 标签以来的提交标题，
-# 按 Conventional Commits 类型分组）。应用更新索引只登记变更列表。
+# Release 说明 = 固定的下载指引 + 随版本提交、已审阅的 docs/releases/<版本>.md。
+# 日志由 agent 在发布前结合提交与代码差异编写；CI 只校验和读取，索引使用同一份正文。
 # 发布后仍可在 GitHub 的 Release 页面手动编辑下载指引。
 #
 # 不覆盖 Intel Mac 与 Linux。prepare / publish 两个协调 job 跑在 ubuntu 上只是因为最便宜，
@@ -105,8 +105,7 @@ jobs:
           fi
 
       # 下载页正文与应用内更新日志分别保存；索引和 updater 清单共用纯变更列表。
-      # 变更列表取「当前提交可达的最近一个 v* 标签」到当前提交
-      # 之间的非合并提交标题，按 Conventional Commits 类型分组；没有历史标签时写「首个发布版本」。
+      # 缺失或未填写日志时失败，不从提交标题、正文或首版占位句生成替代内容。
       - name: Write release notes
         if: steps.meta.outputs.publish == 'true'
         env:
@@ -130,28 +129,10 @@ jobs:
           「已损坏」或「无法验证开发者」，在终端执行 \`xattr -cr /Applications/${APP_NAME}.app\` 后再打开。
 
           EOF
-          : > changelog.md
+          sh ci/read-release-notes.sh "$VERSION" > changelog.md
           prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
           if [ "$prev" = "$TAG" ]; then
             prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || true)
-          fi
-          if [ -z "$prev" ]; then
-            echo "首个发布版本。" >> changelog.md
-          else
-            range="$prev..HEAD"
-            subjects=$(git log --no-merges --format='%s' "$range")
-            group() {
-              local items
-              items=$(printf '%s\n' "$subjects" | grep -E "^($2)(\([^)]*\))?!?:" \
-                | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*/- /' || true)
-              if [ -n "$items" ]; then printf '### %s\n\n%s\n\n' "$1" "$items" >> changelog.md; fi
-            }
-            group '新增' 'feat'
-            group '修复' 'fix'
-            group '性能与重构' 'perf|refactor'
-            group '其他' 'docs|ci|chore|build|test|style'
-            rest=$(printf '%s\n' "$subjects" | grep -vE '^[a-z]+(\([^)]*\))?!?:' | sed 's/^/- /' || true)
-            if [ -n "$rest" ]; then printf '### 未分类\n\n%s\n\n' "$rest" >> changelog.md; fi
           fi
           printf '## 变更\n\n' >> notes.md
           cat changelog.md >> notes.md

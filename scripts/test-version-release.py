@@ -61,6 +61,10 @@ class ReleaseTests(unittest.TestCase):
             shutil.copytree(ROOT / name, self.work / name)
         self.version = json.loads((self.work / 'package.json').read_text(encoding="utf-8"))['version']
         self.branch = 'Release-' + self.version
+        self.changelog = '### 修复\n\n- 版本发布测试\n'
+        self.notes_path = 'docs/releases/' + self.version + '.md'
+        (self.work / 'docs/releases').mkdir(parents=True)
+        self.write(self.notes_path, self.changelog)
         self.bin = self.work / 'test-bin'
         self.bin.mkdir()
         self.scratch = self.work / 'scratch'
@@ -152,7 +156,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('project=my-ai-assistant', self.gate(env=env).stdout)
 
     def prepare(self):
-        self.write('notes.txt', '版本发布测试\n')
+        self.write('notes.txt', self.changelog)
         self.run_sh('ci/register-release.sh', 'prepare', self.branch, 'notes.txt')
 
     def test_prepare_both_platforms_offline(self):
@@ -163,7 +167,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertNotIn(r'\u7248\u672c', raw)
             body = json.loads(raw)
             manifest = f'https://github.com/bgluminous/my-ai-assistant/releases/download/v{self.version}/updater-{platform}.json'
-            self.assertEqual(body, dict(version=self.version, changelog='版本发布测试\n', forceUpdate=False,
+            self.assertEqual(body, dict(version=self.version, changelog=self.changelog, forceUpdate=False,
                                        extra={'updater': {'manifestUrl': manifest}}))
 
     def workflow_step(self, name):
@@ -175,12 +179,14 @@ class ReleaseTests(unittest.TestCase):
         return command.splitlines()[0] + '\n'
 
     def write_workflow_notes(self, previous='v1.4.0'):
-        # Exercise the actual workflow commands with offline Git output.
+        # The reviewed file is the only source of product changes, even on first release.
+        self.changelog = ('### 新增\n\n- 支持下载记录筛选\n- 显示同步详情\n\n'
+                          '### 修复\n\n- 修复同步异常\n\n')
+        self.write(self.notes_path, self.changelog)
         self.write('test-bin/git', '''#!/bin/sh
 case "$1" in
   describe) [ -n "$TEST_PREVIOUS_TAG" ] || exit 1; printf '%s\\n' "$TEST_PREVIOUS_TAG" ;;
-  log) printf '%s\\n' 'feat(ui): 支持下载记录筛选' 'fix: 修复同步异常' 'docs: 补充使用说明' ;;
-  *) exit 97 ;;
+  *) printf unexpected > unexpected-git-read; exit 97 ;;
 esac
 ''')
         (self.bin / 'git').chmod(0o755)
@@ -190,12 +196,12 @@ esac
         self.run_sh('write-notes.sh', env=env)
         self.write('prepare-notes.sh', self.workflow_step('Prepare registry input without network access'))
         self.run_sh('prepare-notes.sh', env=env)
+        self.assertFalse((self.work / 'unexpected-git-read').exists(), 'CI must not compose commit text')
         return (self.work / 'changelog.md').read_text(encoding='utf-8')
 
     def test_workflow_registers_changes_without_download_or_installation_instructions(self):
         changelog = self.write_workflow_notes()
-        self.assertEqual(changelog, '### 新增\n\n- 支持下载记录筛选\n\n'
-                         '### 修复\n\n- 修复同步异常\n\n### 其他\n\n- 补充使用说明\n\n')
+        self.assertEqual(changelog, self.changelog)
         notes = (self.work / 'notes.md').read_text(encoding='utf-8')
         for text in ['## 下载', '## 变更', '_x64-setup.exe', 'SmartScreen', 'xattr -cr', '完整对比：']:
             self.assertIn(text, notes)
@@ -207,10 +213,29 @@ esac
 
     def test_first_release_also_registers_only_its_changes(self):
         changelog = self.write_workflow_notes(previous='')
-        self.assertEqual(changelog, '首个发布版本。\n')
+        self.assertEqual(changelog, self.changelog)
+        self.assertNotIn('完整对比：', (self.work / 'notes.md').read_text(encoding='utf-8'))
         for platform in ['windows-x64', 'macos-arm64']:
             record = json.loads((self.work / 'release-out' / platform / 'release.json').read_text(encoding='utf-8'))
             self.assertEqual(record['changelog'], changelog)
+
+    def test_missing_empty_and_placeholder_notes_block_release(self):
+        (self.work / self.notes_path).unlink()
+        self.assertIn('E_CHANGELOG', self.gate(expected=2).stderr)
+        for notes in ['', '  \n', '### 新增\n', '- TODO\n', '- 待补充\n', '- 正常条目\r\n',
+                      '- ' + '字' * 16001 + '\n']:
+            with self.subTest(notes=notes[:30]):
+                self.write(self.notes_path, notes)
+                self.gate(expected=2)
+
+    def test_wrong_version_notes_and_mismatched_preparation_are_rejected(self):
+        (self.work / self.notes_path).rename(self.work / 'docs/releases/0.0.0.md')
+        self.assertIn('E_CHANGELOG', self.gate(expected=2).stderr)
+        self.write(self.notes_path, self.changelog)
+        self.write('notes.txt', '- 自动拼接的另一份说明\n')
+        result = self.run_sh('ci/register-release.sh', 'prepare', self.branch, 'notes.txt', expected=2)
+        self.assertIn('E_CHANGELOG_MISMATCH', result.stderr)
+        self.assertFalse((self.work / 'release-out').exists())
 
     def test_canonical_json_outputs_utf8_and_required_escapes(self):
         value = {'中文键': '更新"路径\\测试\n😀', 'control': '\x01'}
@@ -269,7 +294,7 @@ printf '%s\\n' "$GITHUB_RELEASE_TAG" "$GITHUB_RELEASE_ASSET_NAME" "$RELEASE_PLAT
             self.assertEqual(invocation[:3], ['v' + self.version, 'my-ai-assistant_' + self.version + suffix, platform])
             self.assertNotIn('--asset', invocation)
             body = json.loads((self.work / 'release-out' / platform / 'release.json').read_text(encoding="utf-8"))
-            self.assertEqual(body['changelog'], '版本发布测试\n')
+            self.assertEqual(body['changelog'], self.changelog)
 
     def upload_fixture(self, draft=True, existing=True):
         asset = self.work / 'app.exe'
