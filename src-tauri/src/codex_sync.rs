@@ -170,9 +170,44 @@ pub enum SyncTrigger {
 
 type RoundReceiver = tokio::sync::watch::Receiver<Option<Result<()>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncPhase {
+    Waiting,
+    Scanning,
+    Storing,
+    Connecting,
+    Uploading,
+    Downloading,
+    Recovering,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub round_id: u64,
+    pub phase: SyncPhase,
+    pub uploaded_records: usize,
+    pub upload_total: Option<usize>,
+    pub downloaded_records: usize,
+    pub downloaded_pages: usize,
+    pub finished_at: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct RoundKey {
+    generation: u64,
+    id: u64,
+}
+
 #[derive(Default)]
 struct Runtime {
     generation: u64,
+    sequence: u64,
+    round_id: u64,
+    progress: Option<SyncProgress>,
     active: Option<(u64, RoundReceiver)>,
     paused: bool,
     error: Option<String>,
@@ -180,6 +215,50 @@ struct Runtime {
     next: Option<Instant>,
 }
 impl Runtime {
+    fn begin_progress(&mut self) -> RoundKey {
+        self.round_id += 1;
+        self.sequence += 1;
+        self.error = None;
+        self.progress = Some(SyncProgress {
+            round_id: self.round_id,
+            phase: SyncPhase::Waiting,
+            uploaded_records: 0,
+            upload_total: None,
+            downloaded_records: 0,
+            downloaded_pages: 0,
+            finished_at: None,
+        });
+        RoundKey {
+            generation: self.generation,
+            id: self.round_id,
+        }
+    }
+    fn update_progress(
+        &mut self,
+        key: RoundKey,
+        change: impl FnOnce(&mut SyncProgress),
+    ) -> Result<bool> {
+        if self.generation != key.generation {
+            return Err("sync_cancelled".into());
+        }
+        let p = self
+            .progress
+            .as_mut()
+            .filter(|p| p.round_id == key.id)
+            .ok_or("sync_cancelled")?;
+        let before = p.clone();
+        change(p);
+        let changed = *p != before;
+        if changed {
+            self.sequence += 1;
+        }
+        Ok(changed)
+    }
+    fn invalidate(&mut self) {
+        self.generation += 1;
+        self.sequence += 1;
+        self.progress = None;
+    }
     fn join(&self) -> Option<RoundReceiver> {
         self.active
             .as_ref()
@@ -227,6 +306,15 @@ impl Runtime {
         }
     }
     fn record_result(&mut self, result: &Result<()>) {
+        self.sequence += 1;
+        if let Some(p) = self.progress.as_mut() {
+            p.phase = if result.is_ok() {
+                SyncPhase::Completed
+            } else {
+                SyncPhase::Failed
+            };
+            p.finished_at = Some(chrono::Utc::now().timestamp_millis());
+        }
         match result {
             Ok(()) => {
                 self.error = None;
@@ -281,7 +369,7 @@ pub fn update_configuration<T>(update: impl FnOnce() -> Result<T>) -> Result<T> 
     let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
     let result = update();
     // settings::mutate 写盘失败时内存可能已变化，因此错误分支也必须作废旧请求。
-    r.generation += 1;
+    r.invalidate();
     r.error = None;
     r.paused = false;
     r.failures = 0;
@@ -289,6 +377,7 @@ pub fn update_configuration<T>(update: impl FnOnce() -> Result<T>) -> Result<T> 
     result
 }
 pub fn configuration_changed(app: &AppHandle) {
+    emit_status(app);
     notify_changed(app, "config");
     // 保存与备份恢复后仅同步一次，不再维护独立周期或失败重试定时器。
     let app = app.clone();
@@ -297,25 +386,31 @@ pub fn configuration_changed(app: &AppHandle) {
     });
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
+    pub sequence: u64,
     pub state: String,
     pub last_success_at: Option<i64>,
     pub pending_records: usize,
     pub error: Option<String>,
+    pub progress: Option<SyncProgress>,
 }
 #[tauri::command]
 pub fn codex_usage_sync_status() -> Result<SyncStatus> {
     let _operation = crate::operations::begin()?;
+    status_snapshot()
+}
+fn status_snapshot() -> Result<SyncStatus> {
+    // 与配置更新、写盘统一按 runtime → settings/store 的顺序取锁。
+    let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
     let cfg = current()?;
     let profile = cfg.profile()?;
     let (pending, last) =
         store::with_store(|s| Ok((s.pending_count(&profile)?, s.success(&profile)?)))?;
-    let r = runtime().lock().map_err(|_| "sync_lock_failed")?;
     let state = if !cfg.configured() {
         "disabled"
-    } else if r.join().is_some() {
+    } else if r.join().is_some() && r.progress.as_ref().is_none_or(|p| p.finished_at.is_none()) {
         "running"
     } else if r.paused {
         "paused"
@@ -325,11 +420,33 @@ pub fn codex_usage_sync_status() -> Result<SyncStatus> {
         "idle"
     };
     Ok(SyncStatus {
+        sequence: r.sequence,
         state: state.into(),
         last_success_at: last,
         pending_records: pending,
         error: r.error.clone(),
+        progress: r.progress.clone(),
     })
+}
+fn emit_status(app: &AppHandle) {
+    // 构造快照之后已释放所有锁；进度通知不触发统计缓存失效。
+    if let Ok(snapshot) = status_snapshot() {
+        let _ = app.emit("codex-usage-sync-status", snapshot);
+    }
+}
+fn report_progress(
+    app: &AppHandle,
+    key: RoundKey,
+    change: impl FnOnce(&mut SyncProgress),
+) -> Result<()> {
+    let changed = runtime()
+        .lock()
+        .map_err(|_| "sync_lock_failed")?
+        .update_progress(key, change)?;
+    if changed {
+        emit_status(app);
+    }
+    Ok(())
 }
 #[tauri::command]
 pub fn codex_usage_sync_get() -> Result<ConfigView> {
@@ -500,17 +617,66 @@ impl Transport for HttpTransport {
 }
 
 /// DB 回调包含代次检查；测试可注入内存库。每页事务与每次确认独立提交，失败从断点恢复。
+#[cfg(test)]
 pub async fn exchange<T: Transport>(
     transport: &T,
     profile: &str,
     device: Device,
-    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+    db: impl FnMut(DbAction) -> Result<DbReply>,
 ) -> Result<()> {
+    exchange_progress(transport, profile, device, db, &mut |_| Ok(())).await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ExchangeProgress {
+    Connecting,
+    Uploading { uploaded: usize, total: usize },
+    Downloading { records: usize, pages: usize },
+    Recovering,
+}
+impl SyncProgress {
+    fn exchange(&mut self, event: ExchangeProgress) {
+        match event {
+            ExchangeProgress::Connecting => self.phase = SyncPhase::Connecting,
+            ExchangeProgress::Uploading { uploaded, total } => {
+                self.phase = SyncPhase::Uploading;
+                self.uploaded_records = uploaded;
+                self.upload_total = Some(total);
+            }
+            ExchangeProgress::Downloading { records, pages } => {
+                self.phase = SyncPhase::Downloading;
+                self.downloaded_records = records;
+                self.downloaded_pages = pages;
+            }
+            ExchangeProgress::Recovering => {
+                self.phase = SyncPhase::Recovering;
+                self.uploaded_records = 0;
+                self.upload_total = None;
+                self.downloaded_records = 0;
+                self.downloaded_pages = 0;
+            }
+        }
+    }
+}
+async fn exchange_progress<T: Transport>(
+    transport: &T,
+    profile: &str,
+    device: Device,
+    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+    progress: &mut impl FnMut(ExchangeProgress) -> Result<()>,
+) -> Result<()> {
+    progress(ExchangeProgress::Connecting)?;
     let h = transport.handshake().await?;
     h.validate()?;
     db(DbAction::Prepare(h.clone()))?;
     let mut sent_metadata = false;
+    let mut uploaded = 0;
     loop {
+        let DbReply::Count(pending) = db(DbAction::PendingCount)? else {
+            return Err("sync_protocol_invalid".into());
+        };
+        let total = uploaded + pending;
+        progress(ExchangeProgress::Uploading { uploaded, total })?;
         let DbReply::Pending(mut records) = db(DbAction::Pending)? else {
             return Err("sync_protocol_invalid".into());
         };
@@ -556,10 +722,22 @@ pub async fn exchange<T: Transport>(
         if actual != expected {
             return Err("sync_protocol_invalid".into());
         }
+        let count = payload.records.len();
         db(DbAction::Ack(payload.records))?;
+        uploaded += count;
+        progress(ExchangeProgress::Uploading {
+            uploaded,
+            total: total.max(uploaded),
+        })?;
         sent_metadata = true;
     }
     // 上传确认不能推进下载游标；服务端读取不消费数据，各客户端分别保存检查点。
+    let mut downloaded = 0;
+    let mut pages = 0;
+    progress(ExchangeProgress::Downloading {
+        records: 0,
+        pages: 0,
+    })?;
     let DbReply::Cursor(mut cursor) = db(DbAction::Cursor)? else {
         return Err("sync_protocol_invalid".into());
     };
@@ -583,7 +761,14 @@ pub async fn exchange<T: Transport>(
         }
         cursor = Some(page.next_cursor.clone());
         let more = page.has_more;
+        let count = page.records.len();
         db(DbAction::Page(page))?;
+        downloaded += count;
+        pages += 1;
+        progress(ExchangeProgress::Downloading {
+            records: downloaded,
+            pages,
+        })?;
         if !more {
             break;
         }
@@ -594,16 +779,28 @@ pub async fn exchange<T: Transport>(
 }
 
 /// 409 最多恢复一次；本机原始记录保留，清除确认和游标后重新握手。
+#[cfg(test)]
 async fn exchange_with_recovery<T: Transport>(
     transport: &T,
     profile: &str,
     device: Device,
-    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+    db: impl FnMut(DbAction) -> Result<DbReply>,
 ) -> Result<()> {
-    let result = exchange(transport, profile, device.clone(), &mut db).await;
+    exchange_recovery_progress(transport, profile, device, db, |_| Ok(())).await
+}
+async fn exchange_recovery_progress<T: Transport>(
+    transport: &T,
+    profile: &str,
+    device: Device,
+    mut db: impl FnMut(DbAction) -> Result<DbReply>,
+    mut progress: impl FnMut(ExchangeProgress) -> Result<()>,
+) -> Result<()> {
+    let result =
+        exchange_progress(transport, profile, device.clone(), &mut db, &mut progress).await;
     if result.as_ref().err().map(String::as_str) == Some("sync_reset_required") {
         db(DbAction::Reset)?;
-        return exchange(transport, profile, device, db).await;
+        progress(ExchangeProgress::Recovering)?;
+        return exchange_progress(transport, profile, device, db, &mut progress).await;
     }
     result
 }
@@ -611,6 +808,7 @@ pub enum DbAction {
     Prepare(Handshake),
     Reset,
     Pending,
+    PendingCount,
     Ack(Vec<WireRecord>),
     Cursor,
     Page(Page),
@@ -619,6 +817,7 @@ pub enum DbAction {
 pub enum DbReply {
     Done,
     Pending(Vec<WireRecord>),
+    Count(usize),
     Cursor(Option<String>),
 }
 pub fn apply_action(s: &mut store::Store, profile: &str, action: DbAction) -> Result<DbReply> {
@@ -626,6 +825,7 @@ pub fn apply_action(s: &mut store::Store, profile: &str, action: DbAction) -> Re
         DbAction::Prepare(h) => s.prepare_profile(profile, &h.space_id, &h.epoch)?,
         DbAction::Reset => s.reset_sync(profile)?,
         DbAction::Pending => return Ok(DbReply::Pending(s.pending(profile)?)),
+        DbAction::PendingCount => return Ok(DbReply::Count(s.pending_count(profile)?)),
         DbAction::Ack(records) => s.acknowledge(profile, &records)?,
         DbAction::Cursor => return Ok(DbReply::Cursor(s.cursor(profile)?)),
         DbAction::Page(p) => {
@@ -665,7 +865,7 @@ async fn synchronize(app: &AppHandle, trigger: SyncTrigger) -> Result<()> {
             ) {
                 return Ok(());
             }
-            let generation = r.generation;
+            let key = r.begin_progress();
             let app = app.clone();
             let finished_app = app.clone();
             r.start(
@@ -673,14 +873,14 @@ async fn synchronize(app: &AppHandle, trigger: SyncTrigger) -> Result<()> {
                     // 新配置可排队，但旧请求退出前不并发执行另一轮网络交换。
                     let _gate = gate().lock().await;
                     let result = async {
-                        checked(generation, || Ok(()))?;
+                        checked(key.generation, || Ok(()))?;
                         let _operation = crate::operations::begin()?;
-                        sync_round(&cfg, generation).await
+                        sync_round(&app, &cfg, key).await
                     }
                     .await;
                     let result = {
                         let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
-                        if r.generation != generation {
+                        if r.generation != key.generation || r.round_id != key.id {
                             Err("sync_cancelled".into())
                         } else {
                             r.record_result(&result);
@@ -706,32 +906,40 @@ async fn synchronize(app: &AppHandle, trigger: SyncTrigger) -> Result<()> {
                     result
                 },
                 move || {
-                    let _ = finished_app.emit("codex-usage-sync-status", ());
+                    emit_status(&finished_app);
                 },
             )
         }
     };
-    let _ = app.emit("codex-usage-sync-status", ());
+    emit_status(app);
     wait_for_round(done).await
 }
-async fn sync_round(cfg: &SyncConfig, generation: u64) -> Result<()> {
+async fn sync_round(app: &AppHandle, cfg: &SyncConfig, key: RoundKey) -> Result<()> {
+    report_progress(app, key, |p| p.phase = SyncPhase::Scanning)?;
     let home = cfg.source_home.clone();
     let (files, _) =
         tauri::async_runtime::spawn_blocking(move || codex::collect_sessions(Some(home)))
             .await
             .map_err(|_| "sync_scan_failed")?;
-    checked(generation, || store::with_store(|s| s.ingest(files)))?;
+    report_progress(app, key, |p| p.phase = SyncPhase::Storing)?;
+    checked(key.generation, || store::with_store(|s| s.ingest(files)))?;
     if !cfg.configured() {
         return Ok(());
     }
     let profile = cfg.profile()?;
     let transport = HttpTransport::new(&cfg)?;
     let own = device(&cfg)?;
-    exchange_with_recovery(&transport, &profile, own, |a| {
-        checked(generation, || {
-            store::with_store(|s| apply_action(s, &profile, a))
-        })
-    })
+    exchange_recovery_progress(
+        &transport,
+        &profile,
+        own,
+        |a| {
+            checked(key.generation, || {
+                store::with_store(|s| apply_action(s, &profile, a))
+            })
+        },
+        |event| report_progress(app, key, |p| p.exchange(event)),
+    )
     .await
 }
 #[tauri::command]
@@ -820,7 +1028,7 @@ pub fn codex_usage_cache_clear(app: AppHandle, device_id: String) -> Result<usiz
         let mut r = runtime().lock().map_err(|_| "sync_lock_failed")?;
         let cfg = current()?;
         let n = store::with_store(|s| s.clear_device(&cfg.profile()?, &device_id))?;
-        r.generation += 1;
+        r.invalidate();
         n
     };
     audit::log(
@@ -829,6 +1037,7 @@ pub fn codex_usage_cache_clear(app: AppHandle, device_id: String) -> Result<usiz
         None,
     );
     notify_changed(&app, "clear");
+    emit_status(&app);
     Ok(n)
 }
 

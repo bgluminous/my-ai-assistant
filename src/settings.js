@@ -1,5 +1,5 @@
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
-import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts, onAccountsChanged } from "./accounts.js";
+import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
 import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sync.js";
 
 // 设置弹窗：
@@ -94,13 +94,6 @@ function renderUnitSeg() {
 /** 刷新间隔文案：不足 1 小时按分钟，整小时按小时（60 → 1 小时，1440 → 24 小时）。 */
 function intervalText(minutes) {
   return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
-}
-
-function renderSyncInterval() {
-  const minutes = getRefreshIntervalMinutes();
-  el("#gpt-sync-schedule").textContent = minutes > 0
-    ? `跟随定时刷新：每 ${intervalText(minutes)}同步一次。`
-    : "定时刷新已关闭。手动刷新、Tray 总览过期刷新及「立即同步」仍可同步用量。";
 }
 
 async function onIntervalChange() {
@@ -483,7 +476,7 @@ async function onScanCancel() {
   sessionActive = false;
 }
 
-// 点「完成」：保存 Cursor / ChatGPT / Claude Desktop 路径并关闭；路径无效则提示且不关闭。空路径 = 清除配置。
+// 点「完成」：保存同步配置与客户端路径并关闭；配置无效则定位错误且不关闭。空路径 = 清除配置。
 async function onDone() {
   if (!await saveSyncSettings(true)) {
     selectSettingsSection("sync");
@@ -513,17 +506,11 @@ async function onDone() {
 export function initSettings() {
   initSettingsSections();
   initSyncSettings();
-  onAccountsChanged(renderSyncInterval);
-  el("#gpt-sync-open-refresh").addEventListener("click", () => {
-    selectSettingsSection("accounts");
-    el("#accounts-interval").focus();
-  });
   const modal = el("#settings-modal");
   el("#settings-btn").addEventListener("click", () => {
     renderUnitSeg();
     intervalStatus.clear();
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
-    renderSyncInterval();
     localSyncStatus.clear();
     void loadLocalSyncInterval();
     void loadSyncSettings();

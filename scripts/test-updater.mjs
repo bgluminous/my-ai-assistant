@@ -29,7 +29,10 @@ async function fixture(initial = defaults, responses = {}) {
   const panel = document.querySelector("#usage-panel");
   nodes.set(selects, about);
   const events = new Map(); const calls = []; let shown = 0;
+  const frames = new Map(); let frameId = 0;
   const context = vm.createContext({ console, URL, document,
+    requestAnimationFrame: callback => { const id = ++frameId; frames.set(id, callback); return id; },
+    cancelAnimationFrame: id => frames.delete(id),
     window: { __TAURI__: { core: {}, window: { getCurrentWindow: () => ({ show() { shown++; }, setFocus() { shown++; } }) } } },
   });
   const invoke = async (command, args) => {
@@ -56,7 +59,8 @@ async function fixture(initial = defaults, responses = {}) {
   await module.link(name => { assert(modules[name], `Unknown import ${name}`); return modules[name]; });
   await module.evaluate();
   await module.namespace.initAppUpdate();
-  return { nodes, calls, business, panel, document, Event, notes: notes.namespace, status: status.namespace, shown: () => shown,
+  return { nodes, calls, business, panel, document, Event, frames, notes: notes.namespace, status: status.namespace, shown: () => shown,
+    paint: () => { const pending = [...frames.values()]; frames.clear(); for (const frame of pending) frame(); },
     selectHistory: async version => {
       const select = nodes.get("#app-update-history-version");
       for (const option of select.querySelectorAll("option")) option.selected = false;
@@ -269,7 +273,7 @@ test("current notes failures retain cached text without blocking the new version
 test("progress, cancellation, stale events and required updates remain visible", async () => {
   const f = await fixture();
   f.emit({ revision: 4, phase: "downloading", downloadedBytes: 50, totalBytes: 100 });
-  assert.equal(f.nodes.get("#app-update-progress").value, 50);
+  assert.equal(f.nodes.get("#app-update-progress").getAttribute("aria-valuenow"), "50");
   await f.nodes.get("#app-update-cancel").click();
   assert.equal(f.calls.at(-1).command, "app_update_cancel");
   f.emit({ revision: 3, phase: "upToDate" });
@@ -288,4 +292,100 @@ test("unknown download size and pricing failures have distinct safe explanations
   assert.match(f.status.pricingError("fetch_timeout"), /超时/);
   assert.match(f.status.pricingError("parse_failed"), /保留本地缓存/);
   assert.doesNotMatch(f.status.pricingError("fetch_failed: https://secret.invalid"), /secret/);
+});
+
+test("download bursts paint once per frame without rewriting the update panel", async () => {
+  const f = await fixture();
+  const download = { phase: "downloading", latestVersion: "1.4.0", canInstall: true,
+    currentChangelog: "当前版本说明", changelog: "## 更新说明", totalBytes: 100_000 };
+  f.emit({ ...download, revision: 1, downloadedBytes: 25_000 });
+  const selectors = ["#app-update-status", "#app-update-meta", "#app-update-check", "#app-update-install",
+    "#app-update-notes-title", "#app-update-notes", "#app-update-current-notes-title", "#app-update-progress-text"];
+  const contents = selectors.map(id => f.nodes.get(id).firstChild);
+  const progress = f.nodes.get("#app-update-progress");
+  for (let i = 1; i <= 100; i++) f.emit({ ...download, revision: i + 1, downloadedBytes: 25_000 + i });
+  assert.equal(f.frames.size, 1);
+  assert.equal(progress.firstElementChild.style.transform, "scaleX(0.25)");
+  f.paint();
+  assert.equal(progress.firstElementChild.style.transform, "scaleX(0.251)", "sub-percent progress must not be rounded away");
+  assert.equal(progress.getAttribute("aria-valuenow"), "25");
+  assert.equal(progress.dataset.animate, "true");
+  for (const [i, id] of selectors.entries()) assert.equal(f.nodes.get(id).firstChild, contents[i], id);
+  assert.deepEqual(f.calls.map(c => c.command), ["app_update_status"], "progress must never repeat network operations");
+  f.emit({ ...download, revision: 50, downloadedBytes: 10_000 });
+  assert.equal(f.frames.size, 0, "a stale event must not schedule another frame");
+});
+
+test("non-progress changes during download render immediately and cancel pending progress", async () => {
+  const f = await fixture();
+  const download = { phase: "downloading", totalBytes: 100, changelog: "旧日志" };
+  f.emit({ ...download, revision: 1, downloadedBytes: 10 });
+  f.emit({ ...download, revision: 2, downloadedBytes: 20 });
+  assert.equal(f.frames.size, 1);
+  f.emit({ ...download, revision: 3, downloadedBytes: 30, forceUpdate: true, changelog: "新日志" });
+  assert.equal(f.frames.size, 0);
+  assert.equal(f.nodes.get("#app-update-notes").textContent, "新日志");
+  assert.equal(f.nodes.get("#app-update-progress").getAttribute("aria-valuenow"), "30");
+  assert.equal(f.business.disabled, true);
+  assert.equal(f.panel.inert, true);
+});
+
+test("terminal states flush pending progress and retry starts at its own position", async () => {
+  for (const phase of ["cancelled", "error", "waiting", "installing"]) {
+    const f = await fixture();
+    f.emit({ revision: 1, phase: "downloading", totalBytes: 100, downloadedBytes: 40 });
+    f.emit({ revision: 2, phase: "downloading", totalBytes: 100, downloadedBytes: 80 });
+    f.emit({ revision: 3, phase, totalBytes: 100, downloadedBytes: 90 });
+    assert.equal(f.frames.size, 0, phase);
+    f.paint();
+    const progress = f.nodes.get("#app-update-progress");
+    assert.equal(progress.hidden, ["cancelled", "error"].includes(phase), phase);
+    assert.equal(progress.dataset.animate, "false", phase);
+    assert.equal(f.panel.inert, ["waiting", "installing"].includes(phase), phase);
+    f.emit({ revision: 2, phase: "downloading", totalBytes: 100, downloadedBytes: 80 });
+    assert.equal(f.frames.size, 0);
+    f.emit({ revision: 4, phase: "downloading", totalBytes: 100, downloadedBytes: 0 });
+    assert.equal(progress.hidden, false);
+    assert.equal(progress.firstElementChild.style.transform, "scaleX(0)");
+    assert.equal(progress.dataset.animate, "false", "retry must not animate backwards from the previous download");
+  }
+});
+
+test("unknown sizes stay indeterminate and corrected totals never animate backwards", async () => {
+  const f = await fixture();
+  const progress = f.nodes.get("#app-update-progress");
+  f.emit({ revision: 1, phase: "downloading", downloadedBytes: 10 });
+  assert(progress.classList.contains("is-indeterminate"));
+  assert.equal(progress.hasAttribute("aria-valuenow"), false);
+  f.emit({ revision: 2, phase: "downloading", downloadedBytes: 20, totalBytes: 100 });
+  f.paint();
+  assert.equal(progress.classList.contains("is-indeterminate"), false);
+  assert.equal(progress.firstElementChild.style.transform, "scaleX(0.2)");
+  assert.equal(progress.dataset.animate, "false");
+  f.emit({ revision: 3, phase: "downloading", downloadedBytes: 21, totalBytes: 100 });
+  f.paint();
+  assert.equal(progress.dataset.animate, "true");
+  f.emit({ revision: 4, phase: "downloading", downloadedBytes: 22, totalBytes: 200 });
+  f.paint();
+  assert.equal(progress.firstElementChild.style.transform, "scaleX(0.11)");
+  assert.equal(progress.dataset.animate, "false");
+  f.emit({ revision: 5, phase: "downloading", downloadedBytes: 300, totalBytes: 200 });
+  f.paint();
+  assert.equal(progress.firstElementChild.style.transform, "scaleX(1)");
+  assert.equal(progress.getAttribute("aria-valuenow"), "100");
+});
+
+test("unchanged snapshots still restore the automatic-update checkbox after saving", async () => {
+  for (const fails of [false, true]) {
+    const f = await fixture(defaults, { app_update_settings_set: () => {
+      if (fails) throw new Error("保存失败");
+      return defaults;
+    } });
+    const checkbox = f.nodes.get("#app-update-auto");
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new f.Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(checkbox.checked, true, "restore the authoritative setting even when the panel snapshot is unchanged");
+    if (fails) assert.equal(f.nodes.get("#app-update-status").textContent, "保存失败");
+  }
 });

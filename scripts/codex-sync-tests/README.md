@@ -14,6 +14,7 @@ cargo test --manifest-path scripts/codex-sync-tests/Cargo.toml --target-dir src-
 npm run check:js
 node --experimental-vm-modules scripts/test-codex-cache.mjs
 node --experimental-vm-modules scripts/test-codex-sync-settings.mjs
+node --experimental-vm-modules --test scripts/test-codex-sync-progress.mjs
 node --experimental-vm-modules --test scripts/test-codex-refresh.mjs
 ```
 
@@ -74,5 +75,6 @@ try {
 | 数据保留   | 原日志删除、按设备清理后恢复、保留未上传记录、禁止转传下载数据 |
 | 并发与缓存 | 触发合并、旧请求作废、设备筛选不污染汇总、清理后只读存档       |
 | 统一刷新   | 全局周期启停、空账户、Tray 账户与总览、统计来源无关、失败回退  |
+| 同步进度   | 确认后计数、分页落库、恢复重算、三处显示、乱序隔离、托盘收起 |
 | 自动触发   | 最近成功时间的 5 分钟新鲜度、退避与暂停、手动重试、事件不回环  |
 | 计价       | 原始模型名、当前价格表、查看机器本地日期和小时序列             |

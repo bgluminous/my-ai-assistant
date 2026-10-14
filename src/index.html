@@ -243,6 +243,8 @@
           </div>
         </div>
 
+        <div id="usage-sync-summary" hidden></div>
+
         <!-- 本地 Codex 用量分析：扫描本机会话日志折算等价费用；统计范围由上方时间跨度 TAB 决定 -->
         <div id="usage-local-form" class="surface" hidden>
           <div class="row wrap">
@@ -256,7 +258,7 @@
             <button id="usage-codex-clear" class="secondary" type="button" disabled>清理此设备缓存</button>
           </div>
           <p class="muted small">汇总 GPT 用量存档，按当前价格表折算费用。配置同步后包含其他设备，复制的日志在总计中去重；日志没有账户归属。设备表示采集来源，各设备单独统计可能重叠。</p>
-          <p id="usage-sync-summary" class="muted small"></p>
+          <p id="usage-codex-device-error" class="status bad" role="status" hidden></p>
         </div>
 
         <!-- 本地 Claude Code 用量分析：扫描 ~/.claude/projects 会话日志；统计范围由上方时间跨度 TAB 决定 -->
@@ -465,7 +467,10 @@
             <div id="app-update-history-notes" class="update-notes" tabindex="0" aria-label="历史版本更新日志" hidden></div>
             <p class="muted small">显示当前平台已登记的版本；更早版本可前往 GitHub Releases 查看。</p>
           </section>
-          <progress id="app-update-progress" max="100" hidden aria-label="更新下载进度"></progress>
+          <div id="app-update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+               aria-label="更新下载进度" aria-describedby="app-update-progress-text" hidden>
+            <span class="app-update-progress-fill" aria-hidden="true"></span>
+          </div>
           <p id="app-update-progress-text" class="muted small" aria-live="polite" hidden></p>
           <div class="app-update-footer">
             <div class="app-update-links">
@@ -797,6 +802,7 @@
                 <h3>GPT 用量同步</h3>
                 <p>在多台设备之间同步用量明细，未配置服务器时不联网。</p>
               </div>
+              <div id="gpt-sync-progress" hidden></div>
               <section class="settings-group" aria-labelledby="settings-server-title">
                 <h4 id="settings-server-title">服务器连接</h4>
                 <label for="gpt-sync-url">中心服务器地址（留空停用）</label>
@@ -813,19 +819,11 @@
                 <label for="gpt-sync-home">本机采集目录（CODEX_HOME）</label>
                 <input id="gpt-sync-home" type="text" spellcheck="false" placeholder="留空沿用环境变量和默认 ~/.codex" />
               </section>
-              <section class="settings-group" aria-labelledby="settings-sync-frequency-title">
-                <h4 id="settings-sync-frequency-title">同步方式</h4>
-                <p id="gpt-sync-schedule" class="muted small" aria-live="polite"></p>
-                <button id="gpt-sync-open-refresh" class="secondary" type="button">前往「账户与刷新」调整周期</button>
-                <div class="row wrap">
-                  <button id="gpt-sync-save" class="secondary" type="button">保存同步设置</button>
-                  <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
-                  <button id="gpt-sync-now" class="secondary" type="button">立即同步</button>
-                </div>
-                <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。保存配置后同步一次；之后跟随定时刷新、Tray 和统计页刷新。打开 Tray 总览或切换日期时，超过 5 分钟未成功同步会自动补拉。测试连接只验证账户。</p>
-                <p id="gpt-sync-status" class="muted small settings-sync-status"></p>
+              <div class="settings-group">
+                <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
+                <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。点击「完成」保存配置后同步一次；之后跟随定时刷新、Tray 和统计页刷新。打开 Tray 总览或切换日期时，超过 5 分钟未成功同步会自动补拉。测试连接只验证账户。</p>
                 <p id="gpt-sync-result" class="status" tabindex="-1" aria-live="polite" hidden></p>
-              </section>
+              </div>
               <section class="sync-setup" aria-labelledby="gpt-sync-setup-title">
                 <div class="sync-setup-text">
                   <h4 id="gpt-sync-setup-title">自行搭建同步服务端</h4>

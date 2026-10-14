@@ -1537,7 +1537,6 @@ input.price-input {
 .settings-group .settings-path-row { margin-top: 0; gap: 8px; }
 .settings-group .settings-key-clear { margin-top: 10px; }
 .settings-path-row > .grow { flex-basis: 200px; min-width: 0; }
-.settings-sync-status { padding-top: 12px; border-top: 1px solid var(--border); }
 .settings-panel > .sync-setup,
 .settings-panel > .status { margin: 0; }
 .settings-password-row { margin: 0; padding: 16px; border-radius: var(--radius); background: var(--well); }
@@ -1561,6 +1560,51 @@ input.price-input {
   .settings-card > .modal-head,
   .settings-card > .modal-foot { padding: 16px; }
   .settings-save-note { max-width: 240px; }
+}
+
+/* GPT 同步三处共用状态条；只有上传具有可计算的百分比。 */
+.sync-progress {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px 16px;
+  margin: 0 0 14px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.sync-progress[hidden], .sync-progress [hidden] { display: none !important; }
+.sync-progress-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; }
+.sync-progress-title { color: var(--text-strong); font-weight: 600; }
+.sync-progress-counts { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sync-progress-percent { margin-left: auto; color: var(--accent); font-variant-numeric: tabular-nums; }
+.sync-progress-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.sync-progress[data-state="running"] .sync-progress-dot {
+  background: transparent;
+  width: 11px; height: 11px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  animation: sync-progress-spin 1s linear infinite;
+}
+.sync-progress[data-state="success"] .sync-progress-dot { background: var(--ok); }
+.sync-progress[data-state="error"] .sync-progress-dot { background: var(--bad); }
+.sync-progress-bar { display: block; width: 100%; height: 5px; margin-top: 11px; accent-color: var(--accent); border: 0; border-radius: 3px; overflow: hidden; }
+.sync-progress-bar::-webkit-progress-bar { background: var(--well); }
+.sync-progress-bar::-webkit-progress-value { background: var(--accent); border-radius: 3px; transition: width .18s ease; }
+.sync-progress-bar:indeterminate { background: var(--well); }
+.sync-progress-bar:indeterminate::-webkit-progress-bar {
+  background: linear-gradient(90deg, var(--well) 20%, var(--accent) 50%, var(--well) 80%);
+  background-size: 200% 100%; animation: sync-progress-slide 1.8s linear infinite;
+}
+.sync-progress-details, .sync-progress-error { margin: 9px 0 0; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.sync-progress-details { color: var(--muted); }
+.sync-progress-error { color: var(--bad); }
+.settings-panel > .sync-progress { margin-bottom: 0; background: var(--well); }
+.sync-progress-compact { margin: 8px 12px 12px; padding: 10px 12px; border-radius: 8px; }
+.sync-progress-compact .sync-progress-line { gap: 5px 8px; font-size: 11px; }
+.sync-progress-compact .sync-progress-error { max-height: 4.95em; overflow-y: auto; }
+@keyframes sync-progress-spin { to { transform: rotate(360deg); } }
+@keyframes sync-progress-slide { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .sync-progress *, .sync-progress-bar::-webkit-progress-bar { animation: none !important; transition: none !important; }
 }
 
 /* 同步设置内的搭建文档入口，窄窗口时按钮自动换行。 */
@@ -1781,8 +1825,25 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .app-update-history-controls select { width: auto; min-width: 160px; max-width: 100%; }
 #app-update-history { border-top: 1px solid var(--border); padding-top: 16px; }
 #app-update-history-status { margin: 10px 0 0; }
-#app-update-progress { display: block; width: 100%; height: 8px; margin-top: 16px; accent-color: var(--accent); }
-#app-update-progress-text { margin: 6px 0 0; }
+#app-update-progress { width: 100%; height: 8px; margin-top: 16px; overflow: hidden; border-radius: 4px; background: var(--well); }
+.app-update-progress-fill { display: block; width: 100%; height: 100%; background: var(--accent); transform-origin: left; transform: scaleX(0); }
+#app-update-progress[data-animate="true"] .app-update-progress-fill { transition: transform 180ms linear; }
+#app-update-progress:not([hidden]) .app-update-progress-fill { will-change: transform; }
+#app-update-progress.is-indeterminate .app-update-progress-fill {
+  width: 35%; border-radius: inherit; transition: none; animation: app-update-progress-slide 1.4s linear infinite;
+}
+@keyframes app-update-progress-slide { from { transform: translateX(-100%); } to { transform: translateX(286%); } }
+@media (prefers-reduced-motion: reduce) {
+  #app-update-progress[data-animate] .app-update-progress-fill,
+  #app-update-progress.is-indeterminate .app-update-progress-fill { animation: none; transition: none; }
+  #app-update-progress.is-indeterminate .app-update-progress-fill { transform: translateX(93%); }
+  .app-update-state.busy::before { animation: none; }
+}
+@media (forced-colors: active) {
+  #app-update-progress { outline: 1px solid CanvasText; }
+  .app-update-progress-fill { background: Highlight; forced-color-adjust: none; }
+}
+#app-update-progress-text { margin: 6px 0 0; font-variant-numeric: tabular-nums; }
 .app-update-footer {
   display: flex;
   align-items: center;

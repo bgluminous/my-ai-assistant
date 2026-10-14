@@ -12,8 +12,9 @@ export function updatePresentation(view) {
   if (view.error?.message) text = view.error.message;
   const total = Number(view.totalBytes);
   const downloaded = Math.max(0, Number(view.downloadedBytes) || 0);
-  const percent = total > 0 ? Math.min(100, Math.floor(downloaded / total * 100)) : null;
-  return { text, busy, percent, downloaded, failed: phase === "error",
+  const fraction = total > 0 ? Math.min(1, downloaded / total) : null;
+  const percent = fraction === null ? null : Math.floor(fraction * 100);
+  return { text, busy, percent, fraction, downloaded, failed: phase === "error",
     cancelable: phase === "downloading" || phase === "waiting",
     paused: phase === "waiting" || phase === "installing" };
 }

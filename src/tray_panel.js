@@ -2,6 +2,7 @@ import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactToken
 import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
+import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
 import {
   USAGE_CACHE_PREFIX,
   USAGE_CACHE_EVENT,
@@ -1739,6 +1740,7 @@ async function doSwitch(id) {
 /* ---------- 初始化 ---------- */
 
 setupDesktopGuards();
+mountSyncProgress(el("#tray-sync-progress"), { compact: true });
 // 账户标签页和总览都同步 GPT 用量并刷新账户；总览同时重算所选日的其它来源。
 // （账户状态刷新会广播 accounts-changed，主窗口据此按其当前跨度预取用量，各处数据一并更新）
 el("#tray-refresh").addEventListener("click", refreshAll);
@@ -1754,6 +1756,7 @@ applyDayHead();
 // 面板每次被托盘点击唤起（获得焦点）时重载缓存数据，总览按主动查看口径补拉（超过 5 分钟强制同步）；
 // 只清状态条、重绘当前 tab，不触碰切换弹窗（进行中的弹窗须保持原状）
 window.addEventListener("focus", () => {
+  void refreshSyncStatus().catch(() => {});
   clearStatus();
   resetDayToToday();
   void load();

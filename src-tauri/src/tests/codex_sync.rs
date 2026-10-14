@@ -4,6 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 #[path = "codex_sync_live.rs"]
 mod live;
+#[path = "codex_sync_progress.rs"]
+mod progress;
 struct Center {
     info: RefCell<Handshake>,
     records: RefCell<BTreeMap<(String, String), RemoteRecord>>,

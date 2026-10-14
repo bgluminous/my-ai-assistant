@@ -166,6 +166,52 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(body, dict(version=self.version, changelog='版本发布测试\n', forceUpdate=False,
                                        extra={'updater': {'manifestUrl': manifest}}))
 
+    def workflow_step(self, name):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
+        step = workflow.split('      - name: ' + name + '\n', 1)[1].split('\n      - ', 1)[0]
+        command = step.split('        run: ', 1)[1]
+        if command.startswith('|\n'):
+            return '\n'.join(line[10:] for line in command[2:].splitlines() if line.strip()) + '\n'
+        return command.splitlines()[0] + '\n'
+
+    def write_workflow_notes(self, previous='v1.4.0'):
+        # Exercise the actual workflow commands with offline Git output.
+        self.write('test-bin/git', '''#!/bin/sh
+case "$1" in
+  describe) [ -n "$TEST_PREVIOUS_TAG" ] || exit 1; printf '%s\\n' "$TEST_PREVIOUS_TAG" ;;
+  log) printf '%s\\n' 'feat(ui): 支持下载记录筛选' 'fix: 修复同步异常' 'docs: 补充使用说明' ;;
+  *) exit 97 ;;
+esac
+''')
+        (self.bin / 'git').chmod(0o755)
+        env = dict(self.env, TEST_PREVIOUS_TAG=previous, APP_NAME='my-ai-assistant',
+                   GH_REPO='example/project', TAG='v' + self.version, VERSION=self.version, REF_NAME=self.branch)
+        self.write('write-notes.sh', self.workflow_step('Write release notes'))
+        self.run_sh('write-notes.sh', env=env)
+        self.write('prepare-notes.sh', self.workflow_step('Prepare registry input without network access'))
+        self.run_sh('prepare-notes.sh', env=env)
+        return (self.work / 'changelog.md').read_text(encoding='utf-8')
+
+    def test_workflow_registers_changes_without_download_or_installation_instructions(self):
+        changelog = self.write_workflow_notes()
+        self.assertEqual(changelog, '### 新增\n\n- 支持下载记录筛选\n\n'
+                         '### 修复\n\n- 修复同步异常\n\n### 其他\n\n- 补充使用说明\n\n')
+        notes = (self.work / 'notes.md').read_text(encoding='utf-8')
+        for text in ['## 下载', '## 变更', '_x64-setup.exe', 'SmartScreen', 'xattr -cr', '完整对比：']:
+            self.assertIn(text, notes)
+            self.assertNotIn(text, changelog)
+        self.assertEqual(notes.count(changelog), 1)
+        for platform in ['windows-x64', 'macos-arm64']:
+            record = json.loads((self.work / 'release-out' / platform / 'release.json').read_text(encoding='utf-8'))
+            self.assertEqual(record['changelog'], changelog)
+
+    def test_first_release_also_registers_only_its_changes(self):
+        changelog = self.write_workflow_notes(previous='')
+        self.assertEqual(changelog, '首个发布版本。\n')
+        for platform in ['windows-x64', 'macos-arm64']:
+            record = json.loads((self.work / 'release-out' / platform / 'release.json').read_text(encoding='utf-8'))
+            self.assertEqual(record['changelog'], changelog)
+
     def test_canonical_json_outputs_utf8_and_required_escapes(self):
         value = {'中文键': '更新"路径\\测试\n😀', 'control': '\x01'}
         self.write('unicode.json', json.dumps(value) + '\n')

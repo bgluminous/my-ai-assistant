@@ -1,28 +1,33 @@
 // node --experimental-vm-modules scripts/test-codex-sync-settings.mjs
-// 使用隔离的 IPC 和 DOM 替身，验证账户提示与测试连接、手动恢复的行为。
+// 使用隔离的 IPC 和 DOM 替身，验证精简设置后的测试连接、保存与账户提示。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { parseHTML } from "linkedom";
 
 const source = await readFile(new URL("../src/usage_sync.js", import.meta.url), "utf8");
 const promptSource = await readFile(new URL("../src/usage_sync_prompt.js", import.meta.url), "utf8");
+const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
+const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => `#${m[1]}`));
 async function fixture(state = "idle") {
   const requests = [];
-  const nodes = new Map();
+  const { document } = parseHTML(html);
   function el(id) {
-    if (!nodes.has(id)) nodes.set(id, {
-      value: "", checked: false, disabled: false, handlers: new Map(),
-      addEventListener(name, handler) { this.handlers.set(name, handler); },
-    });
-    return nodes.get(id);
+    assert(ids.has(id), `Unknown HTML element ${id}`);
+    const node = document.querySelector(id);
+    if (!node.handlers) {
+      node.handlers = new Map();
+      node.addEventListener = (name, handler) => node.handlers.set(name, handler);
+    }
+    return node;
   }
   const config = {
     serverUrl: "https://sync.example.test/maa", hasKey: true, intervalMinutes: 5,
     sourceHome: "", deviceName: "设备 A",
   };
   const status = { state, pendingRecords: 2, lastSuccessAt: null, error: state === "paused" ? "sync_forbidden" : null };
-  const context = vm.createContext({ document: { querySelector: el } });
+  const context = vm.createContext({ document, setTimeout, clearTimeout });
   const shared = new vm.SyntheticModule(["el", "invoke", "listen", "fillStatus", "resetError", "copyText", "toast"], function () {
     this.setExport("el", el);
     this.setExport("invoke", async (command, args) => {
@@ -30,13 +35,11 @@ async function fixture(state = "idle") {
       if (command === "codex_usage_sync_get") return config;
       if (command === "codex_usage_sync_status") return status;
       if (command === "codex_usage_sync_test") return { protocolVersion: 1, spaceId: "account", epoch: "epoch" };
-      if (command === "codex_usage_sync_now") {
-        status.state = "idle";
-        status.error = null;
-        status.pendingRecords = 0;
-        return status;
+      if (command === "codex_usage_sync_set") {
+        const { key, ...values } = args.config;
+        Object.assign(config, values, { hasKey: key === null ? config.hasKey : !!key });
+        return config;
       }
-      if (command === "codex_usage_sync_set") return config;
       throw new Error(`Unexpected command: ${command}`);
     });
     this.setExport("listen", async () => () => {});
@@ -46,10 +49,16 @@ async function fixture(state = "idle") {
     this.setExport("toast", () => {});
   }, { context });
   const prompt = new vm.SourceTextModule(promptSource, { context });
+  const errors = new vm.SourceTextModule(await readFile(new URL("../src/sync_errors.js", import.meta.url), "utf8"), { context });
+  await errors.link(() => shared);
+  const progress = new vm.SourceTextModule(await readFile(new URL("../src/sync_progress.js", import.meta.url), "utf8"), { context });
+  await progress.link((specifier) => specifier === "./shared.js" ? shared : errors);
   const module = new vm.SourceTextModule(source, { context });
   await module.link((specifier) => {
     if (specifier === "./shared.js") return shared;
     if (specifier === "./usage_sync_prompt.js") return prompt;
+    if (specifier === "./sync_errors.js") return errors;
+    if (specifier === "./sync_progress.js") return progress;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();
@@ -73,15 +82,22 @@ test("connection test uses the form without saving or starting sync", async () =
   assert.match(f.el("#gpt-sync-result").textContent, /未上传数据或登记设备/);
 });
 
-test("disabled account remains visible and can recover with manual sync", async () => {
+test("paused account stays visible in usage and the Done save path remains available", async () => {
   const f = await fixture("paused");
-  assert.match(f.el("#gpt-sync-status").textContent, /账户已停用/);
-  assert.match(f.el("#gpt-sync-status").textContent, /联系服务端管理员/);
-  assert.equal(f.el("#gpt-sync-now").disabled, false);
-  await f.click("#gpt-sync-now");
-  assert.deepEqual(f.requests.filter((r) => r.command !== "codex_usage_sync_status").map((r) => r.command), ["codex_usage_sync_now"]);
-  assert.match(f.el("#gpt-sync-result").textContent, /同步完成/);
-  assert.match(f.el("#gpt-sync-status").textContent, /已就绪/);
+  assert.match(f.el("#usage-sync-summary").textContent, /账户已停用/);
+  assert.match(f.el("#usage-sync-summary").textContent, /联系服务端管理员/);
+  assert.match(f.el("#usage-sync-summary").textContent, /统计页.*刷新/);
+  f.el("#gpt-sync-device-name").value = "设备 B";
+  assert.equal(await f.api.saveSyncSettings(true), true);
+  const saves = f.requests.filter((r) => r.command === "codex_usage_sync_set");
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].args.config.deviceName, "设备 B");
+  assert.equal(saves[0].args.config.key, null);
+  assert.equal(f.el("#gpt-sync-key").value, "");
+  assert.equal(f.el("#gpt-sync-test").disabled, false);
+  f.requests.length = 0;
+  assert.equal(await f.api.saveSyncSettings(true), true);
+  assert.equal(f.requests.length, 0);
 });
 
 test("reset key tells users to update every machine without exposing the saved key", async () => {

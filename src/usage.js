@@ -266,6 +266,7 @@ function selectedCodexDevice() {
 let codexDeviceListSeq = 0;
 async function refreshCodexDevices() {
   const seq = ++codexDeviceListSeq;
+  el("#usage-codex-device-error").hidden = true;
   try {
     const [devices, config] = await Promise.all([invoke("codex_usage_devices"), invoke("codex_usage_sync_get")]);
     if (seq !== codexDeviceListSeq) return;
@@ -275,7 +276,13 @@ async function refreshCodexDevices() {
     if (devices.some((d) => d.deviceId === previous)) select.value = previous;
     el("#usage-codex-clear").disabled = !select.value;
     el("#usage-codex-home").value = config.sourceHome;
-  } catch (error) { if (seq === codexDeviceListSeq) el("#usage-sync-summary").textContent = syncError(error); }
+  } catch (error) {
+    if (seq === codexDeviceListSeq) {
+      const node = el("#usage-codex-device-error");
+      node.textContent = `读取设备失败：${syncError(error)}`;
+      node.hidden = false;
+    }
+  }
 }
 
 /* ---------- 时间范围（周期 + 滑动 / 自定义区间） ---------- */

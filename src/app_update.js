@@ -5,6 +5,34 @@ import { initUpdateHistory, updateHistoryState } from "./update_history.js";
 
 let state = null;
 let confirmingVersion = null;
+let panelKey = null;
+let progressFrame = null;
+let lastProgress = null;
+
+function renderProgress(view, ui) {
+  const progress = el("#app-update-progress");
+  const fill = progress.firstElementChild;
+  const text = el("#app-update-progress-text");
+  const hidden = !["downloading", "waiting", "installing"].includes(view.phase);
+  if (progress.hidden !== hidden) progress.hidden = hidden;
+  if (text.hidden !== hidden) text.hidden = hidden;
+  const label = hidden ? "" : `${(ui.downloaded / 1048576).toFixed(1)} MB${ui.percent === null ? "" : ` · ${ui.percent}%`}`;
+  if (text.textContent !== label) text.textContent = label;
+  if (lastProgress?.fraction !== ui.fraction || lastProgress?.phase !== view.phase) {
+    // 只在同一次下载前进时插值；新下载、进度回退和阶段切换立即落到真实位置。
+    progress.dataset.animate = String(view.phase === "downloading" && lastProgress?.phase === "downloading" &&
+      ui.fraction !== null && lastProgress.fraction !== null && ui.fraction >= lastProgress.fraction);
+    progress.classList.toggle("is-indeterminate", ui.fraction === null);
+    if (ui.fraction === null) fill.style.removeProperty("transform");
+    else fill.style.transform = `scaleX(${ui.fraction})`;
+  }
+  if (ui.percent === null) {
+    if (progress.hasAttribute("aria-valuenow")) progress.removeAttribute("aria-valuenow");
+  } else if (progress.getAttribute("aria-valuenow") !== String(ui.percent)) {
+    progress.setAttribute("aria-valuenow", String(ui.percent));
+  }
+  lastProgress = { fraction: ui.fraction, phase: view.phase };
+}
 
 function showAbout() {
   el("[role='tab'][data-panel='about-panel']").click();
@@ -29,10 +57,25 @@ function renderChangelogs(view) {
   el("#app-update-current-notes-status").textContent = hasNotes && error ? `${errorMessage}已保留上次读取的内容。` : "";
   el("#app-update-current-notes-status").hidden = !hasNotes || !error;
 }
-function render(view) {
+function render(view, forcePanel = false) {
   if (!view || (state && view.revision < state.revision)) return;
   state = view;
   const ui = updatePresentation(view);
+  // 下载字节更新不重写日志标题、按钮和业务面板；同一帧只绘制最新快照。
+  const { revision, downloadedBytes, totalBytes, ...panel } = view;
+  const key = JSON.stringify(panel);
+  if (!forcePanel && panelKey === key) {
+    if (progressFrame === null) progressFrame = requestAnimationFrame(() => {
+      progressFrame = null;
+      renderProgress(state, updatePresentation(state));
+    });
+    return;
+  }
+  panelKey = key;
+  // 取消、失败和安装等状态立即生效，不能被尚未绘制的下载事件覆盖。
+  if (progressFrame !== null) cancelAnimationFrame(progressFrame);
+  progressFrame = null;
+  renderProgress(view, ui);
   setUpdateStatus(ui.text, ui.failed ? "bad" : view.phase === "upToDate" ? "ok" :
     ui.busy ? "busy" : view.latestVersion ? "available" : "");
   el("#app-update-meta").textContent = `当前版本 ${view.currentVersion}${view.checkedAtMs ? ` · 最近检查 ${fmtDateMs(view.checkedAtMs)}` : ""}`;
@@ -58,13 +101,6 @@ function render(view) {
   el("#app-update-proxy").disabled = ui.paused;
   el("#app-update-auto").checked = !!view.automatic;
   el("#app-update-auto").disabled = ui.paused;
-  const progress = el("#app-update-progress");
-  progress.hidden = !["downloading", "waiting", "installing"].includes(view.phase);
-  if (ui.percent === null) progress.removeAttribute("value"); else progress.value = ui.percent;
-  el("#app-update-progress-text").textContent = progress.hidden ? "" :
-    `${(ui.downloaded / 1048576).toFixed(1)} MB${ui.percent === null ? "" : ` · ${ui.percent}%`}`;
-  el("#app-update-progress-text").hidden = progress.hidden;
-
   const chip = el("#app-update-chip");
   chip.hidden = !ui.failed && !view.latestVersion && !ui.paused;
   chip.textContent = ui.failed ? "更新失败" : ui.paused ? "正在准备更新" : `新版本 ${view.latestVersion}`;
@@ -84,6 +120,7 @@ function render(view) {
   if (ui.paused) for (const modal of document.querySelectorAll(".modal")) modal.hidden = true;
 }
 function report(error) {
+  panelKey = null;
   const message = error?.message || "操作失败，请重试或前往 GitHub Releases。";
   setUpdateStatus(message, "bad");
 }
@@ -139,8 +176,9 @@ export async function initAppUpdate() {
       .then(() => toast("ok", "已复制 GitHub Releases 地址。", { key: "app-update" })).catch(report);
   });
   el("#app-update-auto").addEventListener("change", async (event) => {
-    try { render(await invoke("app_update_settings_set", { enabled: event.target.checked })); }
-    catch (error) { if (state) render(state); report(error); }
+    // 复选框已被用户改动，即使快照相同也需恢复服务器确认的值。
+    try { render(await invoke("app_update_settings_set", { enabled: event.target.checked }), true); }
+    catch (error) { if (state) render(state, true); report(error); }
   });
   el("#settings-btn").addEventListener("click", () => { void invoke("app_update_status").then(render).catch(() => {}); });
   if (!window.__TAURI__?.core) return;
