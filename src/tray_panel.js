@@ -204,6 +204,7 @@ function readTab() {
 let trayTab = readTab();
 
 function applyTab() {
+  hideTrayChartTooltip();
   for (const btn of document.querySelectorAll(".tray-tab")) {
     btn.classList.toggle("active", btn.dataset.tab === trayTab);
   }
@@ -620,8 +621,62 @@ function shiftDay(direction) {
 const pies = { modelToken: null, modelCost: null, source: null };
 let hourlyStack = null;
 let overviewDom = null; // 常驻 DOM，刷新时原地改数字 / 更新图表，避免整页重建闪烁
+let chartTooltip = null;
+let chartTooltipOwner = null;
+
+function hideTrayChartTooltip() {
+  if (chartTooltip) chartTooltip.hidden = true;
+  chartTooltipOwner = null;
+}
+
+// 三个小圆环放不下完整提示，统一用画布外的浮层，并限制在托盘窗口内。
+function renderTrayChartTooltip({ chart, tooltip }) {
+  if (!tooltip.opacity || !chart.canvas.matches(":hover")) {
+    if (chartTooltipOwner === chart) hideTrayChartTooltip();
+    return;
+  }
+  if (!chartTooltip) {
+    chartTooltip = document.createElement("div");
+    chartTooltip.className = "tray-chart-tooltip";
+    chartTooltip.setAttribute("role", "tooltip");
+    document.body.append(chartTooltip);
+  }
+  chartTooltip.replaceChildren();
+  const appendLines = (lines, className = "") => {
+    for (const text of lines || []) {
+      if (!text) continue;
+      const line = document.createElement("div");
+      line.className = className;
+      line.textContent = text;
+      chartTooltip.append(line);
+    }
+  };
+  appendLines(tooltip.title, "tray-chart-tooltip-title");
+  appendLines(tooltip.beforeBody);
+  for (const body of tooltip.body || []) appendLines([...body.before, ...body.lines, ...body.after]);
+  appendLines(tooltip.afterBody);
+  appendLines(tooltip.footer, "tray-chart-tooltip-footer");
+  chartTooltipOwner = chart;
+  chartTooltip.hidden = false;
+
+  const rect = chart.canvas.getBoundingClientRect();
+  const x = rect.left + tooltip.caretX * rect.width / chart.width;
+  const y = rect.top + tooltip.caretY * rect.height / chart.height;
+  const margin = 8;
+  const width = chartTooltip.offsetWidth;
+  const height = chartTooltip.offsetHeight;
+  const left = Math.max(margin, Math.min(x - width / 2, document.documentElement.clientWidth - width - margin));
+  const top = y - height - margin >= margin ? y - height - margin : y + margin;
+  chartTooltip.style.left = `${left}px`;
+  chartTooltip.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - height - margin))}px`;
+}
+
+window.addEventListener("blur", hideTrayChartTooltip);
+document.addEventListener("scroll", hideTrayChartTooltip, true);
+document.addEventListener("visibilitychange", hideTrayChartTooltip);
 
 function destroyCharts() {
+  hideTrayChartTooltip();
   for (const chart of [pies.modelToken, pies.modelCost, pies.source, hourlyStack]) {
     if (chart) {
       try { chart.destroy(); } catch { /* ignore */ }
@@ -674,6 +729,55 @@ function chartMotion() {
     },
   };
 }
+
+// 原生托盘窗口隐藏 / 换屏后，ResizeObserver 可能仍留下旧尺寸。
+// 在下一帧按容器的 CSS 像素重新核对，避免小画布一直占着满宽布局的左侧。
+const trayChartSizePlugin = {
+  id: "trayChartSize",
+  afterInit(chart) {
+    chart.$traySizeFrame = null;
+    const schedule = () => {
+      if (chart.$traySizeFrame != null) return;
+      chart.$traySizeFrame = requestAnimationFrame(() => {
+        chart.$traySizeFrame = null;
+        const canvas = chart.canvas;
+        const box = canvas && canvas.parentElement;
+        if (!box || !chart.ctx || document.hidden) return;
+        const width = box.clientWidth;
+        const height = box.clientHeight;
+        if (!(width > 0 && height > 0)) return;
+        const dpr = window.devicePixelRatio || 1;
+        if (Math.abs(chart.width - width) < 1 && Math.abs(chart.height - height) < 1
+          && Math.abs(canvas.clientWidth - width) < 1 && Math.abs(canvas.clientHeight - height) < 1
+          && chart.currentDevicePixelRatio === dpr) return;
+        // 停止旧尺寸的动画；显式刷新像素比，避免沿用 Chart.js 已解析的旧值。
+        chart.stop();
+        chart.options.devicePixelRatio = dpr;
+        chart.resize(width, height);
+        chart.update("none");
+      });
+    };
+    chart.$queueTraySize = schedule;
+    window.addEventListener("focus", schedule);
+    window.addEventListener("resize", schedule);
+    document.addEventListener("visibilitychange", schedule);
+    schedule();
+  },
+  afterUpdate(chart) {
+    chart.$queueTraySize?.();
+  },
+  resize(chart) {
+    chart.$queueTraySize?.();
+  },
+  afterDestroy(chart) {
+    if (chartTooltipOwner === chart) hideTrayChartTooltip();
+    if (chart.$traySizeFrame != null) cancelAnimationFrame(chart.$traySizeFrame);
+    window.removeEventListener("focus", chart.$queueTraySize);
+    window.removeEventListener("resize", chart.$queueTraySize);
+    document.removeEventListener("visibilitychange", chart.$queueTraySize);
+    chart.$queueTraySize = null;
+  },
+};
 
 /** 图表小节：标题 + 定高画布容器 + 图例列表，返回 { wrap, label, canvas, box, legend }。 */
 function chartSection(title, height, { legendRow = false } = {}) {
@@ -788,7 +892,7 @@ function makeMiniPie(canvas, cfg) {
         },
       ],
     },
-    plugins: [pieSliceLabelsPlugin],
+    plugins: [trayChartSizePlugin, pieSliceLabelsPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -800,6 +904,8 @@ function makeMiniPie(canvas, cfg) {
       plugins: {
         legend: { display: false },
         tooltip: {
+          enabled: false,
+          external: renderTrayChartTooltip,
           position: "nearest",
           callbacks: {
             title(items) {
@@ -894,6 +1000,7 @@ function makeHourlyStack(canvas, labels, datasets) {
   const chart = new Chart(canvas, {
     type: "bar",
     data: { labels, datasets },
+    plugins: [trayChartSizePlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -904,6 +1011,8 @@ function makeHourlyStack(canvas, labels, datasets) {
       plugins: {
         legend: { display: false },
         tooltip: {
+          enabled: false,
+          external: renderTrayChartTooltip,
           position: "nearest",
           filter: (item) => item.raw != null && item.raw > 0,
           callbacks: {

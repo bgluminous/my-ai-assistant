@@ -303,6 +303,10 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 
 - 内置默认表：`src-tauri/resources/pricing.default.json`。
 - 单价单位为美元 / 每百万 token，字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
+- GPT-6 Sol、GPT-6 Luna、GPT-6.1 Sol 的标准与 Fast 价格于 2026-10-15 按
+  [OpenAI 官方价目](https://developers.openai.com/api/docs/pricing)核对。
+  GPT-6.1 Sol 的缓存读取价为 $0.10 / 百万 token，GPT-6 Sol 为 $0.20；
+  Fast 档的四类单价均为标准档的 2 倍，长上下文加价仍未纳入折算。
 - 覆盖顺序为内置表 → 在线缓存 → 用户自定义；只把与基础层不同的用户改价保存到
   `settings.json` 的 `pricing` 字段。在线检查后由用户手动应用，失败保留缓存和自定义价格。
 - 默认在线来源为公共仓库的

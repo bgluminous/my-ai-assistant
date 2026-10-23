@@ -19,7 +19,9 @@ fn malformed_remote_prices_are_rejected_before_any_cache_write() {
     for bytes in [b"{".as_slice(), br#"{"models":{}}"#, br#"{"models":{"x":{"input":-1}}}"#] {
         assert!(parse_remote_table(bytes).is_err());
     }
-    assert_eq!(parse_remote_table(DEFAULT_JSON.as_bytes()).unwrap().models.len(), 95);
+    let parsed = parse_remote_table(DEFAULT_JSON.as_bytes()).unwrap();
+    assert!(!parsed.models.is_empty());
+    assert!(tables_eq(&parsed, &defaults()));
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,38 @@ fn row(model: &str, tokens: f64, ms: Option<i64>) -> TokenRow {
 
 fn ms(rfc3339: &str) -> i64 {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().timestamp_millis()
+}
+
+#[test]
+fn gpt_6_usage_keeps_family_cache_and_fast_prices() {
+    let table = defaults();
+    // 输入 10 万、输出 1 万、缓存读 10 万、缓存写 2 万；低于长上下文阈值。
+    // Sol / Luna 不得回退到裸 gpt-6 的 Astra 价；6.1 Sol 的缓存读比 6 Sol 更便宜。
+    for (raw, expected_key, expected_usd) in [
+        ("gpt-6-sol-high", "gpt-6-sol", 0.37),
+        ("cursor-gpt-6-luna-max", "gpt-6-luna", 0.0185),
+        ("gpt-6-1-sol-xhigh", "gpt-6.1-sol", 0.36),
+        ("gpt-6-sol-high-fast", "gpt-6-sol-fast", 0.74),
+        ("gpt-6-luna-max-fast", "gpt-6-luna-fast", 0.037),
+        ("gpt-6_1-sol-high-fast", "gpt-6.1-sol-fast", 0.72),
+    ] {
+        let usage = TokenRow {
+            output: 10_000.0,
+            cache_read: 100_000.0,
+            cache_write: 20_000.0,
+            ..row(raw, 100_000.0, None)
+        };
+        let (key, usd) = price_row(&usage, &table).unwrap();
+        assert_eq!(key, expected_key, "{raw} 计价键不对");
+        assert!((usd - expected_usd).abs() < 1e-12, "{raw} 单条费用不对：{usd}");
+
+        let agg = aggregate_and_price(vec![usage], &table);
+        assert_eq!(agg.models[0].model, expected_key, "{raw} 展示名不对");
+        assert_eq!(agg.models[0].priced_as.as_deref(), Some(expected_key));
+        assert_eq!(agg.unpriced_models, 0);
+        assert!((agg.total_equivalent_usd - expected_usd).abs() < 1e-12,
+            "{raw} 聚合费用不对：{}", agg.total_equivalent_usd);
+    }
 }
 
 #[test]
