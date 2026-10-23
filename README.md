@@ -301,10 +301,32 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 
 ## 价格表
 
-- 内置默认表：`src-tauri/resources/pricing.default.json`。
-- 单价单位为美元 / 每百万 token，字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
-- GPT-6 Sol、GPT-6 Luna、GPT-6.1 Sol 的标准与 Fast 价格于 2026-10-15 按
-  [OpenAI 官方价目](https://developers.openai.com/api/docs/pricing)核对。
+- 内置默认表：`src-tauri/resources/pricing.default.json`，共 124 项。
+  本批 23 项补充与 DeepSeek Flash 修正按 2026-10-23 核实的数据收录，
+  包括 Sonnet / Haiku 5.5、GPT-5.1、GPT-4.1 Nano、Chat Latest、Gemini 4 Argon、
+  Gemini Flash-Lite、Grok 4.7、GLM、MiniMax 和 Mistral / Codestral。
+- 单价单位为美元 / 每百万 token，沿用官方 API 标准档、短上下文价，
+  字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
+  `cacheWrite=0` 表示未收录单独按 token 计的写入费用，
+  不代表缓存存储、TTL 等附加费用全部免费。
+- 本批已收录条目的官方来源：
+  [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing)、
+  [OpenAI](https://developers.openai.com/api/docs/pricing)、
+  [Google](https://ai.google.dev/gemini-api/docs/pricing)、
+  [xAI](https://docs.x.ai/developers/pricing)、
+  [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/)、
+  [Z.ai](https://docs.z.ai/guides/overview/pricing)、
+  [MiniMax](https://platform.minimax.io/docs/pricing/overview)、
+  [Mistral](https://docs.mistral.ai/inference/pricing)。
+- Haiku 5.5 按输入不超过 100K 收录；超过后输入、输出、缓存读写单价均为 5 倍。
+  Anthropic 缓存写采用默认 5 分钟档。MiniMax M3 按输入不超过 512K 收录。
+  这些长上下文阶梯尚未纳入折算。
+- Gemini 4 Argon 当前价格截至 2026-11-30，2026-12-01 起翻倍；
+  Gemini 3.8 Flash 当前价格截至 2026-12-31，2027-01-01 起翻倍。
+  价格表不自动按日期切换，需在促销到期时更新。
+- DeepSeek 沿用非高峰价。官方已将 `deepseek-v4-flash` 路由到 `deepseek-flash`，
+  两者均按输入 $0.15、输出 $0.60、缓存读 $0.003 收录。
+- GPT-6 Sol、GPT-6 Luna、GPT-6.1 Sol 的标准与 Fast 价格于 2026-10-15 核对。
   GPT-6.1 Sol 的缓存读取价为 $0.10 / 百万 token，GPT-6 Sol 为 $0.20；
   Fast 档的四类单价均为标准档的 2 倍，长上下文加价仍未纳入折算。
 - 覆盖顺序为内置表 → 在线缓存 → 用户自定义；只把与基础层不同的用户改价保存到
@@ -313,19 +335,28 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
   [pricing.json](https://raw.githubusercontent.com/bgluminous/open-source-registry/main/resources/my-ai-assistant/pricing.json)。
   空地址、旧官方默认地址及旧备份会自动迁移，自定义来源保持不变。
   表内保留 `note`、`models` 和原价格字段，可独立于应用发布更新。
+  更新时直接以同一份内置表同步在线文件，避免旧远端数据再次覆盖已修正价格；
+  已缓存旧表的客户端需要在「在线更新」中检查并应用新表。
   检查失败时可重试、调整代理或打开公共仓库文件。
 - 表中没有的模型标记为「未定价」。
-- 等价费用的口径是**模型厂商的官方 API 价目**（OpenAI、Anthropic、Google、xAI 等），不是 Cursor 等
-  分发方的售价；Cursor 的账单只用来核对上报的模型名能否命中。只在 Cursor 提供的模型（Composer）
-  以 Cursor 官方价目为厂商价。
-- Fast 条目只收录厂商官方设有 Fast 档的模型（OpenAI Fast mode、Anthropic fast mode 的
-  Opus 5.5 / 5 / 4.8、Cursor Composer 2.5 Fast），键为「基础模型键 + `-fast`」（如 `gpt-5-fast`、
-  `claude-opus-5-fast`），上报名末尾的 `-fast` 会归到对应条目。厂商没有 Fast 档的模型
-  （如 xAI Grok，Cursor 对其 Fast 的加价属 Cursor 自身定价），其 Fast 用量独立成行、按标准价折算并在
-  价格标签里显示套用的基础键。
+  等价费用参照模型厂商官方 API 价目；Cursor 等分发方的账单只用于核对上报模型名。
+  只在 Cursor 提供的 Composer 以 Cursor 官方价目为厂商价。
+- Fast 条目收录已核实的 OpenAI Fast mode、Anthropic Opus 5.5 / 5 / 4.8 fast mode，
+  以及 Cursor Composer 2.5 Fast，键为「基础模型键 + `-fast`」。
+  没有对应 Fast 条目时，Fast 用量独立成行、按标准价折算，并显示套用的基础键。
+  xAI API Priority 为标准价 2 倍，Grok 4.7 Fast 则仅在 Cursor / Grok Build 提供；
+  两者不同，不能仅凭 `-fast` 上报名认定使用了 API Priority。
   Max 是 effort 等级而非计费档，按基础模型计价。
-- 默认价格为折算参考，使用前请对照 Anthropic、OpenAI、Google、xAI、Cursor 等厂商的现行价目。
-  部分厂商对超长上下文的加价规则未写入默认表。
+- 待核实项：Qwen 需先明确地区与缓存方式，不能直接套通用缓存折扣，见
+  [模型价格](https://www.alibabacloud.com/help/en/model-studio/model-pricing)与
+  [缓存规则](https://www.alibabacloud.com/help/en/model-studio/context-cache)；
+  Kimi K2.6、K2.7 Code Highspeed 待核实具体单价，见
+  [模型列表](https://platform.kimi.ai/docs/models)。
+  Kimi K3 缓存写按 TTL 单独收费，当前 `cacheWrite=0` 表示尚未覆盖，见
+  [计费说明](https://platform.kimi.ai/docs/pricing/chat)。
+  OpenAI Ultrafast 待能够可靠识别服务档位后接入。
+- 默认价格仅供折算参考；人民币定价、多模态费用、未列出的长上下文阶梯与
+  历史分时价格另行处理，使用前请对照厂商现行价目。
 - 内置表随程序一起编译进二进制，新增或修改默认条目后需要重新构建才会生效；
   已安装的旧版本可通过应用内「在线更新」拉取远端表，或直接在价格表页手动增改。
 

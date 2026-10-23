@@ -7,7 +7,7 @@ fn table() -> PricingTable {
     crate::pricing::defaults()
 }
 
-/// Fast 标记的三种情形：表内有 Fast 条目 → 落到「规范键 + -fast」；表内没有（厂商无 Fast 档）→
+/// Fast 标记的三种情形：表内有 Fast 条目 → 落到「规范键 + -fast」；表内没有对应 Fast 条目 →
 /// 独立成行但按基础模型标准价计价（priced_as = 基础键）；本体名字就带 fast 的独立模型不受影响。
 #[test]
 fn fast_marker_resolution() {
@@ -20,7 +20,8 @@ fn fast_marker_resolution() {
         ("claude-opus-5-thinking-high-fast", "claude-opus-5-fast", "claude-opus-5-fast"),
         ("claude-opus-4-8-thinking-max-fast", "claude-4.8-opus-fast", "claude-4.8-opus-fast"),
         ("cursor-composer-2.5-fast", "composer-2.5-fast", "composer-2.5-fast"),
-        // xAI 无 Fast 档、Anthropic 不支持 Opus 4.7 fast：不得并入标准版一行，但按标准价
+        // 未收录对应 Fast 价：独立成行但按标准价；Grok 的 -fast 不能直接视为 API Priority
+        ("cursor-grok-4.7-high-fast", "grok-4.7", "grok-4.7-fast"),
         ("cursor-grok-4.6-xhigh-fast", "grok-4.6", "grok-4.6-fast"),
         ("cursor-grok-4.5-high-fast", "grok-4.5", "grok-4.5-fast"),
         ("claude-opus-4-7-thinking-fast", "claude-4.7-opus", "claude-4.7-opus-fast"),
@@ -53,7 +54,7 @@ fn vendor_official_prices_pinned() {
         assert_eq!((p.input, p.output, p.cache_read, p.cache_write), expect, "{raw} 单价与厂商官方价目不符");
     };
     check("cursor-grok-4.5-high", (2.0, 6.0, 0.3, 0.0)); // xAI：缓存读 $0.30（Cursor 收 $0.5）
-    check("cursor-grok-4.6-xhigh-fast", (2.0, 6.0, 0.5, 0.0)); // xAI 无 Fast 档（Cursor 收 2 倍）
+    check("cursor-grok-4.6-xhigh-fast", (2.0, 6.0, 0.5, 0.0)); // Cursor Fast 不等同于 xAI API Priority
     check("gpt-5.6-sol-medium", (4.0, 20.0, 0.4, 5.0)); // OpenAI 官方促销价（至少到 2026-11-21）
     check("claude-opus-5-thinking-high-fast", (10.0, 50.0, 1.0, 12.5)); // Anthropic fast mode 2 倍，缓存倍率叠加
     check("claude-sonnet-5", (2.0, 10.0, 0.2, 2.5)); // Anthropic：$2/$10 已定为永久价
@@ -160,6 +161,37 @@ fn anthropic_api_style_ids_normalize_to_table_keys() {
     assert_eq!(display_key(&t, "claude-haiku-4.5"), "claude-4.5-haiku");
 }
 
+/// 子型号必须命中各自价格，不能因后缀或版本写法退回较贵的基础型号。
+#[test]
+fn added_model_variants_keep_their_own_prices() {
+    let t = table();
+    for (raw, expected) in [
+        ("gpt-4.1-nano", "gpt-4.1-nano"),
+        ("cursor-GPT-4-1-Nano-xhigh", "gpt-4.1-nano"),
+        ("GPT-5_1-high", "gpt-5.1"),
+        ("Chat-Latest-high", "chat-latest"),
+        ("Gemini-3-5-Flash-Lite-high", "gemini-3.5-flash-lite"),
+        ("gemini-3_1-flash-lite", "gemini-3.1-flash-lite"),
+        ("gemini-4-argon", "gemini-4-argon"),
+        ("glm-5.3", "glm-5.3"),
+        ("GLM-5-3-Flash-high", "glm-5.3-flash"),
+        ("glm-5_3-flashx-xhigh", "glm-5.3-flashx"),
+        ("claude-sonnet-5-5-thinking", "claude-sonnet-5.5"),
+        ("claude-5.5-haiku-high", "claude-haiku-5.5"),
+        ("DeepSeek-Flash", "deepseek-flash"),
+        ("minimax-m3-high", "minimax-m3"),
+        ("MiniMax-M3.1-Flash-high", "minimax-m3.1-flash"),
+        ("Mistral-Medium-3-5-high", "mistral-medium-3-5"),
+        ("mistral-small-2603", "mistral-small-2603"),
+        ("codestral-2508", "codestral-2508"),
+    ] {
+        assert_eq!(resolve(&t, raw).map(|hit| hit.0), Some(expected), "{raw} 计价键不对");
+        let shown = display_key(&t, raw);
+        assert_eq!(shown, expected, "{raw} 展示名不对");
+        assert_eq!(resolve(&t, &shown).map(|hit| hit.0), Some(expected));
+    }
+}
+
 #[test]
 fn unknown_minor_version_stays_unpriced() {
     let t = table();
@@ -168,7 +200,7 @@ fn unknown_minor_version_stays_unpriced() {
     for raw in [
         "claude-fable-5.2",
         "claude-fable-5-2-thinking",
-        "gpt-5.1",
+        "gpt-5.7",
         "gpt-6.1",
         "gpt-6-1-astra",
         "claude-sonnet-5.1",

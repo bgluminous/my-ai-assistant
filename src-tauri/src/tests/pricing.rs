@@ -82,6 +82,42 @@ fn gpt_6_usage_keeps_family_cache_and_fast_prices() {
 }
 
 #[test]
+fn new_price_variants_do_not_fall_back_to_family_prices() {
+    let table = defaults();
+    // 输入 1 万、输出 1 千、缓存读 5 千、缓存写 2 千，均处于收录的短上下文档。
+    // 覆盖曾回退到基础款的子型号，以及 DeepSeek 旧名称的官方重定向价格。
+    for (raw, expected_key, expected_usd) in [
+        ("cursor-GPT-4-1-Nano-high", "gpt-4.1-nano", 0.001525),
+        ("gemini-3-5-flash-lite-high", "gemini-3.5-flash-lite", 0.00565),
+        ("gemini-3.1-flash-lite", "gemini-3.1-flash-lite", 0.004125),
+        ("GLM-5-3-Flash-high", "glm-5.3-flash", 0.00215),
+        ("glm-5_3-flashx-high", "glm-5.3-flashx", 0.005325),
+        ("deepseek-flash", "deepseek-flash", 0.002115),
+        ("deepseek-v4-flash", "deepseek-v4-flash", 0.002115),
+        ("claude-sonnet-5-5-thinking", "claude-sonnet-5.5", 0.0355),
+        ("claude-5.5-haiku-high", "claude-haiku-5.5", 0.0018),
+        ("minimax-m3.1-flash", "minimax-m3.1-flash", 0.002175),
+    ] {
+        let usage = TokenRow {
+            output: 1_000.0,
+            cache_read: 5_000.0,
+            cache_write: 2_000.0,
+            ..row(raw, 10_000.0, None)
+        };
+        let (key, usd) = price_row(&usage, &table).unwrap();
+        assert_eq!(key, expected_key, "{raw} 计价键不对");
+        assert!((usd - expected_usd).abs() < 1e-12, "{raw} 单条费用不对：{usd}");
+
+        let agg = aggregate_and_price(vec![usage], &table);
+        assert_eq!(agg.models[0].model, expected_key, "{raw} 展示名不对");
+        assert_eq!(agg.models[0].priced_as.as_deref(), Some(expected_key));
+        assert_eq!(agg.unpriced_models, 0);
+        assert!((agg.total_equivalent_usd - expected_usd).abs() < 1e-12,
+            "{raw} 聚合费用不对：{}", agg.total_equivalent_usd);
+    }
+}
+
+#[test]
 fn same_day_merges() {
     let table = defaults();
     let a = ms("2026-06-15T12:00:00Z");
