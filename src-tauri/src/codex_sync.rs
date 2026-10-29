@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 pub struct SyncConfig {
     pub server_url: String,
     pub sealed_key: String,
+    pub use_proxy: bool,
     pub source_home: String,
     pub device_name: String,
 }
@@ -26,10 +27,14 @@ impl Default for SyncConfig {
         Self {
             server_url: String::new(),
             sealed_key: String::new(),
+            use_proxy: default_use_proxy(),
             source_home: String::new(),
             device_name: String::new(),
         }
     }
+}
+fn default_use_proxy() -> bool {
+    true
 }
 impl SyncConfig {
     pub fn portable(&self) -> Self {
@@ -103,6 +108,8 @@ pub struct ConfigInput {
     pub server_url: String,
     /// None 保留，空串清除，非空替换。读取设置永不返回密钥或密文。
     pub key: Option<String>,
+    #[serde(default = "default_use_proxy")]
+    pub use_proxy: bool,
     pub source_home: String,
     pub device_name: String,
 }
@@ -121,6 +128,7 @@ fn config_from(input: ConfigInput, old: &SyncConfig) -> Result<SyncConfig> {
     validate_saved_config(SyncConfig {
         server_url: normalize_url(&input.server_url)?,
         sealed_key,
+        use_proxy: input.use_proxy,
         source_home: input.source_home.trim().into(),
         device_name: input.device_name.trim().into(),
     })
@@ -144,6 +152,7 @@ pub fn validate_saved_config(mut cfg: SyncConfig) -> Result<SyncConfig> {
 pub struct ConfigView {
     server_url: String,
     has_key: bool,
+    use_proxy: bool,
     source_home: String,
     device_id: String,
     device_name: String,
@@ -153,6 +162,7 @@ fn config_view(cfg: &SyncConfig) -> Result<ConfigView> {
     Ok(ConfigView {
         server_url: cfg.server_url.clone(),
         has_key: !cfg.sealed_key.is_empty(),
+        use_proxy: cfg.use_proxy,
         source_home: cfg.source_home.clone(),
         device_id: d.device_id,
         device_name: d.name,
@@ -540,21 +550,30 @@ impl HttpTransport {
             return Err("sync_not_configured".into());
         }
         let key = cfg.key()?;
-        let mut builder = reqwest::Client::builder()
+        let builder = Self::client_builder(cfg.use_proxy, &crate::proxy::current())?;
+        Ok(Self {
+            client: builder.build().map_err(|_| "sync_network")?,
+            base,
+            key,
+        })
+    }
+    fn client_builder(
+        use_proxy: bool,
+        proxy: &crate::proxy::ProxyConfig,
+    ) -> Result<reqwest::ClientBuilder> {
+        let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(40))
             .redirect(reqwest::redirect::Policy::none());
-        let proxy = crate::proxy::current();
-        builder = match proxy.mode.as_str() {
+        // 显式直连优先于全局设置，也禁用系统与环境变量代理。
+        if !use_proxy {
+            return Ok(builder.no_proxy());
+        }
+        Ok(match proxy.mode.as_str() {
             "direct" => builder.no_proxy(),
             "custom" => {
                 builder.proxy(reqwest::Proxy::all(&proxy.url).map_err(|_| "sync_invalid_proxy")?)
             }
             _ => builder,
-        };
-        Ok(Self {
-            client: builder.build().map_err(|_| "sync_network")?,
-            base,
-            key,
         })
     }
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {

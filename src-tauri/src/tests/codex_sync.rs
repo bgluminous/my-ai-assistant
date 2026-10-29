@@ -213,6 +213,7 @@ fn two_clients_full_incremental_and_retries_are_idempotent() {
 fn disabled_defaults_and_https_only() {
     let c = SyncConfig::default();
     assert!(!c.configured());
+    assert!(c.use_proxy);
     assert_eq!(c.profile().unwrap(), "");
     assert!(HttpTransport::new(&c).is_err());
     for url in [
@@ -233,6 +234,7 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
     let input = |key: Option<String>| ConfigInput {
         server_url: String::new(),
         key,
+        use_proxy: true,
         source_home: String::new(),
         device_name: String::new(),
     };
@@ -246,6 +248,7 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
         .is_empty());
     let old: settings::Settings = serde_json::from_str("{}").unwrap();
     assert!(!old.codex_usage_sync.configured());
+    assert!(old.codex_usage_sync.use_proxy);
     assert_eq!(old.interval_minutes, 0);
     for interval in [0, 15, 1440] {
         let old: settings::Settings = serde_json::from_value(serde_json::json!({
@@ -255,6 +258,7 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
         .unwrap();
         assert_eq!(old.interval_minutes, interval);
         let restored = validate_saved_config(old.codex_usage_sync).unwrap();
+        assert!(restored.use_proxy);
         assert!(serde_json::to_value(restored)
             .unwrap()
             .get("intervalMinutes")
@@ -264,7 +268,33 @@ fn key_keep_replace_clear_and_backup_compatible_default() {
         "serverUrl": "", "key": null, "intervalMinutes": 7, "sourceHome": "", "deviceName": ""
     }))
     .unwrap();
-    assert!(config_from(legacy_input, &SyncConfig::default()).is_ok());
+    assert!(legacy_input.use_proxy);
+    assert!(
+        config_from(legacy_input, &SyncConfig::default())
+            .unwrap()
+            .use_proxy
+    );
+}
+
+#[test]
+fn proxy_preference_round_trips_without_changing_profile() {
+    let original = account_config("proxy-test-key");
+    let profile = original.profile().unwrap();
+    for use_proxy in [false, true] {
+        let input: ConfigInput = serde_json::from_value(serde_json::json!({
+            "serverUrl": original.server_url, "key": null, "useProxy": use_proxy,
+            "sourceHome": "", "deviceName": ""
+        }))
+        .unwrap();
+        let config = config_from(input, &original).unwrap();
+        assert_eq!(config.use_proxy, use_proxy);
+        assert_eq!(config.sealed_key, original.sealed_key);
+        let saved = serde_json::to_value(config).unwrap();
+        assert_eq!(saved["useProxy"], use_proxy);
+        let loaded = validate_saved_config(serde_json::from_value(saved).unwrap()).unwrap();
+        assert_eq!(loaded.use_proxy, use_proxy);
+        assert_eq!(loaded.profile().unwrap(), profile);
+    }
 }
 
 #[test]
@@ -272,6 +302,7 @@ fn backup_carries_connection_but_preserves_target_machine_fields() {
     let original = SyncConfig {
         server_url: "https://sync.example.test".into(),
         sealed_key: local_crypto::seal("backup-key").unwrap(),
+        use_proxy: false,
         source_home: "source-path".into(),
         device_name: "source-name".into(),
     };
@@ -279,17 +310,21 @@ fn backup_carries_connection_but_preserves_target_machine_fields() {
     assert!(portable.source_home.is_empty());
     assert!(portable.device_name.is_empty());
     assert_eq!(portable.key().unwrap(), "backup-key");
+    assert!(!portable.use_proxy);
     let target = SyncConfig {
         source_home: "target-path".into(),
         device_name: "target-name".into(),
         ..Default::default()
     };
-    let restored = validate_saved_config(portable)
-        .unwrap()
-        .restore_local_fields(&target);
+    let restored = validate_saved_config(
+        serde_json::from_value(serde_json::to_value(portable).unwrap()).unwrap(),
+    )
+    .unwrap()
+    .restore_local_fields(&target);
     assert_eq!(restored.source_home, target.source_home);
     assert_eq!(restored.device_name, target.device_name);
     assert_eq!(restored.server_url, original.server_url);
+    assert!(!restored.use_proxy);
     let wire = serde_json::to_value(restored).unwrap();
     assert!(wire.get("deviceId").is_none());
     assert!(wire.get("cursor").is_none());
@@ -491,8 +526,24 @@ fn http_once(response: String) -> (HttpTransport, std::thread::JoinHandle<String
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        // 路由断言失败时也能退出，避免等待一个永远不会经过此监听器的请求。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "HTTP fixture received no request"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("HTTP fixture accept failed: {e}"),
+            }
+        };
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -533,6 +584,144 @@ fn http_once(response: String) -> (HttpTransport, std::thread::JoinHandle<String
 }
 fn http_ok(body: &str) -> String {
     format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+}
+
+fn proxy_client(use_proxy: bool, mode: &str, url: &str) -> reqwest::Client {
+    HttpTransport::client_builder(
+        use_proxy,
+        &crate::proxy::ProxyConfig {
+            mode: mode.into(),
+            url: url.into(),
+        },
+    )
+    .unwrap()
+    .timeout(Duration::from_secs(3))
+    .build()
+    .unwrap()
+}
+
+#[test]
+fn http_custom_proxy_failure_can_be_bypassed() {
+    let (mut t, origin) = http_once(http_ok(
+        r#"{"protocolVersion":1,"spaceId":"s","epoch":"e"}"#,
+    ));
+    let (proxy, proxy_server) = http_once(
+        "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+    );
+    let proxy_url = reqwest::Url::parse(&proxy.base)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    t.client = proxy_client(true, "custom", &proxy_url);
+    assert_eq!(
+        tauri::async_runtime::block_on(t.handshake()).unwrap_err(),
+        "sync_protocol_invalid"
+    );
+    assert!(proxy_server.join().unwrap().starts_with(&format!(
+        "GET {}/api/v1/codex-usage/handshake HTTP/1.1",
+        t.base
+    )));
+
+    t.client = proxy_client(false, "custom", &proxy_url);
+    tauri::async_runtime::block_on(t.handshake())
+        .unwrap()
+        .validate()
+        .unwrap();
+    assert!(origin
+        .join()
+        .unwrap()
+        .starts_with("GET /prefix/api/v1/codex-usage/handshake HTTP/1.1"));
+}
+
+#[test]
+fn http_direct_mode_ignores_invalid_custom_proxy() {
+    let invalid = crate::proxy::ProxyConfig {
+        mode: "custom".into(),
+        url: "http://[".into(),
+    };
+    assert!(matches!(
+        HttpTransport::client_builder(true, &invalid),
+        Err(e) if e == "sync_invalid_proxy"
+    ));
+    for (use_proxy, mode) in [(false, "custom"), (true, "direct"), (false, "direct")] {
+        let (mut t, server) = http_once(http_ok(
+            r#"{"protocolVersion":1,"spaceId":"s","epoch":"e"}"#,
+        ));
+        t.client = proxy_client(use_proxy, mode, &invalid.url);
+        tauri::async_runtime::block_on(t.handshake())
+            .unwrap()
+            .validate()
+            .unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn http_system_proxy_is_followed_or_bypassed() {
+    const CHILD: &str = "MAA_TEST_SYNC_SYSTEM_PROXY";
+    if std::env::var_os(CHILD).is_some() {
+        let (mut t, server) = http_once(http_ok(
+            r#"{"protocolVersion":1,"spaceId":"s","epoch":"e"}"#,
+        ));
+        t.client = proxy_client(true, "system", "");
+        assert_eq!(
+            tauri::async_runtime::block_on(t.handshake()).unwrap_err(),
+            "sync_protocol_invalid"
+        );
+        t.client = proxy_client(false, "system", "");
+        tauri::async_runtime::block_on(t.handshake())
+            .unwrap()
+            .validate()
+            .unwrap();
+        server.join().unwrap();
+        let (mut t, server) = http_once(http_ok(
+            r#"{"protocolVersion":1,"spaceId":"s","epoch":"e"}"#,
+        ));
+        t.client = proxy_client(true, "direct", "");
+        tauri::async_runtime::block_on(t.handshake())
+            .unwrap()
+            .validate()
+            .unwrap();
+        server.join().unwrap();
+        return;
+    }
+
+    // 环境变量只传给独立测试进程，避免 reqwest 缓存或并行测试相互影响。
+    let (proxy, server) = http_once(
+        "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+    );
+    let proxy_url = reqwest::Url::parse(&proxy.base)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "codex_sync::tests::http_system_proxy_is_followed_or_bypassed",
+            "--nocapture",
+        ])
+        .env(CHILD, "1");
+    for name in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        child.env(name, &proxy_url);
+    }
+    child.env("NO_PROXY", "").env("no_proxy", "");
+    let output = child.output().unwrap();
+    let request = server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "proxy subprocess failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(request.starts_with("GET http://127.0.0.1:"));
 }
 
 #[test]

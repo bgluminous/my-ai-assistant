@@ -805,6 +805,12 @@
               <div id="gpt-sync-progress" hidden></div>
               <section class="settings-group" aria-labelledby="settings-server-title">
                 <h4 id="settings-server-title">服务器连接</h4>
+                <label class="toggle">
+                  <input id="gpt-sync-use-proxy" type="checkbox" checked aria-describedby="gpt-sync-proxy-hint" />
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <span class="toggle-text">使用代理</span>
+                </label>
+                <p id="gpt-sync-proxy-hint" class="muted small">开启时跟随全局代理设置，关闭时直接连接同步服务器。</p>
                 <label for="gpt-sync-url">中心服务器地址（留空停用）</label>
                 <input id="gpt-sync-url" type="url" spellcheck="false" placeholder="https://sync.example.com" />
                 <label for="gpt-sync-key">账户同步密钥</label>

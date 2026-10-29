@@ -10,7 +10,7 @@ const source = await readFile(new URL("../src/usage_sync.js", import.meta.url), 
 const promptSource = await readFile(new URL("../src/usage_sync_prompt.js", import.meta.url), "utf8");
 const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
 const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => `#${m[1]}`));
-async function fixture(state = "idle") {
+async function fixture(state = "idle", configOverrides = {}) {
   const requests = [];
   const { document } = parseHTML(html);
   function el(id) {
@@ -24,7 +24,7 @@ async function fixture(state = "idle") {
   }
   const config = {
     serverUrl: "https://sync.example.test/maa", hasKey: true, intervalMinutes: 5,
-    sourceHome: "", deviceName: "设备 A",
+    sourceHome: "", deviceName: "设备 A", useProxy: true, ...configOverrides,
   };
   const status = { state, pendingRecords: 2, lastSuccessAt: null, error: state === "paused" ? "sync_forbidden" : null };
   const context = vm.createContext({ document, setTimeout, clearTimeout });
@@ -70,16 +70,47 @@ async function fixture(state = "idle") {
 }
 
 test("connection test uses the form without saving or starting sync", async () => {
+  for (const useProxy of [false, true]) {
+    const f = await fixture("idle", { useProxy: !useProxy });
+    f.el("#gpt-sync-key").value = "replacement-test-key";
+    f.el("#gpt-sync-use-proxy").checked = useProxy;
+    await f.click("#gpt-sync-test");
+    const actions = f.requests.filter((r) => r.command !== "codex_usage_sync_status");
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].command, "codex_usage_sync_test");
+    assert.equal(actions[0].args.config.serverUrl, "https://sync.example.test/maa");
+    assert.equal(actions[0].args.config.key, "replacement-test-key");
+    assert.equal(actions[0].args.config.useProxy, useProxy);
+    assert.equal("intervalMinutes" in actions[0].args.config, false);
+    assert.match(f.el("#gpt-sync-result").textContent, /未上传数据或登记设备/);
+    await f.api.loadSyncSettings();
+    assert.equal(f.el("#gpt-sync-use-proxy").checked, !useProxy);
+  }
+});
+
+test("proxy preference defaults on and loads the saved choice", async () => {
+  for (const useProxy of [undefined, true, false]) {
+    const f = await fixture("idle", { useProxy });
+    assert.equal(f.el("#gpt-sync-use-proxy").checked, useProxy !== false);
+    assert.equal(await f.api.saveSyncSettings(true), true);
+    assert.equal(f.requests.length, 0);
+  }
+});
+
+test("changing only the proxy toggle saves once and survives reloading", async () => {
   const f = await fixture();
-  f.el("#gpt-sync-key").value = "replacement-test-key";
-  await f.click("#gpt-sync-test");
-  const actions = f.requests.filter((r) => r.command !== "codex_usage_sync_status");
-  assert.equal(actions.length, 1);
-  assert.equal(actions[0].command, "codex_usage_sync_test");
-  assert.equal(actions[0].args.config.serverUrl, "https://sync.example.test/maa");
-  assert.equal(actions[0].args.config.key, "replacement-test-key");
-  assert.equal("intervalMinutes" in actions[0].args.config, false);
-  assert.match(f.el("#gpt-sync-result").textContent, /未上传数据或登记设备/);
+  for (const useProxy of [false, true]) {
+    f.el("#gpt-sync-use-proxy").checked = useProxy;
+    assert.equal(await f.api.saveSyncSettings(true), true);
+    const saves = f.requests.filter((r) => r.command === "codex_usage_sync_set");
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].args.config.useProxy, useProxy);
+    assert.equal(saves[0].args.config.key, null);
+    assert.equal(f.el("#gpt-sync-use-proxy").checked, useProxy);
+    f.requests.length = 0;
+    assert.equal(await f.api.saveSyncSettings(true), true);
+    assert.equal(f.requests.length, 0);
+  }
 });
 
 test("paused account stays visible in usage and the Done save path remains available", async () => {

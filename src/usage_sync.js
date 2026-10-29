@@ -12,6 +12,7 @@ function form() {
   return {
     serverUrl: el("#gpt-sync-url").value.trim(),
     key: el("#gpt-sync-clear-key").checked ? "" : el("#gpt-sync-key").value.trim() || null,
+    useProxy: el("#gpt-sync-use-proxy").checked,
     sourceHome: el("#gpt-sync-home").value.trim(),
     deviceName: el("#gpt-sync-device-name").value.trim(),
   };
@@ -25,6 +26,7 @@ export async function loadSyncSettings() {
     el("#gpt-sync-key").value = "";
     el("#gpt-sync-key").placeholder = c.hasKey ? "已保存，留空保留原密钥" : "填写服务端管理员提供的账户同步密钥";
     el("#gpt-sync-clear-key").checked = false;
+    el("#gpt-sync-use-proxy").checked = c.useProxy !== false;
     el("#gpt-sync-home").value = c.sourceHome;
     el("#gpt-sync-device-name").value = c.deviceName;
     savedForm = JSON.stringify(form());
