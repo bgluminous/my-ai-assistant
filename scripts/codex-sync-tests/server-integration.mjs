@@ -66,6 +66,7 @@ const ports = [];
 let dropPush = false;
 let dropChangeAt = 0;
 let changeCount = 0;
+let legacyMode = false;
 let closed = false;
 
 async function closeServer(server) {
@@ -197,6 +198,10 @@ try {
           case "restore-write":
             await database.pool.query(`ALTER TABLE codex_usage_source DROP CHECK ${database.prefix}reject_write`);
             break;
+          case "legacy-mode":
+            assert.equal(typeof body.enabled, "boolean");
+            legacyMode = body.enabled;
+            break;
           default: throw new Error();
         }
         res.setHeader("Content-Type", "application/json");
@@ -206,10 +211,29 @@ try {
     }
     if (!req.url.startsWith("/maa/")) { res.writeHead(404).end(); return; }
     const path = req.url.slice(4);
+    if (legacyMode && path.startsWith("/api/v1/codex-usage/changes?") &&
+        new URL(path, "http://localhost").searchParams.has("excludeDeviceId")) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end('{"code":"invalid_request"}');
+      return;
+    }
     const upstream = httpRequest({ host: "127.0.0.1", port: backend.address().port,
       method: req.method, path, headers: req.headers }, (response) => {
       const isPush = path === "/api/v1/codex-usage/push";
       const isChanges = path.startsWith("/api/v1/codex-usage/changes?");
+      if (legacyMode && path === "/api/v1/codex-usage/handshake" && response.statusCode === 200) {
+        const chunks = [];
+        response.on("data", chunk => chunks.push(chunk));
+        response.on("end", () => {
+          const handshake = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          delete handshake.capabilities;
+          const body = Buffer.from(JSON.stringify(handshake));
+          const headers = { ...response.headers, "content-length": body.length };
+          delete headers["transfer-encoding"];
+          res.writeHead(200, headers).end(body);
+        });
+        response.on("error", () => res.destroy());
+        return;
+      }
       const loseResponse = response.statusCode === 200 &&
         ((isPush && dropPush) || (isChanges && dropChangeAt > 0 && ++changeCount === dropChangeAt));
       if (loseResponse) {

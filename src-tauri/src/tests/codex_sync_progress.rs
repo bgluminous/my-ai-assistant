@@ -1,6 +1,6 @@
 use super::*;
 
-fn observed(
+pub(super) fn observed(
     center: &Center,
     store: &mut store::Store,
     mut apply: impl FnMut(&mut store::Store, DbAction) -> Result<DbReply>,
@@ -22,13 +22,13 @@ fn observed(
     ));
     (result, events)
 }
-fn apply(store: &mut store::Store, action: DbAction) -> Result<DbReply> {
+pub(super) fn apply(store: &mut store::Store, action: DbAction) -> Result<DbReply> {
     apply_action(store, "p", action)
 }
 
 #[test]
 fn batches_report_confirmed_uploads_and_saved_pages_excluding_devices() {
-    let center = Center::new();
+    let center = Center::filtering();
     let mut s = memory();
     add(&s, 1203);
     let (result, events) = observed(&center, &mut s, apply);
@@ -42,8 +42,8 @@ fn batches_report_confirmed_uploads_and_saved_pages_excluding_devices() {
     assert_eq!(
         events.last(),
         Some(&ExchangeProgress::Downloading {
-            records: 1203,
-            pages: 3
+            records: 0,
+            pages: 4
         })
     );
     assert_eq!(s.pending_count("p").unwrap(), 0);
@@ -53,7 +53,7 @@ fn batches_report_confirmed_uploads_and_saved_pages_excluding_devices() {
 #[test]
 fn lost_ack_or_local_ack_failure_never_reports_uploaded_records() {
     for lose_response in [true, false] {
-        let center = Center::new();
+        let center = Center::filtering();
         *center.lose_ack.borrow_mut() = lose_response;
         let mut s = memory();
         add(&s, 503);
@@ -74,13 +74,19 @@ fn lost_ack_or_local_ack_failure_never_reports_uploaded_records() {
 #[test]
 fn download_network_or_commit_failure_preserves_only_saved_page_counts() {
     for network_failure in [true, false] {
-        let center = Center::new();
+        let center = Center::filtering();
+        let mut other = memory();
+        add(&other, 1003);
+        run(&center, &mut other).unwrap();
         *center.fail_page.borrow_mut() = network_failure;
         let mut s = memory();
+        s.prepare_profile("p", "space", "epoch").unwrap();
+        s.apply_sync_page("p", &[], &[], "checkpoint:0", true)
+            .unwrap();
         add(&s, 1003);
         let mut page = 0;
         let (result, events) = observed(&center, &mut s, |s, action| {
-            if matches!(&action, DbAction::Page(_)) {
+            if matches!(&action, DbAction::Page(..)) {
                 page += 1;
                 if page == 2 {
                     return Err("sync_store_failed:test".into());

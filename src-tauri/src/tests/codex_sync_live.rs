@@ -58,13 +58,30 @@ impl Client {
         self.store.ingest(files).unwrap();
     }
     async fn sync(&mut self) -> Result<()> {
+        self.sync_counts().await.map(|_| ())
+    }
+    async fn sync_counts(&mut self) -> Result<(usize, usize)> {
         self.collect();
         let profile = self.profile();
         let own = self.own();
-        exchange_with_recovery(&self.http, &profile, own, |a| {
-            apply_action(&mut self.store, &profile, a)
-        })
-        .await
+        let mut counts = (0, 0);
+        exchange_recovery_progress(
+            &self.http,
+            &profile,
+            own,
+            |a| apply_action(&mut self.store, &profile, a),
+            |event| {
+                match event {
+                    ExchangeProgress::Uploading { uploaded, .. } => counts.0 = uploaded,
+                    ExchangeProgress::Downloading { records, .. } => counts.1 = records,
+                    ExchangeProgress::Recovering => counts = (0, 0),
+                    _ => {}
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(counts)
     }
     fn rows(&self, device: Option<&str>, since: Option<i64>) -> Vec<pricing::TokenRow> {
         store::aggregate_rows(
@@ -175,8 +192,13 @@ impl Transport for DuringPage<'_> {
     async fn push(&self, p: &Push) -> Result<Acknowledged> {
         self.reader.push(p).await
     }
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
-        let page = self.reader.changes(h, cursor).await?;
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page> {
+        let page = self.reader.changes(h, cursor, exclude_device_id).await?;
         if page.has_more && !self.inserted.replace(true) {
             let ack = self
                 .writer
@@ -212,6 +234,33 @@ fn live_server_interoperability() {
             control_key: std::env::var("MAA_TEST_CONTROL_KEY").unwrap(),
         };
         let created = harness.create("MAA 双机联调").await;
+        let filter_account = harness.create("MAA 过滤联调").await;
+        let filter_key = filter_account["key"].as_str().unwrap();
+        let mut fa = Client::new(&root, "FilterA", &base, filter_key, &ca);
+        let mut fb = Client::new(&root, "FilterB", &base, filter_key, &ca);
+        add(&fa.store, 10);
+        assert_eq!(fa.sync_counts().await.unwrap(), (10, 0));
+        assert_eq!(fa.sync_counts().await.unwrap(), (0, 0));
+        add(&fb.store, 4);
+        assert_eq!(fb.sync_counts().await.unwrap(), (4, 10));
+        add(&fa.store, 20);
+        assert_eq!(fa.sync_counts().await.unwrap(), (10, 4));
+        harness
+            .control(json!({"action":"legacy-mode","enabled":true}))
+            .await;
+        assert_eq!(fa.sync_counts().await.unwrap(), (0, 24));
+        assert!(!fa.store.exclude_self_ready(&fa.profile()).unwrap());
+        harness
+            .control(json!({"action":"legacy-mode","enabled":false}))
+            .await;
+        assert_eq!(fa.sync_counts().await.unwrap(), (0, 0));
+        assert!(fa.store.exclude_self_ready(&fa.profile()).unwrap());
+        fa.store
+            .clear_device(&fa.profile(), &fa.own().device_id)
+            .unwrap();
+        assert_eq!(fa.sync_counts().await.unwrap(), (0, 24));
+        assert_eq!(fa.store.pending_count(&fa.profile()).unwrap(), 0);
+        println!("PASS: first upload 10/download 0, mixed upload 10/download 4, legacy fallback, upgrade and own-cache restore");
         let account = created["account"]["id"].as_str().unwrap();
         let key = created["key"].as_str().unwrap();
         assert_eq!(key.len(), 43);
@@ -317,9 +366,23 @@ fn live_server_interoperability() {
             inserted: Cell::new(false),
         };
         let profile = snapshot.profile();
-        exchange_with_recovery(&transport, &profile, snapshot.own(), |action| {
-            apply_action(&mut snapshot.store, &profile, action)
-        })
+        let identity = transport.handshake().await.unwrap();
+        apply_action(
+            &mut snapshot.store,
+            &profile,
+            DbAction::Prepare(identity.clone()),
+        )
+        .unwrap();
+        // 核对单个固定上界窗口；正常首次同步随后还会开始上传后的增量窗口。
+        download_pages(
+            &transport,
+            &identity,
+            None,
+            true,
+            &mut |action| apply_action(&mut snapshot.store, &profile, action),
+            &mut |_| Ok(()),
+            &mut (0, 0),
+        )
         .await
         .unwrap();
         assert!(transport.inserted.get());
@@ -447,13 +510,15 @@ fn live_server_interoperability() {
             .await;
         assert_eq!(failed.sync().await.unwrap_err(), "sync_server");
         assert_eq!(failed.store.pending_count(&failed.profile()).unwrap(), 1);
-        assert!(failed.store.cursor(&failed.profile()).unwrap().is_none());
+        // 上传前已提交完整恢复，上传失败不能撤销下载检查点或模式。
+        assert!(failed.store.cursor(&failed.profile()).unwrap().is_some());
+        assert!(failed.store.exclude_self_ready(&failed.profile()).unwrap());
         let after = harness.account(account).await;
         for field in ["recordCount", "sourceCount", "deviceCount"] {
             assert_eq!(before[field], after[field]);
         }
         harness.control(json!({"action":"restore-write"})).await;
-        failed.sync().await.unwrap();
+        assert_eq!(failed.sync_counts().await.unwrap(), (1, 0));
         assert_eq!(failed.store.pending_count(&failed.profile()).unwrap(), 0);
         println!("PASS: actual MySQL write failure rolls back device and source registration; retry succeeds");
 
@@ -470,6 +535,10 @@ fn live_server_interoperability() {
             .unwrap()
             .is_none());
         assert!(local_failure.rows(None, None).is_empty());
+        assert!(!local_failure
+            .store
+            .exclude_self_ready(&local_failure.profile())
+            .unwrap());
         local_failure
             .store
             .db

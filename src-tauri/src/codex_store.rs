@@ -192,6 +192,22 @@ pub struct DeviceView {
 pub struct Store {
     pub db: Connection,
 }
+
+// 附加状态留在既有 meta 表，旧客户端仍可打开 schema 1 的存档。
+fn save_download_mode(db: &Connection, profile: &str, exclude_self_ready: bool) -> Result<()> {
+    let key = format!("download-mode:{profile}");
+    if exclude_self_ready {
+        db.execute(
+            "INSERT INTO meta VALUES (?1,'exclude-self') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [&key],
+        ).map_err(db_err)?;
+    } else {
+        db.execute("DELETE FROM meta WHERE key=?1", [&key])
+            .map_err(db_err)?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn init(db: Connection) -> Result<Self> {
         db.busy_timeout(std::time::Duration::from_secs(5))
@@ -340,6 +356,7 @@ impl Store {
         let tx = self.db.transaction().map_err(db_err)?;
         tx.execute("DELETE FROM acks WHERE profile=?1", [profile])
             .map_err(db_err)?;
+        save_download_mode(&tx, profile, false)?;
         // 空间身份变化不得把旧空间缓存混入新空间。单纯服务重建则保留历史，重新确认本机记录。
         if old
             .as_ref()
@@ -382,6 +399,25 @@ impl Store {
             .map(|v| v.flatten())
             .map_err(db_err)
     }
+    pub fn exclude_self_ready(&self, profile: &str) -> Result<bool> {
+        self.db
+            .query_row(
+                "SELECT value='exclude-self' FROM meta WHERE key=?1",
+                [format!("download-mode:{profile}")],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|ready| ready.unwrap_or(false))
+            .map_err(db_err)
+    }
+    /// 能力降级只重置下载，不丢弃已持久化的上传确认。
+    pub fn reset_download(&mut self, profile: &str) -> Result<()> {
+        let tx = self.db.transaction().map_err(db_err)?;
+        save_download_mode(&tx, profile, false)?;
+        tx.execute("UPDATE profiles SET cursor=NULL WHERE id=?1", [profile])
+            .map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
     pub fn finish(&self, profile: &str) -> Result<()> {
         self.db
             .execute(
@@ -395,16 +431,28 @@ impl Store {
         let tx = self.db.transaction().map_err(db_err)?;
         tx.execute("DELETE FROM acks WHERE profile=?1", [profile])
             .map_err(db_err)?;
+        save_download_mode(&tx, profile, false)?;
         tx.execute("UPDATE profiles SET cursor=NULL WHERE id=?1", [profile])
             .map_err(db_err)?;
         tx.commit().map_err(db_err)
     }
+    #[cfg(test)]
     pub fn apply_page(
         &mut self,
         profile: &str,
         records: &[RemoteRecord],
         devices: &[Device],
         cursor: &str,
+    ) -> Result<usize> {
+        self.apply_sync_page(profile, records, devices, cursor, false)
+    }
+    pub fn apply_sync_page(
+        &mut self,
+        profile: &str,
+        records: &[RemoteRecord],
+        devices: &[Device],
+        cursor: &str,
+        exclude_self_ready: bool,
     ) -> Result<usize> {
         // 先验证整页，再开事务；畸形页不能推进游标或留下半页数据。
         for d in devices {
@@ -442,6 +490,7 @@ impl Store {
             params![profile, cursor],
         )
         .map_err(db_err)?;
+        save_download_mode(&tx, profile, exclude_self_ready)?;
         tx.commit().map_err(db_err)?;
         Ok(added)
     }
@@ -513,6 +562,7 @@ impl Store {
             removed += tx.execute("DELETE FROM local_records WHERE json_extract(body,'$.kind')='usage' AND id IN (SELECT id FROM acks WHERE profile=?1)",[profile]).map_err(db_err)?;
         }
         // 保留会话关系和未上传明细。下次同步从头重放，不能跳过刚被清理的历史。
+        save_download_mode(&tx, profile, false)?;
         tx.execute("UPDATE profiles SET cursor=NULL WHERE id=?1", [profile])
             .map_err(db_err)?;
         tx.commit().map_err(db_err)?;

@@ -489,7 +489,10 @@ pub struct Handshake {
     pub protocol_version: u32,
     pub space_id: String,
     pub epoch: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
+const EXCLUDE_DEVICE_RECORDS: &str = "exclude-device-records-v1";
 impl Handshake {
     fn validate(&self) -> Result<()> {
         if self.protocol_version != 1 {
@@ -536,7 +539,12 @@ pub struct Page {
 pub trait Transport {
     async fn handshake(&self) -> Result<Handshake>;
     async fn push(&self, payload: &Push) -> Result<Acknowledged>;
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page>;
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page>;
 }
 struct HttpTransport {
     client: reqwest::Client,
@@ -622,7 +630,12 @@ impl Transport for HttpTransport {
         self.response(self.request(reqwest::Method::POST, "push").json(payload))
             .await
     }
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page> {
         let mut req = self.request(reqwest::Method::GET, "changes").query(&[
             ("spaceId", h.space_id.as_str()),
             ("epoch", h.epoch.as_str()),
@@ -630,6 +643,9 @@ impl Transport for HttpTransport {
         ]);
         if let Some(c) = cursor {
             req = req.query(&[("cursor", c)]);
+        }
+        if let Some(id) = exclude_device_id {
+            req = req.query(&[("excludeDeviceId", id)]);
         }
         self.response(req).await
     }
@@ -688,6 +704,31 @@ async fn exchange_progress<T: Transport>(
     let h = transport.handshake().await?;
     h.validate()?;
     db(DbAction::Prepare(h.clone()))?;
+    let can_filter = h.capabilities.iter().any(|c| c == EXCLUDE_DEVICE_RECORDS);
+    let DbReply::DownloadState {
+        cursor,
+        exclude_self_ready,
+    } = db(DbAction::DownloadState)?
+    else {
+        return Err("sync_protocol_invalid".into());
+    };
+    let mut downloaded = (0, 0);
+    if !can_filter && exclude_self_ready {
+        db(DbAction::ResetDownload)?;
+    }
+    if can_filter && (!exclude_self_ready || cursor.is_none()) {
+        // 先恢复历史，再上传本轮新记录；恢复中断时持久模式仍是完整下载。
+        download_pages(
+            transport,
+            &h,
+            None,
+            true,
+            &mut db,
+            progress,
+            &mut downloaded,
+        )
+        .await?;
+    }
     let mut sent_metadata = false;
     let mut uploaded = 0;
     loop {
@@ -750,14 +791,36 @@ async fn exchange_progress<T: Transport>(
         })?;
         sent_metadata = true;
     }
-    // 上传确认不能推进下载游标；服务端读取不消费数据，各客户端分别保存检查点。
-    let mut downloaded = 0;
-    let mut pages = 0;
+    download_pages(
+        transport,
+        &h,
+        can_filter.then_some(device.device_id.as_str()),
+        can_filter,
+        &mut db,
+        progress,
+        &mut downloaded,
+    )
+    .await?;
+    let _ = profile; // 空间只由上层的固定 DB 回调选择，服务端不能控制本地存储命名空间。
+    db(DbAction::Finish)?;
+    Ok(())
+}
+
+// 上传确认不能推进下载游标；恢复与过滤下载共用计数，每页提交后才计入。
+async fn download_pages<T: Transport>(
+    transport: &T,
+    h: &Handshake,
+    exclude_device_id: Option<&str>,
+    can_filter: bool,
+    db: &mut impl FnMut(DbAction) -> Result<DbReply>,
+    progress: &mut impl FnMut(ExchangeProgress) -> Result<()>,
+    downloaded: &mut (usize, usize),
+) -> Result<()> {
     progress(ExchangeProgress::Downloading {
-        records: 0,
-        pages: 0,
+        records: downloaded.0,
+        pages: downloaded.1,
     })?;
-    let DbReply::Cursor(mut cursor) = db(DbAction::Cursor)? else {
+    let DbReply::DownloadState { mut cursor, .. } = db(DbAction::DownloadState)? else {
         return Err("sync_protocol_invalid".into());
     };
     let mut seen = std::collections::HashSet::new();
@@ -765,15 +828,20 @@ async fn exchange_progress<T: Transport>(
         seen.insert(c.clone());
     }
     loop {
-        let page = transport.changes(&h, cursor.as_deref()).await?;
+        let page = transport
+            .changes(h, cursor.as_deref(), exclude_device_id)
+            .await?;
         if page.space_id != h.space_id || page.epoch != h.epoch {
             return Err("sync_reset_required".into());
         }
         if page.records.len() + page.devices.len() > MAX_RECORDS
+            || exclude_device_id.is_some_and(|id| page.records.iter().any(|r| r.device_id == id))
             || page.next_cursor.is_empty()
             || page.next_cursor.len() > 4096
             || (page.has_more
-                && (page.records.is_empty() && page.devices.is_empty()
+                && ((exclude_device_id.is_none()
+                    && page.records.is_empty()
+                    && page.devices.is_empty())
                     || !seen.insert(page.next_cursor.clone())))
         {
             return Err("sync_protocol_invalid".into());
@@ -781,19 +849,20 @@ async fn exchange_progress<T: Transport>(
         cursor = Some(page.next_cursor.clone());
         let more = page.has_more;
         let count = page.records.len();
-        db(DbAction::Page(page))?;
-        downloaded += count;
-        pages += 1;
+        db(DbAction::Page(
+            page,
+            exclude_device_id.is_some() || (can_filter && !more),
+        ))?;
+        downloaded.0 += count;
+        downloaded.1 += 1;
         progress(ExchangeProgress::Downloading {
-            records: downloaded,
-            pages,
+            records: downloaded.0,
+            pages: downloaded.1,
         })?;
         if !more {
             break;
         }
     }
-    let _ = profile; // 空间只由上层的固定 DB 回调选择，服务端不能控制本地存储命名空间。
-    db(DbAction::Finish)?;
     Ok(())
 }
 
@@ -826,29 +895,45 @@ async fn exchange_recovery_progress<T: Transport>(
 pub enum DbAction {
     Prepare(Handshake),
     Reset,
+    ResetDownload,
     Pending,
     PendingCount,
     Ack(Vec<WireRecord>),
-    Cursor,
-    Page(Page),
+    DownloadState,
+    Page(Page, bool),
     Finish,
 }
 pub enum DbReply {
     Done,
     Pending(Vec<WireRecord>),
     Count(usize),
-    Cursor(Option<String>),
+    DownloadState {
+        cursor: Option<String>,
+        exclude_self_ready: bool,
+    },
 }
 pub fn apply_action(s: &mut store::Store, profile: &str, action: DbAction) -> Result<DbReply> {
     match action {
         DbAction::Prepare(h) => s.prepare_profile(profile, &h.space_id, &h.epoch)?,
         DbAction::Reset => s.reset_sync(profile)?,
+        DbAction::ResetDownload => s.reset_download(profile)?,
         DbAction::Pending => return Ok(DbReply::Pending(s.pending(profile)?)),
         DbAction::PendingCount => return Ok(DbReply::Count(s.pending_count(profile)?)),
         DbAction::Ack(records) => s.acknowledge(profile, &records)?,
-        DbAction::Cursor => return Ok(DbReply::Cursor(s.cursor(profile)?)),
-        DbAction::Page(p) => {
-            s.apply_page(profile, &p.records, &p.devices, &p.next_cursor)?;
+        DbAction::DownloadState => {
+            return Ok(DbReply::DownloadState {
+                cursor: s.cursor(profile)?,
+                exclude_self_ready: s.exclude_self_ready(profile)?,
+            })
+        }
+        DbAction::Page(p, exclude_self_ready) => {
+            s.apply_sync_page(
+                profile,
+                &p.records,
+                &p.devices,
+                &p.next_cursor,
+                exclude_self_ready,
+            )?;
         }
         DbAction::Finish => s.finish(profile)?,
     }

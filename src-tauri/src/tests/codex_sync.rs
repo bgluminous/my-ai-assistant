@@ -2,6 +2,8 @@ use super::*;
 use rusqlite::{params, Connection};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+#[path = "codex_sync_filter.rs"]
+mod filtering;
 #[path = "codex_sync_live.rs"]
 mod live;
 #[path = "codex_sync_progress.rs"]
@@ -23,9 +25,19 @@ enum Change {
     Device(Device),
 }
 impl Center {
+    fn filtering() -> Self {
+        let center = Self::new();
+        center
+            .info
+            .borrow_mut()
+            .capabilities
+            .push(EXCLUDE_DEVICE_RECORDS.into());
+        center
+    }
     fn new() -> Self {
         Self {
             info: RefCell::new(Handshake {
+                capabilities: Vec::new(),
                 protocol_version: 1,
                 space_id: "space".into(),
                 epoch: "epoch".into(),
@@ -88,7 +100,12 @@ impl Transport for Center {
             acknowledged_ids: p.records.iter().map(|r| r.record_id.clone()).collect(),
         })
     }
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page> {
         let info = self.info.borrow();
         if self.reject_changes.get()
             || cursor == Some("invalid")
@@ -98,6 +115,15 @@ impl Transport for Center {
             return Err("sync_reset_required".into());
         }
         let parts: Vec<_> = cursor.unwrap_or("checkpoint:0").split(':').collect();
+        let stored_filter = if parts[0] == "page" {
+            parts.get(3)
+        } else {
+            parts.get(2)
+        }
+        .copied();
+        if (stored_filter.is_some() || parts[0] == "page") && stored_filter != exclude_device_id {
+            return Err("sync_reset_required".into());
+        }
         let start = parts[1].parse::<usize>().unwrap();
         let upper = if parts[0] == "page" {
             parts[2].parse().unwrap()
@@ -112,7 +138,10 @@ impl Transport for Center {
         let mut devices = Vec::new();
         for change in &self.changes.borrow()[start..next] {
             match change {
-                Change::Record(r) => records.push(r.clone()),
+                Change::Record(r) if Some(r.device_id.as_str()) != exclude_device_id => {
+                    records.push(r.clone())
+                }
+                Change::Record(_) => {}
                 Change::Device(d) => devices.push(d.clone()),
             }
         }
@@ -125,7 +154,9 @@ impl Transport for Center {
                 format!("page:{next}:{upper}")
             } else {
                 format!("checkpoint:{next}")
-            },
+            } + &exclude_device_id
+                .map(|id| format!(":{id}"))
+                .unwrap_or_default(),
             has_more: next < upper,
         })
     }
@@ -338,6 +369,7 @@ fn backup_carries_connection_but_preserves_target_machine_fields() {
 #[test]
 fn bad_protocol_and_hash_are_rejected() {
     assert!(Handshake {
+        capabilities: Vec::new(),
         protocol_version: 2,
         space_id: "s".into(),
         epoch: "e".into()
@@ -345,6 +377,7 @@ fn bad_protocol_and_hash_are_rejected() {
     .validate()
     .is_err());
     assert!(Handshake {
+        capabilities: Vec::new(),
         protocol_version: 1,
         space_id: String::new(),
         epoch: "e".into()
@@ -360,14 +393,16 @@ fn pagination_keeps_its_upper_bound_and_device_names_are_incremental() {
     add(&a, 503);
     run(&c, &mut a).unwrap();
     let h = tauri::async_runtime::block_on(c.handshake()).unwrap();
-    let first = tauri::async_runtime::block_on(c.changes(&h, None)).unwrap();
+    let first = tauri::async_runtime::block_on(c.changes(&h, None, None)).unwrap();
     assert!(first.has_more);
     add(&a, 510);
     run(&c, &mut a).unwrap();
-    let second = tauri::async_runtime::block_on(c.changes(&h, Some(&first.next_cursor))).unwrap();
+    let second =
+        tauri::async_runtime::block_on(c.changes(&h, Some(&first.next_cursor), None)).unwrap();
     assert!(!second.has_more);
     assert_eq!(first.records.len() + second.records.len(), 503);
-    let third = tauri::async_runtime::block_on(c.changes(&h, Some(&second.next_cursor))).unwrap();
+    let third =
+        tauri::async_runtime::block_on(c.changes(&h, Some(&second.next_cursor), None)).unwrap();
     assert_eq!(third.records.len(), 7);
     let d = Device {
         device_id: a.device_id().unwrap(),
@@ -377,7 +412,8 @@ fn pagination_keeps_its_upper_bound_and_device_names_are_incremental() {
         apply_action(&mut a, "p", action)
     }))
     .unwrap();
-    let change = tauri::async_runtime::block_on(c.changes(&h, Some(&third.next_cursor))).unwrap();
+    let change =
+        tauri::async_runtime::block_on(c.changes(&h, Some(&third.next_cursor), None)).unwrap();
     assert!(change.records.is_empty());
     assert_eq!(change.devices[0].name, "renamed");
 }
@@ -406,7 +442,7 @@ impl Transport for BadAck {
         ack.acknowledged_ids.clear();
         Ok(ack)
     }
-    async fn changes(&self, _: &Handshake, _: Option<&str>) -> Result<Page> {
+    async fn changes(&self, _: &Handshake, _: Option<&str>, _: Option<&str>) -> Result<Page> {
         panic!("invalid ack must stop download")
     }
 }
@@ -758,7 +794,7 @@ fn http_contract_auth_paths_payload_and_opaque_cursor() {
     let (t, server) = http_once(http_ok(
         r#"{"spaceId":"s","epoch":"e","records":[],"devices":[],"nextCursor":"opaque","hasMore":false}"#,
     ));
-    tauri::async_runtime::block_on(t.changes(&h, Some("opaque+/?="))).unwrap();
+    tauri::async_runtime::block_on(t.changes(&h, Some("opaque+/?="), None)).unwrap();
     let request = server.join().unwrap();
     assert!(request.contains("cursor=opaque%2B%2F%3F%3D"));
     let target = request.split_whitespace().nth(1).unwrap();
@@ -920,9 +956,17 @@ impl Transport for AccountTransport<'_> {
         self.authorize()?;
         self.account.center.push(payload).await
     }
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page> {
         self.authorize()?;
-        self.account.center.changes(h, cursor).await
+        self.account
+            .center
+            .changes(h, cursor, exclude_device_id)
+            .await
     }
 }
 fn account_config(key: &str) -> SyncConfig {
@@ -1133,8 +1177,13 @@ impl Transport for OversizedPage {
     async fn push(&self, p: &Push) -> Result<Acknowledged> {
         self.0.push(p).await
     }
-    async fn changes(&self, h: &Handshake, cursor: Option<&str>) -> Result<Page> {
-        let mut page = self.0.changes(h, cursor).await?;
+    async fn changes(
+        &self,
+        h: &Handshake,
+        cursor: Option<&str>,
+        exclude_device_id: Option<&str>,
+    ) -> Result<Page> {
+        let mut page = self.0.changes(h, cursor, exclude_device_id).await?;
         page.devices.push(page.devices[0].clone());
         assert!(page.devices.len() <= MAX_RECORDS && page.records.len() <= MAX_RECORDS);
         assert_eq!(page.devices.len() + page.records.len(), MAX_RECORDS + 1);
