@@ -53,14 +53,17 @@ fn ms(rfc3339: &str) -> i64 {
 fn gpt_6_usage_keeps_family_cache_and_fast_prices() {
     let table = defaults();
     // 输入 10 万、输出 1 万、缓存读 10 万、缓存写 2 万；低于长上下文阈值。
-    // Sol / Luna 不得回退到裸 gpt-6 的 Astra 价；6.1 Sol 的缓存读比 6 Sol 更便宜。
+    // 各型号按自己的价格折算，避免费用回退到裸 gpt-6 的 Astra 价。
     for (raw, expected_key, expected_usd) in [
         ("gpt-6-sol-high", "gpt-6-sol", 0.37),
         ("cursor-gpt-6-luna-max", "gpt-6-luna", 0.0185),
         ("gpt-6-1-sol-xhigh", "gpt-6.1-sol", 0.36),
+        ("gpt-6-1-terra-xhigh", "gpt-6.1-terra", 0.18),
+        ("gpt-6-rosalind", "gpt-6-rosalind", 2.775),
         ("gpt-6-sol-high-fast", "gpt-6-sol-fast", 0.74),
         ("gpt-6-luna-max-fast", "gpt-6-luna-fast", 0.037),
         ("gpt-6_1-sol-high-fast", "gpt-6.1-sol-fast", 0.72),
+        ("cursor-gpt-6_1-terra-high-fast", "gpt-6.1-terra-fast", 0.36),
     ] {
         let usage = TokenRow {
             output: 10_000.0,

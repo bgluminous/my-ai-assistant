@@ -64,7 +64,7 @@ import {
   editDeletedAccountDialog,
   selectDialog,
 } from "./accounts.js";
-import { membershipLabel, planMonthlyUsd, cursorPlanChoices, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
+import { membershipLabel, planMonthlyUsd, accountPlanInfo, accountsPlanMonthlyUsd, cursorPlanChoices, relativeFromUnixSeconds, cursorIdentity } from "./account_format.js";
 import { generateCursorSnapshot } from "./snapshot.js";
 import { openRawEvents } from "./raw_events.js";
 import { syncError } from "./usage_sync.js";
@@ -126,6 +126,8 @@ let renderedAt = 0; // 结果区数据的获取时间（显示「更新于」与
 let lastAttemptAt = 0; // 最近一次完整加载的完成时间（新鲜度门控；失败来源不再把整页永久拖成过期）
 let usageInterval = 0; // 定时刷新间隔（分钟，0 = 关闭），与账户状态刷新共用；本页只用它推导缓存有效期
 let accountIdsSig = "";
+let accountPlansSig = "";
+let plansDirty = false; // 套餐变化不改变用量缓存时间，也必须重算月费和倍数
 const overviewResults = new Map(); // accountId -> { state, agg?, error? }
 let deletedRecords = []; // 已删除账户保留的统计数据记录（后端 cursor_usage_deleted_list）
 let deletedDirty = true; // 账户增删后置脏，下次总览加载时重新拉取已删除记录列表
@@ -142,6 +144,32 @@ let tokenChart = null; // 各模型 Token 数量（环形饼图）
 let modelChart = null; // 各模型等价费用（环形饼图）
 let doughnutChart = null; // Token 构成
 let dailyChart = null; // 按日 / 按小时柱图
+let usageChartResizeFrame = null;
+
+/** 隐藏 / 恢复窗口时可能漏掉尺寸通知；数据 update 不会重新测量画布。
+ *  合并触发并等两帧布局落定，只修正尺寸，不重载数据或重建图表。 */
+function scheduleUsageChartResize() {
+  if (usageChartResizeFrame !== null || ![dailyChart, tokenChart, modelChart, doughnutChart].some(Boolean)) return;
+  if (document.hidden || el("#usage-panel").hidden || el("#usage-results").hidden) return;
+  usageChartResizeFrame = requestAnimationFrame(() => {
+    usageChartResizeFrame = requestAnimationFrame(() => {
+      usageChartResizeFrame = null;
+      if (document.hidden || el("#usage-panel").hidden || el("#usage-results").hidden) return;
+      for (const chart of [dailyChart, tokenChart, modelChart, doughnutChart]) {
+        const container = chart?.canvas?.parentElement;
+        if (!container) continue;
+        const { width, height } = container.getBoundingClientRect();
+        if (width <= 0 || height <= 0) continue;
+        if (
+          Math.abs(chart.width - width) > 1 || Math.abs(chart.height - height) > 1 ||
+          chart.currentDevicePixelRatio !== (window.devicePixelRatio || 1)
+        ) {
+          chart.resize();
+        }
+      }
+    });
+  });
+}
 
 function cssVar(name) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -505,7 +533,7 @@ let lastAggRender = null; // 单位切换时用当前数据即时重绘
 /**
  * 渲染结果区（卡片 / 图表 / 明细表）。
  * opts.plan = { monthlyUsd, equivalentUsd } 时显示「套餐月费 · 等价倍数」卡片，
- * equivalentUsd 为参与对比的等价费用（总览视图仅计入可定价套餐的 Cursor 账户）。
+ * equivalentUsd 为所选来源的全部等价费用，monthlyUsd 为已知账户月费之和。
  * opts.dailySources 为按日 / 按小时堆叠柱的各来源（总览按账户分段；缺省则用 agg 单列）。
  * 各模型等价费用饼图直接取合并后的 agg.models，不区分来源。
  */
@@ -521,10 +549,11 @@ function renderAggregate(agg, { showActual, metaText, plan, dailySources }) {
   el("#card-actual").hidden = !showActual;
   el("#sum-actual").textContent = showActual ? fmtUsd(agg.totalActualUsd) : "—";
   const planCard = el("#card-plan");
-  if (plan && plan.monthlyUsd != null) {
+  if (plan) {
     planCard.hidden = false;
     const ratio = plan.monthlyUsd > 0 ? plan.equivalentUsd / plan.monthlyUsd : null;
-    el("#sum-plan").textContent = `$${plan.monthlyUsd} · ${ratio != null ? `${ratio.toFixed(1)}×` : "—"}`;
+    el("#sum-plan").textContent = plan.monthlyUsd != null
+      ? `$${plan.monthlyUsd} · ${ratio != null ? `${ratio.toFixed(1)}×` : "—"}` : "—";
     el("#sum-plan").title = ratio != null ? `所选范围等价 API 费用为套餐月费的 ${ratio.toFixed(2)} 倍` : "";
   } else {
     planCard.hidden = true;
@@ -875,6 +904,8 @@ function renderDailyChart(sources) {
  *  Chart 构造中途失败时实例已注册到画布、模块变量却为 null，之后每次
  *  new Chart 都会抛「Canvas is already in use」；这里连孤儿一起清理才能重建。 */
 function destroyUsageCharts() {
+  if (usageChartResizeFrame !== null) cancelAnimationFrame(usageChartResizeFrame);
+  usageChartResizeFrame = null;
   for (const chart of [dailyChart, tokenChart, modelChart, doughnutChart]) {
     if (chart) {
       try { chart.destroy(); } catch { /* ignore */ }
@@ -911,6 +942,7 @@ function renderCharts(agg, dailySources) {
       destroyUsageCharts();
     }
   }
+  scheduleUsageChartResize();
 }
 
 /**
@@ -1189,6 +1221,10 @@ function getCachedLocal(key, home) {
   return LOCAL_SOURCES[key].getCached(scanKey(), home, key === "local" ? selectedCodexDevice() : undefined);
 }
 
+function localPlanMonthlyUsd(key) {
+  return accountsPlanMonthlyUsd(getAccounts(), LOCAL_SOURCES[key].tag);
+}
+
 /**
  * 当前跨度下拉取 Cursor 账户聚合。force 跳过本地缓存并让后端立即增量同步事件库；
  * full 强制全量重拉（仅「刷新」按钮）。
@@ -1436,7 +1472,7 @@ function renderOverviewTable() {
     return td;
   };
 
-  const totals = { tokens: 0, actual: 0, equivalent: 0, planUsd: 0, planEquiv: 0, planKnown: false };
+  const totals = { tokens: 0, actual: 0, equivalent: 0, planUsd: 0, planKnown: false };
   let hasData = false;
 
   // 一行一个来源：各 Cursor 账户（含已删除账户保留的数据）+ 本地 Codex / Claude 分析，按总 Token 降序；
@@ -1564,9 +1600,8 @@ function renderOverviewTable() {
       const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
       let ratioText = "—";
       if (agg && price > 0 && !isHourlyMode()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
-      if (agg && price != null) {
+      if (price != null) {
         totals.planUsd += price;
-        totals.planEquiv += agg.totalEquivalentUsd;
         totals.planKnown = true;
       }
       const label = accountLabel(a);
@@ -1604,9 +1639,8 @@ function renderOverviewTable() {
       const planText = planLabel ? (price != null ? `${planLabel} · $${price}` : planLabel) : "—";
       let ratioText = "—";
       if (agg && price > 0 && !isHourlyMode()) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
-      if (agg && price != null) {
+      if (price != null) {
         totals.planUsd += price;
-        totals.planEquiv += agg.totalEquivalentUsd;
         totals.planKnown = true;
       }
       sourceRow({
@@ -1651,9 +1685,14 @@ function renderOverviewTable() {
         ],
       });
     } else {
-      // 本地 Codex / Claude 分析行：无论有无对应账户都展示；本地日志无账户归属，无套餐可比
+      // 用量无法分账户：整个来源的等价费用除以同平台全部已知账户月费。
       const local = src.result;
       const localAgg = local && local.scan ? local.scan.aggregate : null;
+      const price = localPlanMonthlyUsd(src.kind);
+      if (price != null) {
+        totals.planUsd += price;
+        totals.planKnown = true;
+      }
       let localState = "—";
       let localBad = false;
       const localPending = !!local && local.state === "pending";
@@ -1674,8 +1713,9 @@ function renderOverviewTable() {
         at: local ? local.at : null,
         agg: localAgg,
         showActual: false,
-        planText: "—",
-        ratioText: "—",
+        planText: price != null ? `$${price}/月` : "—",
+        ratioText: localAgg && price > 0 && !isHourlyMode()
+          ? `${(localAgg.totalEquivalentUsd / price).toFixed(1)}×` : "—",
       });
     }
   }
@@ -1689,9 +1729,9 @@ function renderOverviewTable() {
     const timeSpacer = document.createElement("td");
     const planTd = document.createElement("td");
     planTd.textContent = totals.planKnown ? `$${totals.planUsd}/月` : "—";
-    // 合计倍数只按「套餐月费已知的 Cursor 账户」口径计算，与套餐列保持一致
+    // 未知套餐仅不计入分母，其用量仍包含在全部等价费用中。
     const totalRatio =
-      totals.planUsd > 0 && !isHourlyMode() ? `${(totals.planEquiv / totals.planUsd).toFixed(1)}×` : "—";
+      totals.planUsd > 0 && !isHourlyMode() ? `${(totals.equivalent / totals.planUsd).toFixed(1)}×` : "—";
     tr.append(
       label,
       spacer,
@@ -1717,38 +1757,37 @@ function renderOverviewMerged() {
   const cursorAccounts = active.cursorAccounts;
   const aggs = [];
   const ats = [];
-  let planUsd = 0;
-  let planEquiv = 0;
-  let planKnown = false;
+  let planUsd = null;
   let cursorCount = 0;
   let deletedCount = 0;
-  const takeCursor = (r, membership) => {
+  const takePrice = (price) => {
+    if (price != null) planUsd = (planUsd ?? 0) + price;
+  };
+  const takeCursor = (r) => {
     aggs.push(r.agg);
     if (Number.isFinite(r.at)) ats.push(r.at);
-    const price = planMonthlyUsd(membership);
-    if (price != null) {
-      planUsd += price;
-      planEquiv += r.agg.totalEquivalentUsd;
-      planKnown = true;
-    }
   };
   for (const a of cursorAccounts) {
+    takePrice(accountPlanInfo(a).monthlyUsd);
     const r = overviewResults.get(a.id);
     if (!r || !r.agg) continue;
     cursorCount += 1;
-    takeCursor(r, a.status ? a.status.membershipType : null);
+    takeCursor(r);
   }
-  // 已删除账户保留的数据：与账单表同一口径，只计入所选跨度内有用量的
+  // 与账单表同一口径：有用量或读取失败时显示；已知月费不依赖这轮读取是否成功。
   if (active.includeDeleted) {
     for (const record of deletedRecords) {
       const r = overviewResults.get(record.accountId);
-      if (!r || !hasUsage(r.agg)) continue;
+      if (!r || (r.state !== "error" && !hasUsage(r.agg))) continue;
+      takePrice(planMonthlyUsd(record.membershipType));
+      if (!r.agg) continue;
       deletedCount += 1;
-      takeCursor(r, record.membershipType || null);
+      takeCursor(r);
     }
   }
   const localNames = [];
   for (const key of active.localKeys) {
+    takePrice(localPlanMonthlyUsd(key));
     const local = overviewResults.get(key);
     const scanAgg = local && local.scan ? local.scan.aggregate : null;
     if (!scanAgg) continue;
@@ -1771,11 +1810,11 @@ function renderOverviewMerged() {
   // 单日跨度：单日费用对比套餐月费无意义，隐藏月费倍数卡片；柱图切为 24 小时分布
   const tail = isHourlyMode()
     ? hourlyTail()
-    : "倍数 = 等价费用 ÷ 套餐月费（仅计入 Cursor 账户，按「月」查看时最具参考性）";
+    : "倍数 = 全部等价费用 ÷ 已知账户套餐月费之和（按「月」查看时最具参考性）";
   const title = selection === "all" ? "全部总览" : isDeletedSelection() ? "已删除账户" : "所选来源";
   renderAggregate(merged, {
     showActual: true,
-    plan: planKnown && !isHourlyMode() ? { monthlyUsd: planUsd, equivalentUsd: planEquiv } : null,
+    plan: !isHourlyMode() ? { monthlyUsd: planUsd, equivalentUsd: merged.totalEquivalentUsd } : null,
     metaText: `${title} · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
     dailySources: collectDailySources(),
   });
@@ -1972,12 +2011,13 @@ async function loadOverview(force, seq, synchronization = null) {
 }
 
 function renderCursorAccount(account, agg, at) {
-  const price = planMonthlyUsd(account.status ? account.status.membershipType : null);
+  account = getAccounts().find((a) => a.id === account.id) || account;
+  const price = accountPlanInfo(account).monthlyUsd;
   const tail = isHourlyMode() ? hourlyTail() : "倍数 = 等价费用 ÷ 套餐月费";
   renderAggregate(agg, {
     showActual: true,
     plan:
-      price != null && !isHourlyMode()
+      !isHourlyMode()
         ? { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd }
         : null,
     metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算，实扣为 Cursor 实际计费；${tail}。`,
@@ -2012,7 +2052,8 @@ function renderLocalScan(key, scan, at) {
   const rootsText = scan.roots.length ? scan.roots.join("、") : "未找到会话目录";
   renderAggregate(scan.aggregate, {
     showActual: false,
-    plan: null,
+    plan: !isHourlyMode()
+      ? { monthlyUsd: localPlanMonthlyUsd(key), equivalentUsd: scan.aggregate.totalEquivalentUsd } : null,
     metaText: key === "local"
       ? `${src.title} · ${rangeText()} · ${el("#usage-codex-device").selectedOptions[0]?.textContent || "全部设备"} · ${scan.sessions} 个有用量会话 · 按当前价格表折算`
       : `${src.title} · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
@@ -2097,6 +2138,7 @@ async function loadCurrent(force, synchronization = null) {
       if (el("#usage-results").hidden) el("#usage-skeleton").hidden = true;
       // 记录本轮加载完成时间：失败来源不再把整页拖成永久过期（见 isRenderedFresh）
       lastAttemptAt = Date.now();
+      if (plansDirty && panelVisible) rerenderFromCache();
     }
   }
 }
@@ -2136,9 +2178,15 @@ function refreshUsage() {
       if (panelVisible) loadView(false);
     }
   });
-  const ids = isMergedView()
-    ? activeSources().cursorAccounts.map((a) => a.id)
-    : currentAccount() ? [selection] : [];
+  const active = isMergedView() ? activeSources() : {
+    cursorAccounts: currentAccount() ? [currentAccount()] : [],
+    localKeys: isLocalSelection() ? [selection] : [],
+  };
+  const kinds = new Set(active.localKeys.map((key) => LOCAL_SOURCES[key].tag));
+  const ids = [...new Set([
+    ...active.cursorAccounts.map((a) => a.id),
+    ...getAccounts().filter((a) => kinds.has(a.kind)).map((a) => a.id),
+  ])];
   if (ids.length) void refreshAccounts(ids);
   return manualRefresh;
 }
@@ -2171,22 +2219,31 @@ function applyCacheToOverview() {
  */
 function rerenderFromCache() {
   if (renderedFor !== selectionKey()) return;
+  const planChanged = plansDirty;
+  plansDirty = false;
   if (isDeletedSelection()) return; // 数据不在共享缓存里，无需重绘
   if (isMergedView()) {
     const changed = applyCacheToOverview();
     // 状态列总要落地（预取失败的来源从「更新中…」转为错误态），数据没变则不重画卡片与图表
     renderOverviewTable();
-    if (changed) renderOverviewMerged();
+    if (changed || planChanged) renderOverviewMerged();
     return;
   }
   if (isLocalSelection()) {
     const cached = getCachedLocal(selection, localHomeRaw(selection) || null);
-    if (cached && cached.at > renderedAt) renderLocalScan(selection, cached.scan, cached.at);
+    if (cached && (cached.at > renderedAt || (planChanged && cached.at === renderedAt))) {
+      renderLocalScan(selection, cached.scan, cached.at);
+    } else if (planChanged && lastAggRender) {
+      renderAggregate(lastAggRender.agg, { ...lastAggRender.opts, plan: !isHourlyMode()
+        ? { monthlyUsd: localPlanMonthlyUsd(selection), equivalentUsd: lastAggRender.agg.totalEquivalentUsd } : null });
+    }
     return;
   }
   const account = currentAccount();
   const cached = account ? getCachedAgg(account) : null;
-  if (cached && cached.at > renderedAt) renderCursorAccount(account, cached.agg, cached.at);
+  if (cached && (cached.at > renderedAt || (planChanged && cached.at === renderedAt))) {
+    renderCursorAccount(account, cached.agg, cached.at);
+  } else if (account && planChanged && lastAggRender) renderCursorAccount(account, lastAggRender.agg, renderedAt);
 }
 
 /**
@@ -2498,7 +2555,10 @@ export function initUsage() {
   }
   syncRangeControls();
   // 主窗口关闭到托盘后再打开：时间范围回到今天
-  listen("main-window-shown", () => resetRangeToToday()).catch(() => {
+  listen("main-window-shown", () => {
+    resetRangeToToday();
+    scheduleUsageChartResize();
+  }).catch(() => {
     /* 非 Tauri 环境无事件桥 */
   });
   for (const key of LOCAL_KEYS) {
@@ -2509,8 +2569,15 @@ export function initUsage() {
 
   onAccountsChanged((list) => {
     syncUsageInterval(getRefreshIntervalMinutes());
-    const sig = list.map((a) => a.id).join(",");
+    // GPT / Claude 账户增删只改变月费，不改变本地用量来源，不必作废扫描结果。
+    const sig = list.filter((a) => a.kind === "cursor").map((a) => a.id).join(",");
     const idsChanged = sig !== accountIdsSig;
+    const planSig = JSON.stringify(list.map((a) => [a.id, a.kind, accountPlanInfo(a)]));
+    if (planSig !== accountPlansSig) {
+      accountPlansSig = planSig;
+      plansDirty = true;
+      cacheDirty = true;
+    }
     if (idsChanged) {
       accountIdsSig = sig;
       // 清理已删除账户的聚合缓存（内存 + localStorage）；保留的统计数据由后端事件库承载，
@@ -2530,6 +2597,8 @@ export function initUsage() {
     for (const a of rekeyed) purgeAccountCache(a.id);
     // 账户增删 / 换凭据 / 切换统计口径时，结果区视为过期
     if (idsChanged || rekeyed.length || refiltered.length) {
+      // 旧视图不能参与缓存重绘，否则 markUpdated 会覆盖失效时间并跳过必要的加载。
+      renderedFor = "";
       renderedAt = 0;
       lastAttemptAt = 0;
     }
@@ -2554,8 +2623,9 @@ export function initUsage() {
       return;
     }
     if (!panelVisible || loading) return;
-    // 账户状态更新时同步账单表中的套餐信息
-    if (isMergedView()) renderOverviewTable();
+    // 月费独立于用量缓存时间，套餐变化也须重绘合计卡片和单来源视图。
+    if (plansDirty) rerenderFromCache();
+    else if (isMergedView()) renderOverviewTable();
     // 只有结构性变化才重新加载当前视图。状态刷新一律不走这里——否则页面恰好过期时，
     // 一个账户刷新完会把所有未过期来源一起重新统计（表现为所有行同时变「更新中…」）；
     // 刷新带来的数据更新由 prefetchUsageFor → rerenderFromCache 逐行落地。
@@ -2564,13 +2634,19 @@ export function initUsage() {
 
   window.addEventListener("panelshown", (event) => {
     panelVisible = !!(event.detail && event.detail.id === "usage-panel");
-    if (!panelVisible || loading) return;
+    if (!panelVisible) return;
+    scheduleUsageChartResize();
+    if (loading) return;
     // 隐藏期间后台预取 / 托盘写过缓存：先静默换上新数据，再按常规新鲜度决定是否重新加载
     if (cacheDirty) {
       cacheDirty = false;
       rerenderFromCache();
     }
     loadView(false);
+  });
+  window.addEventListener("resize", scheduleUsageChartResize);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleUsageChartResize();
   });
 
   // 数字单位切换后，用现有数据即时重绘结果区与总览表

@@ -32,6 +32,8 @@ pub struct ClaudeUsage {
     pub email: Option<String>,
     /// 订阅类型（free / pro / max…），接口结构漂移时可能拿不到。
     pub plan: Option<String>,
+    pub rate_limit_tier: Option<String>,
+    pub seat_tier: Option<String>,
     pub account_uuid: Option<String>,
     pub organization: Option<String>,
     pub windows: Vec<UsageWindow>,
@@ -104,17 +106,10 @@ fn collect_windows(raw: &Value) -> Vec<UsageWindow> {
     out
 }
 
-/// 从 JSON 里尽力找订阅类型字段（顶层与 account / organization 子对象）。
-fn find_plan(v: &Value) -> Option<String> {
-    const KEYS: &[&str] = &[
-        "subscription_type",
-        "subscriptionType",
-        "plan_type",
-        "planType",
-        "rate_limit_tier",
-    ];
+/// profile 的组织字段优先；套餐类型、限额与席位始终分开读取。
+fn find_subscription_text(v: &Value, keys: &[&str]) -> Option<String> {
     let pick = |o: &Value| -> Option<String> {
-        for k in KEYS {
+        for k in keys {
             if let Some(s) = o
                 .get(*k)
                 .and_then(|x| x.as_str())
@@ -126,16 +121,58 @@ fn find_plan(v: &Value) -> Option<String> {
         }
         None
     };
-    pick(v)
+    v.get("organization").and_then(&pick)
+        .or_else(|| pick(v))
         .or_else(|| v.get("account").and_then(&pick))
-        .or_else(|| v.get("organization").and_then(pick))
+}
+
+pub(crate) fn plan_family(value: &str) -> String {
+    let key = value.trim().to_ascii_lowercase();
+    match key.as_str() {
+        "default_claude_max_5x" | "default_claude_max_20x" => "max".into(),
+        _ => key.strip_prefix("claude_").unwrap_or(&key).to_string(),
+    }
+}
+
+#[derive(Default)]
+struct SubscriptionPlan {
+    plan: Option<String>,
+    rate_limit_tier: Option<String>,
+    seat_tier: Option<String>,
+}
+
+impl SubscriptionPlan {
+    fn from_json(raw: &Value) -> Self {
+        let plan = find_subscription_text(raw, &[
+            "organization_type", "organizationType", "subscription_type", "subscriptionType", "plan_type", "planType",
+        ]);
+        let legacy_tier = plan.as_deref().filter(|s| {
+            matches!(*s, "default_claude_max_5x" | "default_claude_max_20x")
+        }).map(str::to_string);
+        Self {
+            plan: plan.as_deref().map(plan_family),
+            rate_limit_tier: find_subscription_text(raw, &["rate_limit_tier", "rateLimitTier"]).or(legacy_tier),
+            seat_tier: find_subscription_text(raw, &["seat_tier", "seatTier"]),
+        }
+    }
+
+    fn apply_profile(&mut self, fresh: Self) {
+        if fresh.plan.is_some() && fresh.plan != self.plan {
+            // 套餐类型变化时不能拼上旧类型的限额或席位。
+            *self = fresh;
+        } else {
+            self.plan = fresh.plan.or(self.plan.take());
+            self.rate_limit_tier = fresh.rate_limit_tier.or(self.rate_limit_tier.take());
+            self.seat_tier = fresh.seat_tier.or(self.seat_tier.take());
+        }
+    }
 }
 
 struct ProfileInfo {
     email: Option<String>,
     account_uuid: Option<String>,
     organization: Option<String>,
-    plan: Option<String>,
+    subscription: SubscriptionPlan,
 }
 
 /// 拉取账户身份（邮箱 / 组织）。失败不影响主流程。
@@ -144,6 +181,7 @@ async fn fetch_profile(access_token: &str) -> Option<ProfileInfo> {
         .get(PROFILE_URL)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json, text/plain, */*")
+        .header("anthropic-beta", OAUTH_BETA)
         .header("User-Agent", claude_oauth::OAUTH_UA)
         .send()
         .await
@@ -163,7 +201,7 @@ async fn fetch_profile(access_token: &str) -> Option<ProfileInfo> {
         email: text("/account/email").or_else(|| text("/account/email_address")),
         account_uuid: text("/account/uuid"),
         organization: text("/organization/name"),
-        plan: find_plan(&raw),
+        subscription: SubscriptionPlan::from_json(&raw),
     })
 }
 
@@ -191,6 +229,8 @@ pub async fn claude_usage(access_token: String) -> Result<ClaudeUsage, String> {
             alive: false,
             email: None,
             plan: None,
+            rate_limit_tier: None,
+            seat_tier: None,
             account_uuid: None,
             organization: None,
             windows: vec![],
@@ -204,7 +244,7 @@ pub async fn claude_usage(access_token: String) -> Result<ClaudeUsage, String> {
 
     let raw: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let windows = collect_windows(&raw);
-    let mut plan = find_plan(&raw);
+    let mut subscription = SubscriptionPlan::from_json(&raw);
     let mut email = None;
     let mut account_uuid = None;
     let mut organization = None;
@@ -212,15 +252,15 @@ pub async fn claude_usage(access_token: String) -> Result<ClaudeUsage, String> {
         email = p.email;
         account_uuid = p.account_uuid;
         organization = p.organization;
-        if plan.is_none() {
-            plan = p.plan;
-        }
+        subscription.apply_profile(p.subscription);
     }
 
     Ok(ClaudeUsage {
         alive: true,
         email,
-        plan,
+        plan: subscription.plan,
+        rate_limit_tier: subscription.rate_limit_tier,
+        seat_tier: subscription.seat_tier,
         account_uuid,
         organization,
         windows,

@@ -14,9 +14,14 @@ const MEMBERSHIP_LABELS = {
 
 // Codex 套餐名映射（chatgpt_plan_type -> 展示名），未知值原样显示
 const CODEX_PLAN_LABELS = {
+  go: "Go",
   plus: "Plus",
-  pro: "Pro",
+  prolite: "Pro（$100）",
+  pro: "Pro（$200）",
+  promax: "Pro（$500）",
   team: "Team",
+  business_standard: "Business Standard",
+  self_serve_business_prolite: "Business Premium",
   enterprise: "Enterprise",
   business: "Business",
   free: "Free",
@@ -28,6 +33,7 @@ const CLAUDE_PLAN_LABELS = {
   free: "Free",
   pro: "Pro",
   max: "Max",
+  ultra: "Ultra",
   team: "Team",
   enterprise: "Enterprise",
 };
@@ -41,6 +47,76 @@ const CURSOR_PLAN_USD = {
   business: 40,
   team: 40,
 };
+
+// 美元月付标价；不按剩余天数、年付折扣或税费折算。Business 裸值无法确定席位档位。
+const CODEX_PLAN_USD = {
+  free: 0, go: 8, plus: 20, prolite: 100, pro: 200, promax: 500,
+  team: 25, business_standard: 25, self_serve_business_prolite: 125,
+};
+const CLAUDE_PLAN_USD = { free: 0, pro: 20, ultra: 200 };
+const CLAUDE_MAX_TIERS = { default_claude_max_5x: 100, default_claude_max_20x: 200 };
+const CLAUDE_TEAM_SEATS = { team_standard: 25, team_premium: 125 };
+
+function planKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function knownPrice(prices, key) {
+  return Object.hasOwn(prices, key) ? prices[key] : null;
+}
+
+function codexPlanInfo(value) {
+  const raw = planKey(value);
+  const key = ["pro_lite", "pro-lite", "pro lite"].includes(raw) ? "prolite" : raw;
+  return {
+    label: Object.hasOwn(CODEX_PLAN_LABELS, key) ? CODEX_PLAN_LABELS[key] : key ? String(value) : "",
+    monthlyUsd: knownPrice(CODEX_PLAN_USD, key),
+  };
+}
+
+function claudePlanInfo(value, rateLimitTier, seatTier) {
+  const raw = planKey(value);
+  // 老版本曾把 rate_limit_tier 放进 plan，保留 Max 两档的兼容读取。
+  const legacyTier = Object.hasOwn(CLAUDE_MAX_TIERS, raw) ? raw : "";
+  const key = legacyTier ? "max" : raw.replace(/^claude_/, "");
+  const tier = planKey(rateLimitTier) || legacyTier;
+  const seat = planKey(seatTier);
+  if (key === "max" && Object.hasOwn(CLAUDE_MAX_TIERS, tier)) {
+    return { label: tier.endsWith("_20x") ? "Max 20x" : "Max 5x", monthlyUsd: CLAUDE_MAX_TIERS[tier] };
+  }
+  // Team 可能使用与个人 Max 相同的限额档位，价格只能按明确的席位类型判断。
+  if (key === "team" && Object.hasOwn(CLAUDE_TEAM_SEATS, seat)) {
+    return { label: seat === "team_premium" ? "Team Premium" : "Team Standard", monthlyUsd: CLAUDE_TEAM_SEATS[seat] };
+  }
+  return {
+    label: Object.hasOwn(CLAUDE_PLAN_LABELS, key) ? CLAUDE_PLAN_LABELS[key] : key ? String(value) : "",
+    monthlyUsd: knownPrice(CLAUDE_PLAN_USD, key),
+  };
+}
+
+/** 账户套餐的统一展示名与月费；未知价格为 null，免费套餐为 0。 */
+export function accountPlanInfo(account) {
+  const status = account?.status || {};
+  if (account?.kind === "codex") return codexPlanInfo(status.plan);
+  if (account?.kind === "claude") return claudePlanInfo(status.plan, status.rateLimitTier, status.seatTier);
+  if (account?.kind === "cursor") {
+    return { label: membershipLabel(status.membershipType), monthlyUsd: planMonthlyUsd(status.membershipType) };
+  }
+  return { label: "", monthlyUsd: null };
+}
+
+/** 同平台已添加账户的已知月费之和。无已知套餐返回 null，设备数不参与计数。 */
+export function accountsPlanMonthlyUsd(accounts, kind) {
+  let total = null;
+  const seen = new Set();
+  for (const account of accounts) {
+    if (account.kind !== kind || seen.has(account.id)) continue;
+    seen.add(account.id);
+    const price = accountPlanInfo(account).monthlyUsd;
+    if (price != null) total = (total ?? 0) + price;
+  }
+  return total;
+}
 
 /** Cursor 套餐月费（USD/月）；未知套餐返回 null。 */
 export function planMonthlyUsd(membershipType) {
@@ -64,18 +140,6 @@ export function membershipLabel(value) {
   const key = String(value ?? "").toLowerCase();
   if (!key) return "";
   return MEMBERSHIP_LABELS[key] || String(value);
-}
-
-export function codexPlanLabel(value) {
-  const key = String(value ?? "").trim().toLowerCase();
-  if (!key) return "";
-  return CODEX_PLAN_LABELS[key] || String(value);
-}
-
-export function claudePlanLabel(value) {
-  const key = String(value ?? "").trim().toLowerCase();
-  if (!key) return "";
-  return CLAUDE_PLAN_LABELS[key] || String(value);
 }
 
 /**

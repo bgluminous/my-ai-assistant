@@ -133,6 +133,12 @@
   再次同步时可能重新获取。开关随账户保存和导入导出，主窗口与托盘同步生效。
 - **单个 Cursor 账户**：按时间范围切片，按模型聚合输入 / 输出 / 缓存读 / 缓存写 token，
   同时给出实扣金额与等价费用。
+- **套餐月费与倍数**：Cursor 按所选账户计价；ChatGPT、Claude 各自汇总所有已添加账户
+  的已知月费，每个账户计一次。倍数为所选来源全部等价 API 费用除以已知月费之和，
+  未识别套餐只不计入分母，用量仍保留在分子。月费为零或全未知时倍数显示 `—`，
+  不超过两天的范围隐藏倍数卡片。按美元月付标价计算，不按剩余天数、年付折扣或税费折算。
+  ChatGPT 区分 Pro $100 / $200 / $500；Claude 区分 Pro、Max 5x / 20x、Ultra
+  及明确的 Team 席位。套餐自动识别，未知档位不猜价格；设备筛选只改变用量，不重复计月费。
 - **原始账单**：单账户视图工具栏与「各来源账单」表的行内按钮可打开该账户在当前时间范围内的
   逐笔用量事件（Cursor 上报的原始模型名、四类 token、官方实扣，以及当前价格表下的归一名 / 命中
   价格键 / 等价费用），数据来自本机事件库不联网；支持按模型名筛选、导出 CSV（UTF-8 BOM）。
@@ -307,15 +313,15 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 
 ## 价格表
 
-- 内置默认表：`src-tauri/resources/pricing.default.json`，共 124 项。
-  本批 23 项补充与 DeepSeek Flash 修正按 2026-10-23 核实的数据收录，
+- 内置默认表 `src-tauri/resources/pricing.default.json` 共 127 项。
+  2026-10-23 核价时修正了 DeepSeek Flash，并补充了 23 项，
   包括 Sonnet / Haiku 5.5、GPT-5.1、GPT-4.1 Nano、Chat Latest、Gemini 4 Argon、
   Gemini Flash-Lite、Grok 4.7、GLM、MiniMax 和 Mistral / Codestral。
 - 单价单位为美元 / 每百万 token，沿用官方 API 标准档、短上下文价，
   字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
   `cacheWrite=0` 表示未收录单独按 token 计的写入费用，
   不代表缓存存储、TTL 等附加费用全部免费。
-- 本批已收录条目的官方来源：
+- 各厂商的官方定价见
   [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing)、
   [OpenAI](https://developers.openai.com/api/docs/pricing)、
   [Google](https://ai.google.dev/gemini-api/docs/pricing)、
@@ -335,6 +341,9 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 - GPT-6 Sol、GPT-6 Luna、GPT-6.1 Sol 的标准与 Fast 价格于 2026-10-15 核对。
   GPT-6.1 Sol 的缓存读取价为 $0.10 / 百万 token，GPT-6 Sol 为 $0.20；
   Fast 档的四类单价均为标准档的 2 倍，长上下文加价仍未纳入折算。
+- 2026-11-02 收录 GPT-6.1 Terra 和 GPT-6 Rosalind。每百万 token 的输入、输出、
+  缓存读、30 分钟缓存写单价，Terra 依次为 $1、$5、$0.05、$1.25，Fast 档四项翻倍。
+  Rosalind 标准档依次为 $15、$75、$1.50、$18.75。两者均按短上下文折算。
 - 覆盖顺序为内置表 → 在线缓存 → 用户自定义；只把与基础层不同的用户改价保存到
   `settings.json` 的 `pricing` 字段。在线检查后由用户手动应用，失败保留缓存和自定义价格。
 - 默认在线来源为公共仓库的

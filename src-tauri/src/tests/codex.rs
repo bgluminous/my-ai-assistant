@@ -4,6 +4,23 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn online_plan_overrides_stale_jwt_without_collapsing_pro_tiers() {
+    for plan in ["prolite", "pro", "promax", "unknown_future_plan"] {
+        let (resolved, online) = resolve_plan(&json!({ "plan_type": plan }), Some("plus".into()), Some("free".into()));
+        assert_eq!(resolved.as_deref(), Some(plan));
+        assert!(online);
+    }
+    let (resolved, online) = resolve_plan(&json!({ "planType": " prolite " }), None, Some("pro".into()));
+    assert_eq!(resolved.as_deref(), Some("prolite"));
+    assert!(online);
+    let (resolved, online) = resolve_plan(&json!({ "plan_type": " " }), Some("pro".into()), Some("plus".into()));
+    assert_eq!(resolved.as_deref(), Some("pro"));
+    assert!(online);
+    assert_eq!(resolve_plan(&Value::Null, None, Some("plus".into())), (Some("plus".into()), false));
+    assert_eq!(resolve_plan(&Value::Null, None, None), (None, false));
+}
+
 // ---------------------------------------------------------------------------
 // 会话日志去重：同一谱系内累计计数器相同的记录只计一次
 // ---------------------------------------------------------------------------

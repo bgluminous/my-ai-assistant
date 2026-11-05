@@ -2,6 +2,43 @@
 //! 本机 Claude Code 会话日志的去重口径与会话 id 解析。
 
 use super::*;
+use serde_json::json;
+
+#[test]
+fn profile_distinguishes_plan_family_limit_tier_and_seat() {
+    for tier in ["default_claude_max_5x", "default_claude_max_20x"] {
+        let plan = SubscriptionPlan::from_json(&json!({
+            "subscription_type": "pro",
+            "organization": { "organization_type": "claude_max", "rate_limit_tier": tier }
+        }));
+        assert_eq!(plan.plan.as_deref(), Some("max"));
+        assert_eq!(plan.rate_limit_tier.as_deref(), Some(tier));
+        assert!(plan.seat_tier.is_none());
+    }
+    let team = SubscriptionPlan::from_json(&json!({ "organization": {
+        "organization_type": "claude_team", "rate_limit_tier": "default_claude_max_5x", "seat_tier": "team_premium"
+    }}));
+    assert_eq!(team.plan.as_deref(), Some("team"));
+    assert_eq!(team.seat_tier.as_deref(), Some("team_premium"));
+    // 没有套餐类型时，不把组织限额猜成个人 Max。
+    let partial = SubscriptionPlan::from_json(&json!({ "rate_limit_tier": "default_claude_max_5x" }));
+    assert!(partial.plan.is_none());
+}
+
+#[test]
+fn live_profile_updates_tier_and_clears_incompatible_old_fields() {
+    let mut plan = SubscriptionPlan::from_json(&json!({ "subscriptionType": "max", "rateLimitTier": "default_claude_max_5x" }));
+    plan.apply_profile(SubscriptionPlan::from_json(&json!({ "organization": {
+        "organization_type": "claude_max", "rate_limit_tier": "default_claude_max_20x"
+    }})));
+    assert_eq!(plan.rate_limit_tier.as_deref(), Some("default_claude_max_20x"));
+    plan.apply_profile(SubscriptionPlan::from_json(&json!({ "organization": { "organization_type": "claude_team" } })));
+    assert_eq!(plan.plan.as_deref(), Some("team"));
+    assert!(plan.rate_limit_tier.is_none());
+    assert!(plan.seat_tier.is_none());
+    plan.apply_profile(SubscriptionPlan::default());
+    assert_eq!(plan.plan.as_deref(), Some("team"));
+}
 
 fn cr(
     session: &str,

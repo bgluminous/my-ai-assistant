@@ -49,6 +49,9 @@ pub struct CodexUsage {
     pub alive: bool,
     pub email: Option<String>,
     pub plan: Option<String>,
+    /// 仅供账户刷新判断是否可用缓存替代 JWT，不写入账户状态。
+    #[serde(skip)]
+    pub plan_from_api: bool,
     /// 套餐订阅生效时间（RFC3339）。优先 subscriptions.active_start，否则 JWT。
     pub plan_active_start: Option<String>,
     /// 套餐订阅到期时间（RFC3339）。优先 subscriptions.active_until，否则 JWT。
@@ -205,6 +208,20 @@ struct SubscriptionInfo {
     will_renew: Option<bool>,
 }
 
+fn api_plan(raw: &Value) -> Option<String> {
+    ["plan_type", "planType"].iter().find_map(|key| {
+        raw.get(*key).and_then(Value::as_str).map(str::trim)
+            .filter(|s| !s.is_empty()).map(str::to_string)
+    })
+}
+
+/// 在线用量 > 在线订阅 > JWT；保留 pro / prolite / promax 的原始档位。
+fn resolve_plan(raw: &Value, subscription: Option<String>, jwt: Option<String>) -> (Option<String>, bool) {
+    let online = api_plan(raw).or(subscription);
+    let from_api = online.is_some();
+    (online.or(jwt), from_api)
+}
+
 /// 拉取 ChatGPT 订阅信息。失败不影响主流程（JWT 兜底）。
 async fn fetch_subscription(jwt: &str, account_id: &str) -> Option<SubscriptionInfo> {
     let resp = http::client()
@@ -223,13 +240,7 @@ async fn fetch_subscription(jwt: &str, account_id: &str) -> Option<SubscriptionI
     }
     let raw: Value = resp.json().await.ok()?;
     Some(SubscriptionInfo {
-        plan_type: raw
-            .get("plan_type")
-            .or_else(|| raw.get("planType"))
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        plan_type: api_plan(&raw),
         active_start: json_date(&raw, &["active_start", "activeStart"]),
         active_until: json_date(&raw, &["active_until", "activeUntil"]),
         will_renew: raw
@@ -300,7 +311,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         .and_then(|a| a.get("chatgpt_account_id"))
         .and_then(|x| x.as_str())
         .map(str::to_string);
-    let mut plan = auth
+    let plan = auth
         .and_then(|a| a.get("chatgpt_plan_type"))
         .and_then(|x| x.as_str())
         .map(str::to_string);
@@ -345,6 +356,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
             alive: false,
             email,
             plan,
+            plan_from_api: false,
             plan_active_start,
             plan_active_until,
             plan_will_renew,
@@ -360,12 +372,15 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         });
     }
 
+    if !status.is_success() {
+        return Err(format!("usage_http_{}", status.as_u16()));
+    }
+
     // 用量接口成功后再拉订阅：access_token JWT 通常不含到期日，以此为准覆盖 JWT 兜底。
+    let mut subscription_plan = None;
     if let Some(acc) = &account_id {
         if let Some(sub) = fetch_subscription(&jwt, acc).await {
-            if plan.is_none() {
-                plan = sub.plan_type;
-            }
+            subscription_plan = sub.plan_type;
             if sub.active_start.is_some() {
                 plan_active_start = sub.active_start;
             }
@@ -377,6 +392,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
     }
 
     let raw: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let (plan, plan_from_api) = resolve_plan(&raw, subscription_plan, plan);
     let mut windows = windows_from_rate_limit(&raw);
     if windows.is_empty() {
         // 老结构 / 结构漂移兜底：递归收集后按窗口时长去重
@@ -415,6 +431,7 @@ pub async fn codex_usage(jwt: String) -> Result<CodexUsage, String> {
         alive: status.is_success(),
         email,
         plan,
+        plan_from_api,
         plan_active_start,
         plan_active_until,
         plan_will_renew,

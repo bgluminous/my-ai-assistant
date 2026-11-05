@@ -875,7 +875,7 @@ pub(crate) fn persist_tokens(
 }
 
 /// 刷新结束：写入状态摘要与刷新时间并落盘，返回最新账户。
-fn finish(app: &AppHandle, id: &str, status: Value) -> Result<Account, String> {
+fn finish(app: &AppHandle, id: &str, mut status: Value) -> Result<Account, String> {
     let now = Utc::now().timestamp();
     let data = mutate(app, move |d| {
         let acc = d
@@ -883,6 +883,7 @@ fn finish(app: &AppHandle, id: &str, status: Value) -> Result<Account, String> {
             .iter_mut()
             .find(|a| a.id == id)
             .ok_or_else(|| "not_found".to_string())?;
+        carry_subscription_profile(&acc.kind, &mut status, acc.status.as_ref(), false);
         acc.status = Some(status);
         acc.last_refresh_at = Some(now);
         Ok(())
@@ -941,6 +942,51 @@ fn carry_cursor_profile(status: &mut Value, prev: Option<&Value>) {
         if let Some(value) = json_str_at(prev, &pointer) {
             if let Some(obj) = status.as_object_mut() {
                 obj.insert(key.to_string(), Value::String(value));
+            }
+        }
+    }
+}
+
+/// 请求失败或在线套餐缺失时保留已知套餐；新类型绝不沿用旧类型的限额 / 席位。
+fn carry_subscription_profile(kind: &str, status: &mut Value, prev: Option<&Value>, prefer_cached: bool) {
+    let identity = match kind {
+        "codex" => "/accountId",
+        "claude" => "/accountUuid",
+        _ => return,
+    };
+    let Some(prev) = prev else { return };
+    if let (Some(a), Some(b)) = (json_str_at(status, identity), json_str_at(prev, identity)) {
+        if a != b { return; }
+    }
+    let old_plan = json_str_at(prev, "/plan");
+    let new_plan = json_str_at(status, "/plan");
+    let use_cached = prefer_cached || status.get("alive").and_then(Value::as_bool) == Some(false);
+    let same_family = new_plan.is_none() || use_cached || match (&old_plan, &new_plan) {
+        (Some(old), Some(new)) if kind == "claude" => claude::plan_family(old) == claude::plan_family(new),
+        (Some(old), Some(new)) => old.eq_ignore_ascii_case(new),
+        _ => false,
+    };
+    let Some(obj) = status.as_object_mut() else { return };
+    if new_plan.is_none() || use_cached {
+        if let Some(plan) = old_plan.as_ref() {
+            obj.insert("plan".into(), json!(plan));
+        }
+    }
+    if !same_family { return; }
+    let fields: &[&str] = if kind == "claude" {
+        &["rateLimitTier", "seatTier"]
+    } else {
+        &["planActiveStart", "planActiveUntil", "planWillRenew"]
+    };
+    for key in fields {
+        if obj.get(*key).is_none_or(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())) {
+            if let Some(value) = prev.get(*key).filter(|v| !v.is_null()) {
+                obj.insert((*key).into(), value.clone());
+            } else if *key == "rateLimitTier" {
+                // 旧状态曾只把档位写在 plan。
+                if let Some(plan @ ("default_claude_max_5x" | "default_claude_max_20x")) = old_plan.as_deref() {
+                    obj.insert((*key).into(), json!(plan));
+                }
             }
         }
     }
@@ -1343,7 +1389,8 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
         }
     }
 
-    let status = to_status(&usage)?;
+    let mut status = to_status(&usage)?;
+    carry_subscription_profile("codex", &mut status, snap.status.as_ref(), !usage.plan_from_api);
     finish(app, id, status)
 }
 

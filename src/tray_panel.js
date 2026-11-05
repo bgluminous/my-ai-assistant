@@ -1,5 +1,5 @@
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { membershipLabel, codexPlanLabel, claudePlanLabel, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
+import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
 import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
@@ -341,11 +341,7 @@ function accountRow(account) {
   const sub = document.createElement("div");
   sub.className = "tray-sub";
   const status = account.status || null;
-  const plan = account.kind === "codex"
-    ? codexPlanLabel(status && status.plan)
-    : account.kind === "claude"
-    ? claudePlanLabel(status && status.plan)
-    : membershipLabel(status && status.membershipType);
+  const plan = accountPlanInfo(account).label;
   const parts = [];
   if (plan) parts.push(plan);
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；

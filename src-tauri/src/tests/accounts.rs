@@ -3,6 +3,52 @@
 use super::*;
 
 #[test]
+fn subscription_refresh_keeps_cached_plan_on_failure_but_online_values_win() {
+    let prev = json!({ "accountId": "same", "plan": "prolite", "planActiveUntil": "2026-12-01" });
+    let mut stale_jwt = json!({ "accountId": "same", "alive": true, "plan": "plus" });
+    carry_subscription_profile("codex", &mut stale_jwt, Some(&prev), true);
+    assert_eq!(stale_jwt["plan"], "prolite");
+    let mut fresh = json!({ "accountId": "same", "alive": true, "plan": "promax" });
+    carry_subscription_profile("codex", &mut fresh, Some(&prev), false);
+    assert_eq!(fresh["plan"], "promax");
+    assert!(fresh.get("planActiveUntil").is_none());
+    let mut denied = json!({ "alive": false, "refreshError": "expired" });
+    carry_subscription_profile("codex", &mut denied, Some(&prev), false);
+    assert_eq!(denied["plan"], "prolite");
+    assert_eq!(denied["alive"], false);
+    let mut another = json!({ "accountId": "other", "plan": "plus" });
+    carry_subscription_profile("codex", &mut another, Some(&prev), true);
+    assert_eq!(another["plan"], "plus");
+}
+
+#[test]
+fn claude_cached_metadata_respects_family_changes_and_legacy_tiers() {
+    let prev = json!({ "accountUuid": "same", "plan": "max", "rateLimitTier": "default_claude_max_20x" });
+    let mut failed = json!({ "alive": false, "plan": null, "rateLimitTier": null });
+    carry_subscription_profile("claude", &mut failed, Some(&prev), false);
+    assert_eq!(failed["plan"], "max");
+    assert_eq!(failed["rateLimitTier"], "default_claude_max_20x");
+    let mut same = json!({ "alive": true, "plan": "claude_max" });
+    carry_subscription_profile("claude", &mut same, Some(&prev), false);
+    assert_eq!(same["rateLimitTier"], "default_claude_max_20x");
+    for new_plan in ["pro", "team", "future_plan"] {
+        let mut fresh = json!({ "alive": true, "plan": new_plan });
+        carry_subscription_profile("claude", &mut fresh, Some(&prev), false);
+        assert_eq!(fresh["plan"], new_plan);
+        assert!(fresh.get("rateLimitTier").is_none());
+    }
+    let mut upgraded = json!({ "alive": true, "plan": "max", "rateLimitTier": "future_tier" });
+    carry_subscription_profile("claude", &mut upgraded, Some(&prev), false);
+    assert_eq!(upgraded["rateLimitTier"], "future_tier");
+    let mut legacy = json!({ "alive": true, "plan": "max" });
+    carry_subscription_profile("claude", &mut legacy, Some(&json!({ "plan": "default_claude_max_5x" })), false);
+    assert_eq!(legacy["rateLimitTier"], "default_claude_max_5x");
+    let mut empty = json!({ "alive": false });
+    carry_subscription_profile("claude", &mut empty, None, false);
+    assert!(empty.get("plan").is_none());
+}
+
+#[test]
 fn cursor_api_filter_defaults_off_and_survives_serialization() {
     let mut account: Account = serde_json::from_value(json!({
         "id": "acc-test", "kind": "cursor", "token": "fixture"

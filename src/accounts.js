@@ -14,9 +14,7 @@ import {
   maskToken,
   relativeFromMs,
   relativeFromUnixSeconds,
-  membershipLabel,
-  codexPlanLabel,
-  claudePlanLabel,
+  accountPlanInfo,
   remainInfo,
   centsText,
   usdText,
@@ -186,13 +184,7 @@ function expiryNode(endMs) {
  */
 function fillPlanCell(cell, account) {
   const status = account.status || null;
-  const label = !status
-    ? ""
-    : account.kind === "codex"
-    ? codexPlanLabel(status.plan)
-    : account.kind === "claude"
-    ? claudePlanLabel(status.plan)
-    : membershipLabel(status.membershipType);
+  const label = accountPlanInfo(account).label;
   const name = document.createElement("div");
   name.textContent = label || "—";
   cell.append(name);
