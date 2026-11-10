@@ -33,7 +33,6 @@ import {
   updateDeletedUsageAccount,
   setDeletedUsageMembership,
   fetchCodexScan,
-  fetchSyncedCodexScan,
   syncCodexUsage,
   fetchClaudeScan,
   purgeAccountCache,
@@ -1409,11 +1408,9 @@ function scanParams(home, force) {
   };
 }
 
-function fetchLocal(key, home, force, synchronization = null) {
+function fetchLocal(key, home, force) {
   const options = { ...scanParams(home, force), ...(key === "local" ? { deviceId: selectedCodexDevice() } : {}) };
-  return key === "local" && synchronization
-    ? fetchSyncedCodexScan(options, synchronization)
-    : LOCAL_SOURCES[key].fetch(options);
+  return LOCAL_SOURCES[key].fetch(options);
 }
 
 /** 合并多个账户的聚合结果（同模型逐项累加）。 */
@@ -1873,7 +1870,7 @@ function deletedFailedCount() {
  * 合并视图加载：全部总览 / 多选子集 / 仅已删除账户共用。参与来源由 activeSources 决定，
  * 每个来源完成后立即合并重绘；「已删除」是整体项，包含全部已删除账户保留的数据。
  */
-async function loadOverview(force, seq, synchronization = null) {
+async function loadOverview(force, seq) {
   const startKey = selectionKey();
   const { cursorAccounts, localKeys, includeDeleted } = activeSources();
   el("#usage-overview").hidden = false;
@@ -1900,7 +1897,7 @@ async function loadOverview(force, seq, synchronization = null) {
     const prev = previous.get(key);
     const scan = (cachedEntry && cachedEntry.scan) || (prev && prev.scan) || null;
     const at = cachedEntry ? cachedEntry.at : prev && prev.at;
-    const fresh = !force && !!cachedEntry && Date.now() - cachedEntry.at < ttl;
+    const fresh = !force && !!cachedEntry && !cachedEntry.stale && Date.now() - cachedEntry.at < ttl;
     overviewResults.set(key, { state: fresh ? "ok" : "pending", scan, at });
   }
   renderOverviewTable();
@@ -1922,13 +1919,14 @@ async function loadOverview(force, seq, synchronization = null) {
   // 2) 本地 Codex / Claude 扫描与各 Cursor 账户并行拉取，每个来源完成后立即合并重绘
   //   （有效期内的来源在 usage_data 中直接命中缓存，不会走网络）
   const scanJobs = localKeys.map((key) =>
-    fetchLocal(key, null, force, synchronization)
+    fetchLocal(key, null, force)
       .then((entry) => {
         if (seq !== loadSeq) return;
         overviewResults.set(key, { state: "ok", scan: entry.scan, at: entry.at });
       })
       .catch((error) => {
         if (seq !== loadSeq) return;
+        if (String(error).includes("sync_cancelled")) return;
         const prev = overviewResults.get(key) || {};
         const fallback = error && error.usageCache;
         overviewResults.set(key, {
@@ -2072,7 +2070,7 @@ function renderLocalScan(key, scan, at) {
   }
 }
 
-async function loadLocalScan(key, force, seq, synchronization = null) {
+async function loadLocalScan(key, force, seq) {
   const home = localHomeRaw(key) || null;
   // 先渲染缓存（含过期缓存），再后台重新扫描（进度不弹 toast，见骨架屏与「更新中…」）
   const cached = getCachedLocal(key, home);
@@ -2080,12 +2078,13 @@ async function loadLocalScan(key, force, seq, synchronization = null) {
   const btn = el(LOCAL_SOURCES[key].scanBtn);
   btn.disabled = true;
   try {
-    const entry = await fetchLocal(key, home, force, synchronization);
+    const entry = await fetchLocal(key, home, force);
     if (seq !== loadSeq) return;
     clearStatus();
     renderLocalScan(key, entry.scan, entry.at);
   } catch (error) {
     if (seq !== loadSeq) return;
+    if (String(error).includes("sync_cancelled")) return;
     const fallback = (error && error.usageCache) || cached;
     if (fallback && fallback.scan) renderLocalScan(key, fallback.scan, fallback.at);
     setStatus("bad", fallback ? `扫描失败（仍显示上次数据）：${resetError(error)}` : `扫描失败：${resetError(error)}`);
@@ -2094,7 +2093,7 @@ async function loadLocalScan(key, force, seq, synchronization = null) {
   }
 }
 
-async function loadCurrent(force, synchronization = null) {
+async function loadCurrent(force) {
   // 结果区仍展示着当前选择且未过期时无需重载。
   // 此判断必须在递增 loadSeq 之前：否则一次「无操作」的调用（如重复点击当前 chip）
   // 会作废在途加载却不开启新加载——lanes 提前退出、loading 永远无法复位，
@@ -2107,23 +2106,19 @@ async function loadCurrent(force, synchronization = null) {
   setLoadingHint(true);
   try {
     if (isMergedView()) {
-      await loadOverview(force, seq, synchronization);
+      await loadOverview(force, seq);
     } else if (isLocalSelection()) {
-      await loadLocalScan(selection, force, seq, synchronization);
+      await loadLocalScan(selection, force, seq);
     } else {
       const account = currentAccount();
       if (!account) {
         selectedKeys.clear();
         rebuildChips();
         applyVisibility();
-        await loadOverview(force, seq, synchronization);
+        await loadOverview(force, seq);
       } else {
         await loadCursorAccount(account, force, seq);
       }
-    }
-    if (synchronization) {
-      const { error } = await synchronization;
-      if (error && seq === loadSeq) setStatus("warn", `GPT 用量同步失败：${syncError(error)}`);
     }
   } catch (error) {
     // 统计编排本身异常（各来源的拉取失败已在内部消化）——必须可见，
@@ -2155,8 +2150,8 @@ function setLoadingHint(on) {
  * 走完后结果区仍隐藏说明新视图 / 新跨度无任何缓存，露出骨架占位并提示「统计中…」；
  * 已有旧数据在展示则提示「更新中…」。首个结果渲染（renderAggregate）时骨架自动隐藏。
  */
-function loadView(force, synchronization = null) {
-  const done = loadCurrent(!!force, synchronization);
+function loadView(force) {
+  const done = loadCurrent(!!force);
   const nothingShown = el("#usage-results").hidden;
   el("#usage-skeleton").hidden = !nothingShown;
   el("#usage-loading-text").textContent = nothingShown ? "统计中…" : "更新中…";
@@ -2164,14 +2159,12 @@ function loadView(force, synchronization = null) {
 }
 
 let manualRefresh = null;
-let manualSyncPending = false;
 function refreshUsage() {
   if (manualRefresh) return manualRefresh;
   const initialSelection = selectionKey();
-  // 与所选来源无关；Codex 查询等待这轮同步，Cursor / Claude 立即并行刷新。
-  manualSyncPending = true;
-  const synchronization = syncCodexUsage("manual").finally(() => { manualSyncPending = false; });
-  manualRefresh = loadView(true, synchronization).finally(() => {
+  // 同步独立于当前来源和图表加载，状态由同步进度组件展示。
+  void syncCodexUsage("manual");
+  manualRefresh = loadView(true).finally(() => {
     manualRefresh = null;
     if (initialSelection !== selectionKey()) {
       renderedFor = "";
@@ -2189,6 +2182,55 @@ function refreshUsage() {
   ])];
   if (ids.length) void refreshAccounts(ids);
   return manualRefresh;
+}
+
+let codexReloadRequested = 0;
+let codexReloadTask = null;
+
+/** 本机入库 / 同步完成只更新 GPT，保留其它来源正在进行的加载与已显示的数据。 */
+function reloadCodexView() {
+  // 读取期间窗口可能被隐藏；再次显示时也必须合并这次写入的缓存。
+  cacheDirty = true;
+  codexReloadRequested += 1;
+  if (codexReloadTask) return codexReloadTask;
+  codexReloadTask = Promise.resolve().then(async () => {
+    let handled;
+    do {
+      handled = codexReloadRequested;
+      const merged = isMergedView();
+      if (merged ? !activeSources().localKeys.includes("local") : selection !== "local") return;
+      if (!panelVisible) {
+        cacheDirty = true;
+        renderedAt = 0;
+        lastAttemptAt = 0;
+        renderedFor = "";
+        return;
+      }
+      const seq = loadSeq;
+      const view = selectionKey();
+      const current = () => panelVisible && seq === loadSeq && view === selectionKey() && handled === codexReloadRequested;
+      try {
+        const entry = await fetchCodexScan({
+          ...scanParams(merged ? null : localHomeRaw("local"), true),
+          deviceId: selectedCodexDevice(), archiveOnly: true,
+        });
+        if (!current()) continue;
+        if (merged) {
+          overviewResults.set("local", { state: "ok", scan: entry.scan, at: entry.at });
+          renderOverviewTable();
+          renderOverviewMerged();
+        } else renderLocalScan("local", entry.scan, entry.at);
+      } catch (error) {
+        if (!current() || String(error).includes("sync_cancelled")) continue;
+        if (merged) {
+          const previous = overviewResults.get("local") || {};
+          overviewResults.set("local", { ...previous, state: "error", error: resetError(error) });
+          renderOverviewTable();
+        } else setStatus("warn", `读取 GPT 用量失败（保留已显示数据）：${resetError(error)}`);
+      }
+    } while (handled !== codexReloadRequested);
+  }).finally(() => { codexReloadTask = null; });
+  return codexReloadTask;
 }
 
 /* ---------- 统一刷新：账户刷新联动预取 / 跨窗口缓存联动 ---------- */
@@ -2490,12 +2532,11 @@ export function initUsage() {
     catch (error) { setStatus("bad", syncError(error)); }
   });
   window.addEventListener(CODEX_USAGE_CHANGED_EVENT, (event) => {
-    if (event.detail?.reason !== "sync") manualSyncPending = false;
-    if (event.detail?.reason === "sync" && manualSyncPending) {
-      // 本轮查询已等待同步，不能用自己的完成通知作废并行加载。
-      void refreshCodexDevices();
+    if (["local", "sync"].includes(event.detail?.reason)) {
+      void refreshCodexDevices().then(reloadCodexView);
       return;
     }
+    codexReloadRequested += 1;
     loadSeq += 1;
     loading = false;
     setLoadingHint(false);

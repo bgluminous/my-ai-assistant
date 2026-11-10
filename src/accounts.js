@@ -186,7 +186,9 @@ function fillPlanCell(cell, account) {
   const status = account.status || null;
   const label = accountPlanInfo(account).label;
   const name = document.createElement("div");
+  name.className = "plan-name";
   name.textContent = label || "—";
+  name.title = name.textContent;
   cell.append(name);
   if (!status || status.alive === false) return;
   // Claude 的额度窗口重置时间见摘要列，接口不提供订阅起止日期

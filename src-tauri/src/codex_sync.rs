@@ -1027,6 +1027,11 @@ async fn sync_round(app: &AppHandle, cfg: &SyncConfig, key: RoundKey) -> Result<
             .map_err(|_| "sync_scan_failed")?;
     report_progress(app, key, |p| p.phase = SyncPhase::Storing)?;
     checked(key.generation, || store::with_store(|s| s.ingest(files)))?;
+    // 本机数据落库即通知图表，不让后续网络交换阻塞本地统计展示。
+    checked(key.generation, || {
+        notify_changed(app, "local");
+        Ok(())
+    })?;
     if !cfg.configured() {
         return Ok(());
     }

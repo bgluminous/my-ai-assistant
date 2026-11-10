@@ -87,14 +87,14 @@ test("main and tray caches reload the same all-device archive after sync", async
   tokens = 25;
   for (const f of [main, tray]) f.change("sync");
   for (const f of [main, tray]) {
-    assert.equal(f.api.getCachedScan("all", ""), null);
+    assert.equal(f.api.getCachedScan("all", "").stale, true);
     const result = await f.api.fetchCodexScan({ key: "all" });
     assert.equal(result.scan.aggregate.totalTokens, 25);
   }
   assert.ok(calls.slice(-2).every((c) => c.cmd === "codex_usage_query" && c.args.deviceId === null));
 });
 
-test("explicit sync finishes before archive query; filters only affect the query", async () => {
+test("local archive is readable while sync is pending; filters only affect the query", async () => {
   let finish;
   const calls = [];
   const f = await fixture((cmd, args) => {
@@ -103,12 +103,15 @@ test("explicit sync finishes before archive query; filters only affect the query
     return Promise.resolve(scan(45));
   });
   const synchronization = f.api.syncCodexUsage("viewing");
-  const read = f.api.fetchSyncedCodexScan({ key: "day:2026-10-01", deviceId: "remote", sinceMs: 1, untilMs: 2 }, synchronization);
-  assert.deepEqual(calls.map(c => c.cmd), ["codex_usage_sync_now"]);
+  f.change("local");
+  const read = await f.api.fetchCodexScan({ key: "day:2026-10-01", deviceId: "remote", sinceMs: 1, untilMs: 2 });
+  assert.deepEqual(calls.map(c => c.cmd), ["codex_usage_sync_now", "codex_usage_query"]);
   assert.equal(JSON.stringify(calls[0].args), '{"trigger":"viewing"}');
+  assert.equal(read.scan.aggregate.totalTokens, 45);
+  assert.equal(f.api.syncCodexUsage("manual"), synchronization);
   f.change("sync");
   finish({ state: "idle", error: null });
-  assert.equal((await read).scan.aggregate.totalTokens, 45);
+  assert.equal((await synchronization).error, null);
   assert.equal(calls[1].cmd, "codex_usage_query");
   assert.equal(calls[1].args.deviceId, "remote");
   assert.equal(calls[1].args.sinceMs, 1);
@@ -121,15 +124,13 @@ test("network failure or paused automatic retry keeps newly collected local stat
         if (paused) return { state: "paused", error: "sync_forbidden" };
         throw new Error("sync_network");
       }
-      assert.equal(cmd, "codex_usage_query");
+      assert.equal(cmd, "codex_scan_sessions");
       return scan(35);
     });
-    const result = f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage("interval"));
-    await assert.rejects(result, (error) => {
-      assert.match(String(error), paused ? /sync_forbidden/ : /sync_network/);
-      assert.equal(error.usageCache.scan.aggregate.totalTokens, 35);
-      return true;
-    });
+    const synchronization = f.api.syncCodexUsage("interval");
+    const entry = await f.api.fetchCodexScan({ key: "all", force: true });
+    assert.equal(entry.scan.aggregate.totalTokens, 35);
+    assert.match(String((await synchronization).error), paused ? /sync_forbidden/ : /sync_network/);
     assert.equal(f.api.getCachedScan("all", "").scan.aggregate.totalTokens, 35);
   }
 });
@@ -141,10 +142,10 @@ test("configuration change cancels an awaited sync without querying the replacem
     calls.push(cmd);
     return new Promise((resolve) => { finish = resolve; });
   });
-  const result = f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage());
+  const result = f.api.syncCodexUsage();
   f.change("config");
   finish({ state: "idle" });
-  await assert.rejects(result, /sync_cancelled/);
+  assert.match(String((await result).error), /sync_cancelled/);
   assert.deepEqual(calls, ["codex_usage_sync_now"]);
 });
 
@@ -154,9 +155,58 @@ test("unconfigured sync still reads collected local usage and later events never
     calls.push(cmd);
     return cmd === "codex_usage_sync_now" ? { state: "disabled" } : scan(15);
   });
-  const entry = await f.api.fetchSyncedCodexScan({ key: "all" }, f.api.syncCodexUsage());
+  const synchronization = f.api.syncCodexUsage();
+  const entry = await f.api.fetchCodexScan({ key: "all" });
+  assert.equal((await synchronization).status.state, "disabled");
   assert.equal(entry.scan.aggregate.totalTokens, 15);
   f.change("sync");
   await f.api.fetchCodexScan({ key: "all" });
-  assert.deepEqual(calls, ["codex_usage_sync_now", "codex_usage_query", "codex_usage_query"]);
+  assert.deepEqual(calls, ["codex_usage_sync_now", "codex_scan_sessions", "codex_usage_query"]);
+});
+
+test("late local scans follow newer data without overwriting the archive or rescanning", async () => {
+  let finishOld;
+  const calls = [];
+  const f = await fixture((cmd) => {
+    calls.push(cmd);
+    return cmd === "codex_scan_sessions" ? new Promise(resolve => { finishOld = resolve; }) : Promise.resolve(scan(40));
+  });
+  const old = f.api.fetchCodexScan({ key: "all" });
+  f.change("local");
+  const fresh = await f.api.fetchCodexScan({ key: "all" });
+  finishOld(scan(5));
+  assert.equal((await old).scan.aggregate.totalTokens, fresh.scan.aggregate.totalTokens);
+  assert.equal(f.api.getCachedScan("all", "").scan.aggregate.totalTokens, 40);
+  assert.equal(calls.filter(cmd => cmd === "codex_scan_sessions").length, 1);
+});
+
+test("a failed archive read retains stale data, but a space change discards it", async () => {
+  let fail = false;
+  const f = await fixture(async () => {
+    if (fail) throw new Error("read_failed");
+    return scan(12);
+  });
+  await f.api.fetchCodexScan({ key: "all" });
+  f.change("local");
+  fail = true;
+  await assert.rejects(f.api.fetchCodexScan({ key: "all" }), error => {
+    assert.equal(error.usageCache.scan.aggregate.totalTokens, 12);
+    return true;
+  });
+  assert.equal(f.api.getCachedScan("all", "").stale, true);
+  f.change("config");
+  assert.equal(f.api.getCachedScan("all", ""), null);
+});
+
+test("an old sync completion cannot release a newer configuration's in-flight sync", async () => {
+  const finish = [];
+  const f = await fixture(() => new Promise(resolve => finish.push(resolve)));
+  const old = f.api.syncCodexUsage();
+  f.change("config");
+  const next = f.api.syncCodexUsage();
+  finish[0]({ state: "idle" });
+  assert.match(String((await old).error), /sync_cancelled/);
+  assert.equal(f.api.syncCodexUsage(), next);
+  finish[1]({ state: "idle" });
+  assert.equal((await next).error, null);
 });

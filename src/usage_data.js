@@ -442,10 +442,11 @@ function makeScanSource({ prefix, command, codex = false }) {
     const rangeKey = explicitKey || scanRangeKey(days, sinceMs, untilMs);
     const key = `${rangeKey}:${h}${codex ? `:${deviceId || ""}` : ""}`;
     const cached = getCached(rangeKey, h, deviceId);
-    if (!force && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
+    if (!force && cached && !cached.stale && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
     const inflightKey = `${prefix}${key}${archiveOnly ? ":archive" : ""}`;
     if (inflight.has(inflightKey)) return inflight.get(inflightKey);
     const revision = codexRevision;
+    const configRevision = codexConfigRevision;
     if (codex && force && !archiveOnly) codexArchiveOnly = false;
     const scanCommand = codex && (archiveOnly || codexArchiveOnly) ? "codex_usage_query" : command;
     const p = withTimeout(
@@ -459,14 +460,20 @@ function makeScanSource({ prefix, command, codex = false }) {
       command
     )
       .then((scan) => {
-        if (codex && revision !== codexRevision) throw new Error("sync_cancelled");
+        if (codex && configRevision !== codexConfigRevision) throw new Error("sync_cancelled");
+        // 同一空间在读取期间又有数据落库时跟进最新存档，不回退旧数据，也不重复扫描。
+        if (codex && revision !== codexRevision) return fetch({
+          key: rangeKey, days, sinceMs, untilMs, home, deviceId, force: true, archiveOnly: true,
+        });
         const entry = { scan, at: Date.now() };
         mem.set(key, entry);
         cacheStore(`${prefix}${key}`, entry);
         return entry;
-      })
-      .catch((error) => {
-        if (codex && revision !== codexRevision) throw new Error("sync_cancelled");
+      }, (error) => {
+        if (codex && configRevision !== codexConfigRevision) throw new Error("sync_cancelled");
+        if (codex && revision !== codexRevision) return fetch({
+          key: rangeKey, days, sinceMs, untilMs, home, deviceId, force: true, archiveOnly: true,
+        });
         throw attachUsageCache(error, cached);
       })
       .finally(() => { if (inflight.get(inflightKey) === p) inflight.delete(inflightKey); });
@@ -480,6 +487,7 @@ function makeScanSource({ prefix, command, codex = false }) {
 let codexRevision = 0;
 let codexConfigRevision = 0;
 let codexArchiveOnly = false;
+let codexSynchronization = null;
 export const CODEX_USAGE_CHANGED_EVENT = "codex-usage-view-changed";
 const codexScan = makeScanSource({ prefix: "scan2:", command: "codex_scan_sessions", codex: true });
 const claudeScan = makeScanSource({ prefix: "cscan:", command: "claude_scan_sessions" });
@@ -487,14 +495,24 @@ const SCAN_SOURCES = [codexScan, claudeScan];
 
 function invalidateCodex(reason) {
   codexRevision += 1;
-  if (reason !== "sync") codexConfigRevision += 1;
-  codexArchiveOnly = reason === "clear" || reason === "sync";
-  codexScan.mem.clear();
+  const dataChanged = reason === "local" || reason === "sync";
+  if (!dataChanged) {
+    codexConfigRevision += 1;
+    codexSynchronization = null;
+  }
+  codexArchiveOnly = reason === "clear" || dataChanged;
+  if (dataChanged) {
+    for (const [key, entry] of codexScan.mem) codexScan.mem.set(key, { ...entry, stale: true });
+  } else codexScan.mem.clear();
   for (const key of [...inflight.keys()]) if (key.startsWith("scan2:")) inflight.delete(key);
   try {
     for (let i = localStorage.length - 1; i >= 0; i -= 1) {
       const key = localStorage.key(i);
-      if (key && (key.startsWith(`${USAGE_CACHE_PREFIX}scan:`) || key.startsWith(`${USAGE_CACHE_PREFIX}scan2:`))) localStorage.removeItem(key);
+      if (!key || (!key.startsWith(`${USAGE_CACHE_PREFIX}scan:`) && !key.startsWith(`${USAGE_CACHE_PREFIX}scan2:`))) continue;
+      if (dataChanged) {
+        const entry = cacheLoad(key.slice(USAGE_CACHE_PREFIX.length));
+        if (entry) localStorage.setItem(key, JSON.stringify({ ...entry, stale: true }));
+      } else localStorage.removeItem(key);
     }
   } catch { /* 缓存不可用不影响存档 */ }
   window.dispatchEvent(new CustomEvent(CODEX_USAGE_CHANGED_EVENT, { detail: { reason } }));
@@ -510,32 +528,18 @@ export const peekScanSeries = codexScan.peekSeries;
 export const fetchCodexScan = codexScan.fetch;
 
 /** 只有明确的刷新入口调用远端同步；缓存通知和统计切片不会调用此入口。 */
-export async function syncCodexUsage(trigger = "manual") {
+export function syncCodexUsage(trigger = "manual") {
+  if (codexSynchronization) return codexSynchronization;
   const revision = codexConfigRevision;
-  try {
-    const status = await withTimeout(invoke("codex_usage_sync_now", { trigger }), "codex_usage_sync");
-    if (revision !== codexConfigRevision) throw new Error("sync_cancelled");
-    return { status, error: status.error ? new Error(status.error) : null };
-  } catch (error) {
-    return { error };
-  }
-}
-
-/** 同步先采集本机再交换增量；无论网络是否成功，都从存档读取当前展示范围。 */
-export async function fetchSyncedCodexScan(options, synchronization) {
-  const revision = codexConfigRevision;
-  const { error } = await synchronization;
-  if (revision !== codexConfigRevision || String(error).includes("sync_cancelled")) throw new Error("sync_cancelled");
-  const read = () => codexScan.fetch({ ...options, force: true, archiveOnly: true });
-  let entry;
-  try { entry = await read(); }
-  catch (failure) {
-    // 同步事件可能晚于 IPC 结果到达；只允许同一配置的存档重读，不能恢复旧空间。
-    if (revision !== codexConfigRevision || !String(failure).includes("sync_cancelled")) throw failure;
-    entry = await read();
-  }
-  if (error) throw attachUsageCache(error, entry);
-  return entry;
+  const pending = withTimeout(invoke("codex_usage_sync_now", { trigger }), "codex_usage_sync")
+    .then((status) => {
+      if (revision !== codexConfigRevision) throw new Error("sync_cancelled");
+      return { status, error: status.error ? new Error(status.error) : null };
+    })
+    .catch((error) => ({ error: revision !== codexConfigRevision ? new Error("sync_cancelled") : error }))
+    .finally(() => { if (codexSynchronization === pending) codexSynchronization = null; });
+  codexSynchronization = pending;
+  return pending;
 }
 
 export const getCachedClaudeScan = claudeScan.getCached;

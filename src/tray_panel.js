@@ -30,7 +30,6 @@ import {
   fetchArchivedAggregate,
   listDeletedUsage,
   fetchCodexScan,
-  fetchSyncedCodexScan,
   syncCodexUsage,
   fetchClaudeScan,
   sliceDay,
@@ -165,11 +164,11 @@ function syncHeaderRefresh() {
 }
 
 /**
- * 总览的进行中提示：与主窗口统计页同款的顶部悬浮胶囊。所选日用量在拉取、本面板或其它窗口
- * 在刷新账户状态时显示；已有数据在展示则文案为「更新中…」，否则「统计中…」。
+ * 总览的进行中提示：仅在读取所选日统计数据时显示，服务器同步使用独立进度。
+ * 已有数据在展示则文案为「更新中…」，否则「统计中…」。
  */
 function syncOverviewLoading() {
-  const busy = trayTab === "overview" && (overviewLoading || refreshing || remoteRefreshingIds.size > 0);
+  const busy = trayTab === "overview" && overviewLoading;
   el("#tray-ov-loading").hidden = !busy;
   if (busy) el("#tray-ov-loading-text").textContent = overviewDom ? "更新中…" : "统计中…";
 }
@@ -537,8 +536,8 @@ async function refreshAll() {
   if (refreshing || switching || refreshingIds.size) return;
   refreshing = true;
   render();
-  const synchronization = syncCodexUsage("manual");
-  const overview = trayTab === "overview" ? loadOverview({ force: true, synchronization }) : Promise.resolve();
+  void syncCodexUsage("manual");
+  const overview = trayTab === "overview" ? loadOverview({ force: true, synchronize: false }) : Promise.resolve();
   // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
   // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按套餐排序，不在类型间来回跳
   const ids = ["cursor", "codex", "claude"].flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
@@ -552,10 +551,9 @@ async function refreshAll() {
         failed += 1;
       }
     }
-    const [sync] = await Promise.all([synchronization, overview]);
+    await overview;
     await load({ viewing: false });
-    if (sync.error) setStatus("bad", `GPT 用量同步失败：${syncError(sync.error)}`);
-    else if (failed > 0) setStatus("bad", `刷新完成，${failed} 个账户失败。`);
+    if (failed > 0) setStatus("bad", `刷新完成，${failed} 个账户失败。`);
     else setStatus("ok", "已刷新账户与用量。");
   } finally {
     refreshing = false;
@@ -1378,22 +1376,21 @@ const VIEW_MAX_AGE_MS = 5 * 60_000;
  * （主动查看时为 VIEW_MAX_AGE_MS，否则为缓存有效期）。
  */
 function needsDayFetch(peeked, { force, maxAgeMs }) {
-  if (force || !peeked) return true;
+  if (force || !peeked || peeked.entry.stale) return true;
   if (maxAgeMs != null) return Date.now() - peeked.entry.at > maxAgeMs;
   return !isUsageCacheFresh(peeked.entry.at);
 }
 
 let overviewTail = Promise.resolve();
-let overviewSyncing = false;
-let overviewCodexError = null;
+let overviewErrors = new Map();
 
 /**
  * 排队加载总览。opts.force 为刷新按钮的强制刷新（全部来源立即重拉）；
  * opts.viewing 为用户主动查看：超过 VIEW_MAX_AGE_MS 的来源强制同步，其余用缓存。
  */
 function loadOverview(opts = {}) {
-  if (!opts.synchronization && (opts.force || opts.viewing)) {
-    opts = { ...opts, synchronization: syncCodexUsage(opts.force ? "manual" : "viewing") };
+  if (opts.synchronize !== false && (opts.force || opts.viewing)) {
+    void syncCodexUsage(opts.force ? "manual" : "viewing");
   }
   const run = () => loadOverviewInner(opts);
   overviewTail = overviewTail.then(run, run);
@@ -1405,19 +1402,19 @@ function loadOverview(opts = {}) {
  * （今天写 today: 键、昨天写 day: 键，与主窗口用量页互通）。加载期间用户切了统计日，
  * 本轮结果不再渲染，交给随后排队的新一轮。
  */
-async function loadOverviewInner({ force = false, viewing = false, synchronization = null } = {}) {
-  overviewSyncing = !!synchronization;
+async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const scope = dayScope();
   const revision = deletedRevision;
   const gptRevision = codexViewRevision;
-  const stillCurrent = () => trayDayMs === scope.start && revision === deletedRevision && gptRevision === codexViewRevision;
+  const stillCurrent = () => trayTab === "overview" && trayDayMs === scope.start && revision === deletedRevision && gptRevision === codexViewRevision;
   const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
   const peek = dayPeekers(scope);
   const rule = { force, maxAgeMs: viewing ? VIEW_MAX_AGE_MS : null };
   // 主动查看时过期的来源要真正同步（sync 模式），不能让后端按更长的有效期判定为新鲜而只切片
   const fetchForce = force || viewing;
 
-  const fetchErrors = new Map(overviewCodexError ? [["local", overviewCodexError]] : []);
+  const fetchErrors = new Map();
+  overviewErrors = fetchErrors;
   const cached = buildOverviewData(scope, fetchErrors);
 
   // 今天拉到当前时刻；昨天拉完整自然日 [0 点, 次日 0 点)，终点退 1ms 与主窗口口径一致
@@ -1456,21 +1453,13 @@ async function loadOverviewInner({ force = false, viewing = false, synchronizati
         })
     );
   }
-  if (synchronization || needsDayFetch(peek.scan(""), rule)) {
+  if (needsDayFetch(peek.scan(""), rule)) {
     jobs.push(
-      (synchronization ? fetchSyncedCodexScan(scanArgs, synchronization) : fetchCodexScan(scanArgs))
-        .then(() => {
-          if (synchronization && stillCurrent()) {
-            overviewCodexError = null;
-            fetchErrors.delete("local");
-          }
-        })
+      fetchCodexScan(scanArgs)
+        .then(() => { fetchErrors.delete("local"); })
         .catch((error) => {
-          const text = syncError(error);
-          if (synchronization && stillCurrent()) overviewCodexError = text;
-          fetchErrors.set("local", text);
+          if (!String(error).includes("sync_cancelled")) fetchErrors.set("local", syncError(error));
         })
-        .finally(() => { overviewSyncing = false; })
     );
   }
   if (needsDayFetch(peek.claude(""), rule)) {
@@ -1490,17 +1479,53 @@ async function loadOverviewInner({ force = false, viewing = false, synchronizati
   syncHeaderRefresh();
   if (!cached.data.rows.length && !overviewDom) overviewTip(`正在统计${scope.word}用量…`, cached.at);
   try {
-    await Promise.allSettled(jobs);
-    if (!stillCurrent()) return;
-    const next = buildOverviewData(scope, fetchErrors);
-    applyOverviewErrors(next.data, fetchErrors, cursorAccounts);
-    // 没有任何来源成功时不冒充「刚更新」，数据时间留空
-    renderOverview(next.data, next.at, scope);
+    // 各来源完成后分别重绘，本机统计不必等其它来源或服务器网络请求。
+    await Promise.allSettled(jobs.map((job) => job.finally(() => {
+      if (!stillCurrent()) return;
+      const next = buildOverviewData(scope, fetchErrors);
+      applyOverviewErrors(next.data, fetchErrors, cursorAccounts);
+      renderOverview(next.data, next.at, scope);
+    })));
   } finally {
-    overviewSyncing = false;
     overviewLoading = false;
     syncHeaderRefresh();
   }
+}
+
+let codexReloadRequested = 0;
+let codexReloadTask = null;
+
+/** 数据通知只重读 GPT 存档，不进入总览队列，也不重启其它来源的请求。 */
+function reloadCodexOverview() {
+  codexReloadRequested += 1;
+  if (codexReloadTask) return codexReloadTask;
+  codexReloadTask = Promise.resolve().then(async () => {
+    let handled;
+    do {
+      handled = codexReloadRequested;
+      if (trayTab !== "overview") return;
+      const scope = dayScope();
+      const revision = codexViewRevision;
+      const errors = overviewErrors;
+      const current = () => trayTab === "overview" && trayDayMs === scope.start && revision === codexViewRevision &&
+        errors === overviewErrors && handled === codexReloadRequested;
+      try {
+        await fetchCodexScan({
+          sinceMs: scope.start, ...(scope.past ? { untilMs: scope.end } : {}),
+          force: true, archiveOnly: true,
+        });
+        if (!current()) continue;
+        errors.delete("local");
+      } catch (error) {
+        if (!current() || String(error).includes("sync_cancelled")) continue;
+        errors.set("local", syncError(error));
+      }
+      const next = buildOverviewData(scope, errors);
+      applyOverviewErrors(next.data, errors, accounts.filter((a) => a.kind === "cursor"));
+      renderOverview(next.data, next.at, scope);
+    } while (handled !== codexReloadRequested);
+  }).finally(() => { codexReloadTask = null; });
+  return codexReloadTask;
 }
 
 /* ---------- 切换账户（弹窗内确认 + 分步进度 + 结果） ---------- */
@@ -1911,24 +1936,27 @@ listen("account-refreshing", (event) => {
   /* 非 Tauri 环境无事件桥 */
 });
 let usageCacheTimer = null;
-window.addEventListener(CODEX_USAGE_CHANGED_EVENT, async (event) => {
-  if (event.detail?.reason === "sync" && overviewSyncing) return;
-  overviewSyncing = false;
-  overviewCodexError = null;
-  codexViewRevision += 1;
-  const revision = codexViewRevision;
-  if (event.detail?.reason === "sync") {
-    try {
-      const status = await invoke("codex_usage_sync_status");
-      if (revision !== codexViewRevision) return;
-      overviewCodexError = status.error ? syncError(status.error) : null;
-    } catch { /* 读取状态失败仍重读存档 */ }
+window.addEventListener(CODEX_USAGE_CHANGED_EVENT, (event) => {
+  if (["local", "sync"].includes(event.detail?.reason)) {
+    void reloadCodexOverview();
+    return;
   }
+  codexReloadRequested += 1;
+  codexViewRevision += 1;
+  overviewErrors.clear();
   if (trayTab === "overview") void loadOverview();
 });
 function scheduleOverviewFromCache(key) {
   forgetUsageCacheFromEvent(key);
   if (trayTab !== "overview") return;
+  if (key?.startsWith(`${USAGE_CACHE_PREFIX}scan2:`)) {
+    // GPT 的跨窗口写入只合并已有缓存，不能连带重试其它来源。
+    const scope = dayScope();
+    const next = buildOverviewData(scope, overviewErrors);
+    applyOverviewErrors(next.data, overviewErrors, accounts.filter((a) => a.kind === "cursor"));
+    renderOverview(next.data, next.at, scope);
+    return;
+  }
   clearTimeout(usageCacheTimer);
   usageCacheTimer = setTimeout(() => { void loadOverview(); }, 250);
 }

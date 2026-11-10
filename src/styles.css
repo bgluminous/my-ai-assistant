@@ -793,7 +793,7 @@ tbody tr:hover { background: var(--surface-2); }
    （避免摘要独占弹性空间在中间留出大段空白），过窄时整体横向滚动 */
 .accounts-table { table-layout: fixed; min-width: 860px; }
 .accounts-table .col-state { width: 86px; }
-.accounts-table .col-plan { width: 84px; }
+.accounts-table .col-plan { width: 128px; }
 .accounts-table .col-ondemand { width: 118px; }
 .accounts-table .col-time { width: 90px; }
 .accounts-table .col-actions { width: 152px; }
@@ -850,6 +850,8 @@ tbody tr:hover { background: var(--surface-2); }
 /* 表格里的错误提示收敛为一行短语，完整信息放 title 悬停 */
 .account-error[title] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
 .expired { color: var(--bad); }
+/* 套餐名与价格保持同一行；长名称省略，完整内容放 title 悬停。 */
+.plan-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 套餐列第二行：套餐 / 计费周期到期倒计时，周期详情放 title 悬停 */
 .plan-expiry { margin-top: 2px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* 上次刷新列第二行（ChatGPT）：凭据组最后换新时间，精确时刻放 title 悬停 */
