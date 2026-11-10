@@ -46,6 +46,9 @@ pub struct Account {
     /// Cursor 账户的「不记录 API 额度用量」开关；包含套餐 API 额度与超额按量付费。
     #[serde(default)]
     pub ignore_api_models: bool,
+    /// 独立定时刷新间隔（分钟）：None 跟随全局，Some(0) 关闭此账户的自动刷新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_interval_minutes: Option<u32>,
     /// Cursor user token / Codex access_token（JWT）/ Claude access_token（不透明值）。
     /// ChatGPT 账户有 codex_auth 副本时，本字段只在内存里由副本解出，不落盘。
     pub token: String,
@@ -57,6 +60,9 @@ pub struct Account {
     /// 也是「强制写入 auth.json」的数据源。发给前端的视图里去掉。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_auth: Option<String>,
+    /// OpenCode 独立授权。token 仅保存工作区 ID；此副本不发给前端、不写入客户端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_auth: Option<String>,
     /// 上次刷新时间（unix 秒）。
     #[serde(default)]
     pub last_refresh_at: Option<i64>,
@@ -161,7 +167,8 @@ fn set_codex_auth(acc: &mut Account, v: &Value) -> Result<(), String> {
 }
 
 /// 载入 / 导入后的归一：有副本的 ChatGPT 账户由副本解出 token；没有副本但有明文凭据的
-/// （旧版本数据、文件导入）组骨架副本，明文随下次写盘不再保留。返回是否组了新副本。
+/// （旧版本数据、文件导入）组骨架副本，明文随下次写盘不再保留。
+/// OpenCode 自动备注升级为邮箱；返回是否迁移了账户数据。
 pub(crate) fn hydrate_accounts(accounts: &mut [Account]) -> bool {
     let mut migrated = false;
     for acc in accounts.iter_mut().filter(|a| a.kind == "codex") {
@@ -172,6 +179,13 @@ pub(crate) fn hydrate_accounts(accounts: &mut [Account]) -> bool {
             if set_codex_auth(acc, &v).is_ok() {
                 migrated = true;
             }
+        }
+    }
+    for acc in accounts.iter_mut().filter(|a| a.kind == "opencode" && a.note_auto) {
+        let note = best_identity(acc);
+        if acc.note != note {
+            acc.note = note;
+            migrated = true;
         }
     }
     migrated
@@ -285,15 +299,19 @@ pub struct AccountView {
     /// ChatGPT：凭据组（access / refresh token）最后一次换新的时刻（unix 毫秒），来自副本的 last_refresh；
     /// 无副本或副本没记时间为 None。
     pub codex_auth_refreshed_at: Option<i64>,
+    pub opencode_authorized: bool,
 }
 
 pub(crate) fn account_view(acc: &Account) -> AccountView {
     let codex_auth_refreshed_at = codex_last_refresh(acc).map(|t| t.timestamp_millis());
     let mut account = acc.clone();
     account.codex_auth = None;
+    account.opencode_auth = None;
+    if account.kind == "opencode" { account.refresh_token = None; }
     AccountView {
         account,
         codex_auth_refreshed_at,
+        opencode_authorized: acc.kind == "opencode" && crate::opencode::account_credential(acc).is_ok(),
     }
 }
 
@@ -337,12 +355,16 @@ pub(crate) fn sanitize_kind(kind: &str) -> Result<String, String> {
         "cursor" => Ok("cursor".to_string()),
         "codex" => Ok("codex".to_string()),
         "claude" => Ok("claude".to_string()),
+        "opencode" => Ok("opencode".to_string()),
         _ => Err("invalid_kind".to_string()),
     }
 }
 
 /// 归一化并校验 token：cursor 走 normalize_cursor_token，codex 仅 trim；空值报错。
 pub(crate) fn sanitize_token(kind: &str, token: &str) -> Result<String, String> {
+    if kind == "opencode" && !crate::opencode::valid_workspace(token.trim()) {
+        return Err("opencode_invalid_workspace".into());
+    }
     let token = if kind == "cursor" {
         http::normalize_cursor_token(token)
     } else {
@@ -400,6 +422,15 @@ fn default_note_from_token(kind: &str, token: &str) -> String {
 
 /// 从已缓存 status 里取最优身份（邮箱），无则回退本地解析。用于自动备注回填。
 fn best_identity(acc: &Account) -> String {
+    if acc.kind == "opencode" {
+        let credential = crate::opencode::account_credential(acc).ok();
+        let cached = acc.status.as_ref();
+        let email = credential.as_ref().map(|c| c.email.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| cached.and_then(|s| s.get("email")).and_then(Value::as_str)).unwrap_or("");
+        let name = cached.and_then(|s| s.get("workspaceName")).and_then(Value::as_str).unwrap_or("");
+        return crate::opencode::default_note(email, name, &acc.token);
+    }
     let from_status = acc
         .status
         .as_ref()
@@ -414,6 +445,7 @@ fn kind_label(kind: &str) -> &'static str {
     match kind {
         "codex" => "ChatGPT",
         "claude" => "Claude",
+        "opencode" => "OpenCode",
         _ => "Cursor",
     }
 }
@@ -460,6 +492,9 @@ fn alive_text(v: Option<bool>) -> &'static str {
 ///
 /// 解析不出返回 None（调用方回退 token 全等判重）。
 pub(crate) fn account_identity(kind: &str, token: &str) -> Option<String> {
+    if kind == "opencode" {
+        return crate::opencode::valid_workspace(token).then(|| format!("opencode:{}:{token}", crate::opencode::SERVER));
+    }
     if kind == "claude" {
         return None;
     }
@@ -514,7 +549,7 @@ pub(crate) fn is_duplicate_account(
         .filter(|a| exclude_id.is_none_or(|id| a.id != id))
         .any(|a| match &identity {
             Some(idn) => account_identity(kind, &a.token)
-                .is_some_and(|other| other.eq_ignore_ascii_case(idn)),
+                .is_some_and(|other| if kind == "opencode" { other == *idn } else { other.eq_ignore_ascii_case(idn) }),
             None => a.token == token,
         })
 }
@@ -522,6 +557,52 @@ pub(crate) fn is_duplicate_account(
 // ---------------------------------------------------------------------------
 // 增删改查命令
 // ---------------------------------------------------------------------------
+
+/// OpenCode 以工作区去重。导入本机只登记身份，独立授权完成后更新同一行。
+pub(crate) fn save_opencode(
+    app: &AppHandle, auth: Option<&crate::opencode::Credential>, workspace: &str, name: &str, email: &str, note: Option<&str>,
+) -> Result<AccountView, String> {
+    if !crate::opencode::valid_workspace(workspace) { return Err("opencode_invalid_workspace".into()); }
+    let blob = auth.map(|a| a.seal()).transpose()?;
+    let manual_note = note.map(str::trim).filter(|n| !n.is_empty());
+    let mut id = String::new();
+    let data = mutate(app, |d| {
+        if let Some(acc) = d.accounts.iter_mut().find(|a| a.kind == "opencode" && a.token == workspace) {
+            if let Some(blob) = blob { acc.opencode_auth = Some(blob); }
+            if auth.is_some() || acc.opencode_auth.is_none() {
+                let status = acc.status.get_or_insert_with(|| json!({}));
+                status["workspaceName"] = json!(name);
+                status["email"] = json!(email);
+            }
+            if let Some(note) = manual_note { acc.note = note.into(); acc.note_auto = false; }
+            else if acc.note_auto { acc.note = best_identity(acc); }
+            id = acc.id.clone();
+        } else {
+            id = new_id();
+            d.accounts.push(Account { id:id.clone(),kind:"opencode".into(),note:manual_note.map(str::to_string)
+                .unwrap_or_else(|| crate::opencode::default_note(email, name, workspace)),
+                note_auto:manual_note.is_none(),ignore_api_models:false,token:workspace.into(),refresh_token:None,codex_auth:None,
+                opencode_auth:blob,refresh_interval_minutes:None,last_refresh_at:None,
+                status:Some(json!({"workspaceId":workspace,"workspaceName":name,"name":name,"email":email,"alive":null})) });
+        }
+        Ok(())
+    })?;
+    audit::log("account_opencode_link",format!("关联 OpenCode 工作区：{name}"),Some(json!({"id":id})));
+    data.accounts.iter().find(|a|a.id==id).map(account_view).ok_or_else(||"not_found".into())
+}
+
+pub(crate) fn replace_opencode_auth(
+    app:&AppHandle,id:&str,expected:Option<&str>,auth:&crate::opencode::Credential,
+) -> Result<(),String> {
+    let blob=auth.seal()?;
+    mutate(app,|d|{
+        let acc=d.accounts.iter_mut().find(|a|a.id==id&&a.kind=="opencode").ok_or("not_found")?;
+        if acc.token!=auth.workspace_id {return Err("opencode_workspace_mismatch".into());}
+        if acc.opencode_auth.as_deref()==expected {acc.opencode_auth=Some(blob);}
+        Ok(())
+    })?;
+    Ok(())
+}
 
 #[tauri::command]
 pub fn accounts_list() -> Result<AccountsView, String> {
@@ -536,6 +617,7 @@ pub fn accounts_list() -> Result<AccountsView, String> {
 pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
     let kind = sanitize_kind(&account.kind)?;
+    if kind == "opencode" { return Err("opencode_auth_required".into()); }
     let token = sanitize_token(&kind, &account.token)?;
     // 备注留空时用邮箱/用户名兜底，并标记为自动生成（刷新时可升级为真实邮箱）。
     let trimmed_note = account.note.trim().to_string();
@@ -562,6 +644,8 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         token,
         refresh_token: sanitize_refresh_token(account.refresh_token),
         codex_auth: None,
+        opencode_auth: None,
+        refresh_interval_minutes: None,
         last_refresh_at: None,
         status: None,
     };
@@ -645,9 +729,13 @@ pub async fn accounts_update(
     token: String,
     refresh_token: Option<String>,
     ignore_api_models: Option<bool>,
+    refresh_interval_minutes: Option<u32>,
 ) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
     let before = snapshot(&id)?;
+    if before.kind == "opencode" && (token.trim() != before.token || refresh_token.as_deref().is_some_and(|s| !s.is_empty())) {
+        return Err("opencode_use_oauth".into());
+    }
     let token = sanitize_token(&before.kind, &token)?;
     let refresh_token = sanitize_refresh_token(refresh_token);
     let credentials_changed = token != before.token || refresh_token != before.refresh_token;
@@ -706,7 +794,7 @@ pub async fn accounts_update(
         let trimmed_note = note.trim().to_string();
         let new_note_auto = trimmed_note.is_empty();
         let new_note = if new_note_auto {
-            default_note_from_token(&kind, &token)
+            if kind == "opencode" { best_identity(acc) } else { default_note_from_token(&kind, &token) }
         } else {
             trimmed_note
         };
@@ -741,6 +829,10 @@ pub async fn accounts_update(
         acc.refresh_token = refresh_token.clone();
         if let Some(v) = &new_codex_auth {
             set_codex_auth(acc, v)?;
+        }
+        if acc.refresh_interval_minutes != refresh_interval_minutes {
+            changed.push("同步间隔");
+            acc.refresh_interval_minutes = refresh_interval_minutes;
         }
         name = display_name(&acc.kind, &acc.note, &acc.token);
         Ok(())
@@ -784,16 +876,23 @@ pub async fn accounts_delete(
         });
     };
     let mut usage = "discarded";
+    let opencode_lock = crate::opencode_store::workspace_lock(&target.token);
+    let _opencode_guard = if target.kind == "opencode" { Some(opencode_lock.lock().await) } else { None };
     if keep_usage && target.kind == "cursor" {
         usage = match crate::usage_archive::retain_for_deleted(&target).await? {
             crate::usage_archive::Retained::Kept => "kept",
             crate::usage_archive::Retained::Empty => "empty",
         };
     }
-    let data = mutate(&app, |d| {
+    let save = || mutate(&app, |d| {
         d.accounts.retain(|a| a.id != id);
         Ok(())
-    })?;
+    });
+    let data = if target.kind == "opencode" {
+        crate::opencode_store::remove_after_save(&target.token, save)?
+    } else {
+        save()?
+    };
     if usage != "kept" {
         // 用量事件库随账户删除清理（与前端删账户时清 localStorage 缓存一致）
         crate::usage_archive::discard(&id).await;
@@ -817,7 +916,7 @@ pub async fn accounts_delete(
     })
 }
 
-/// 设置定时刷新间隔（分钟，0 = 关闭），账户状态刷新与用量统计自动更新共用。
+/// 全局默认间隔（分钟，0 = 关闭），用于继承的账户与共享用量任务；独立账户设置不受影响。
 #[tauri::command]
 pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
@@ -826,11 +925,11 @@ pub fn accounts_set_interval(app: AppHandle, interval_minutes: u32) -> Result<Ac
         Ok(())
     })?;
     let message = if interval_minutes == 0 {
-        "关闭定时刷新".to_string()
+        "关闭全局定时刷新（独立账户设置仍生效）".to_string()
     } else if interval_minutes >= 60 && interval_minutes.is_multiple_of(60) {
-        format!("定时刷新设为每 {} 小时（账户状态 + 用量统计）", interval_minutes / 60)
+        format!("全局定时刷新设为每 {} 小时（继承的账户 + 共享用量）", interval_minutes / 60)
     } else {
-        format!("定时刷新设为每 {interval_minutes} 分钟（账户状态 + 用量统计）")
+        format!("全局定时刷新设为每 {interval_minutes} 分钟（继承的账户 + 共享用量）")
     };
     audit::log("interval_set", message, None);
     Ok(view(&data))
@@ -875,7 +974,7 @@ pub(crate) fn persist_tokens(
 }
 
 /// 刷新结束：写入状态摘要与刷新时间并落盘，返回最新账户。
-fn finish(app: &AppHandle, id: &str, mut status: Value) -> Result<Account, String> {
+pub(crate) fn finish(app: &AppHandle, id: &str, mut status: Value) -> Result<Account, String> {
     let now = Utc::now().timestamp();
     let data = mutate(app, move |d| {
         let acc = d
@@ -1540,6 +1639,7 @@ async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, Str
         },
         "codex" => refresh_codex_account(app, id, snap).await,
         "claude" => refresh_claude_account(app, id, snap).await,
+        "opencode" => crate::opencode::refresh_account(app, id, snap).await,
         _ => Err("invalid_kind".into()),
     };
 
@@ -1647,10 +1747,27 @@ fn import_label(hint: &str, token: &str) -> String {
 /// 读取本机已登录的指定类型凭据并导入为托管账户（Cursor / ChatGPT 互不影响）。
 /// 本机从未登录既不算导入也不算跳过；同身份已存在记 exists，凭据无法解析记 invalid。
 #[tauri::command]
-pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<ImportLocalResult, String> {
+pub async fn accounts_import_local(app: AppHandle, kind: String, workspace_id: Option<String>, note: Option<String>) -> Result<ImportLocalResult, String> {
     let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let kind = sanitize_kind(&kind)?;
+    if kind == "opencode" {
+        let mut identities = tauri::async_runtime::spawn_blocking(crate::opencode_local::read_identities)
+            .await.map_err(|_| "opencode_database_unavailable")??;
+        if let Some(workspace) = workspace_id.as_deref() {
+            identities.retain(|identity| identity.workspace_id == workspace);
+            if identities.is_empty() { return Err("opencode_local_account_not_found".into()); }
+        }
+        if identities.len() > 1 && note.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            return Err("opencode_choose_workspace".into());
+        }
+        let mut imported = Vec::new();
+        for identity in identities {
+            let account = save_opencode(&app, None, &identity.workspace_id, &identity.name, &identity.email, note.as_deref())?;
+            imported.push(ImportedItem { id:account.account.id,kind:kind.clone(),label:identity.name });
+        }
+        return Ok(ImportLocalResult { imported,skipped:Vec::new(),view:view(&current()) });
+    }
     let mut imported: Vec<ImportedItem> = Vec::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
     let mut added: Vec<(String, String, String, String)> = Vec::new();
@@ -1712,6 +1829,8 @@ pub async fn accounts_import_local(app: AppHandle, kind: String) -> Result<Impor
                     token,
                     refresh_token: login.refresh_token,
                     codex_auth: None,
+                    opencode_auth: None,
+                    refresh_interval_minutes: None,
                     last_refresh_at: None,
                     status: None,
                 };
@@ -1765,12 +1884,16 @@ struct AccountExportItem {
     note_auto: bool,
     #[serde(default)]
     ignore_api_models: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_interval_minutes: Option<u32>,
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
     /// ChatGPT：加密的完整 auth.json 副本，随导出携带，导入时优先用它恢复（含 id_token）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codex_auth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    opencode_auth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1840,6 +1963,7 @@ fn default_export_name(kind: &str) -> &'static str {
     match kind {
         "codex" => "chatgpt-accounts.json",
         "claude" => "claude-accounts.json",
+        "opencode" => "opencode-accounts.json",
         _ => "cursor-accounts.json",
     }
 }
@@ -1858,6 +1982,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
             note: a.note.clone(),
             note_auto: a.note_auto,
             ignore_api_models: a.kind == "cursor" && a.ignore_api_models,
+            refresh_interval_minutes: a.refresh_interval_minutes,
             token: a.token.clone(),
             // Cursor 没有 refresh_token 概念；Codex / Claude 随导出（用于自动续期）
             refresh_token: if kind == "cursor" {
@@ -1866,6 +1991,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
                 a.refresh_token.clone()
             },
             codex_auth: a.codex_auth.clone(),
+            opencode_auth: a.opencode_auth.clone(),
         })
         .collect();
     if rows.is_empty() {
@@ -1950,6 +2076,10 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
     } else {
         mutate(&app, |d| {
             for item in parsed.accounts {
+                if kind == "opencode" && item.opencode_auth.as_deref().is_some_and(|blob| crate::opencode::decode(blob,&item.token).is_none()) {
+                    skipped.push(SkippedItem {kind:kind.clone(),label:item.note.clone(),reason:"invalid".into()});
+                    continue;
+                }
                 let Ok(token) = sanitize_token(&kind, &item.token) else {
                     skipped.push(SkippedItem {
                         kind: kind.clone(),
@@ -1974,7 +2104,7 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                     });
                     continue;
                 }
-                let refresh_token = if kind == "cursor" {
+                let refresh_token = if kind == "cursor" || kind == "opencode" {
                     None
                 } else {
                     sanitize_refresh_token(item.refresh_token)
@@ -1989,6 +2119,8 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                     refresh_token,
                     // 文件里带的副本能解开就用它（含 id_token），否则由明文凭据组骨架副本
                     codex_auth: if kind == "codex" { item.codex_auth } else { None },
+                    opencode_auth: if kind == "opencode" { item.opencode_auth } else { None },
+                    refresh_interval_minutes: item.refresh_interval_minutes,
                     last_refresh_at: None,
                     status: None,
                 };
@@ -2055,6 +2187,8 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
         token: result.access_token,
         refresh_token: result.refresh_token,
         codex_auth: None,
+        opencode_auth: None,
+        refresh_interval_minutes: None,
         last_refresh_at: None,
         // 记录 token 过期时刻，刷新流程据此提前续期
         status: result

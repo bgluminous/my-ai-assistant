@@ -64,7 +64,7 @@
 
       <!-- ============ 账户管理 ============ -->
       <section id="accounts-panel" class="panel" role="tabpanel">
-        <div class="surface">
+        <div class="surface account-card" data-account-kind="cursor">
           <div class="section-heading">
             <h3><span class="tag kind-cursor">Cursor</span> 账户</h3>
             <div class="heading-side">
@@ -105,7 +105,7 @@
           </div>
         </div>
 
-        <div class="surface">
+        <div class="surface account-card" data-account-kind="codex">
           <div class="section-heading">
             <h3><span class="tag kind-codex">ChatGPT</span> 账户</h3>
             <div class="heading-side">
@@ -146,7 +146,7 @@
           </div>
         </div>
 
-        <div class="surface">
+        <div class="surface account-card" data-account-kind="claude">
           <div class="section-heading">
             <h3><span class="tag kind-claude">Claude</span> 账户</h3>
             <div class="heading-side">
@@ -184,6 +184,43 @@
               <tbody id="accounts-body-claude"></tbody>
             </table>
             <p id="accounts-empty-claude" class="muted empty" hidden>暂无 Claude 账户。</p>
+          </div>
+        </div>
+        <div class="surface account-card" data-account-kind="opencode">
+          <div class="section-heading">
+            <h3><span class="tag kind-opencode">OpenCode</span> 账户</h3>
+            <div class="heading-side">
+              <span id="accounts-count-opencode" class="muted small"></span>
+              <div class="heading-actions">
+                <button id="accounts-refresh-opencode" class="icon-action" type="button" title="刷新全部 OpenCode 账户" aria-label="刷新全部 OpenCode 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </button>
+                <button id="accounts-import-opencode" class="icon-action" type="button" title="从文件导入 OpenCode 账户" aria-label="从文件导入 OpenCode 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </button>
+                <button id="accounts-export-opencode" class="icon-action" type="button" title="导出 OpenCode 账户" aria-label="导出 OpenCode 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </button>
+                <button id="accounts-add-opencode" class="icon-action" type="button" title="添加 OpenCode 账户" aria-label="添加 OpenCode 账户">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <!-- OpenCode 按工作区展示，额度属于当前授权成员，余额由工作区共享。 -->
+              <colgroup>
+                <col class="col-account" /><col class="col-state" /><col class="col-plan" /><col /><col class="col-ondemand" /><col class="col-time" /><col class="col-actions" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>账户</th><th>状态</th><th>套餐</th><th>用量摘要</th><th>余额</th><th>上次刷新</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="accounts-body-opencode"></tbody>
+            </table>
+            <p id="accounts-empty-opencode" class="muted empty" hidden>暂无 OpenCode 账户。</p>
           </div>
         </div>
       </section>
@@ -286,6 +323,7 @@
             <span class="skeleton-block"></span>
             <span class="skeleton-block"></span>
             <span class="skeleton-block"></span>
+            <span class="skeleton-block"></span>
           </div>
           <div class="skeleton-lines">
             <span class="skeleton-block"></span>
@@ -301,10 +339,6 @@
             <div class="card highlight">
               <span class="card-label">总等价费用（官方 API 价）</span>
               <span id="sum-equivalent" class="card-value">—</span>
-            </div>
-            <div class="card" id="card-actual">
-              <span class="card-label">实际支出（Cursor）</span>
-              <span id="sum-actual" class="card-value">—</span>
             </div>
             <div class="card" id="card-plan" hidden>
               <span class="card-label">套餐月费 · 等价倍数</span>
@@ -323,17 +357,18 @@
           <div id="usage-breakdown" class="cost-breakdown" hidden></div>
           <div class="charts">
             <div class="chart-box chart-box-wide"><h4 id="chart-daily-title">按日 Token</h4><div class="chart-canvas"><canvas id="chart-daily"></canvas></div></div>
-            <!-- 环形图的图例放在画布外的定宽列表里：三张图的画布尺寸一致、圆环同大，
+            <!-- 环形图的图例放在画布外的定宽列表里：四张图的画布尺寸一致、圆环同大，
                  过长的模型名按省略号截断（悬停看全名），点击图例项隐藏 / 恢复对应扇区 -->
             <div class="chart-box"><h4>各模型 Token 数量</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div><ul id="legend-tokens" class="pie-legend" aria-label="图例"></ul></div></div>
             <div class="chart-box"><h4>各模型等价费用（USD）</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-models"></canvas></div><ul id="legend-models" class="pie-legend" aria-label="图例"></ul></div></div>
             <div class="chart-box"><h4>Token 构成</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div><ul id="legend-doughnut" class="pie-legend" aria-label="图例"></ul></div></div>
+            <div class="chart-box"><h4>账号 / 来源 Token 构成</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-sources"></canvas></div><ul id="legend-sources" class="pie-legend" aria-label="图例"></ul></div></div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>模型</th><th class="num">输入</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="num">输出</th><th class="num">合计 Token</th><th class="num">实扣</th><th class="num">等价 API 价</th>
+                  <th>模型</th><th class="num">输入</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="num">输出</th><th class="num">合计 Token</th><th class="num">等价 API 价</th>
                 </tr>
               </thead>
               <tbody id="usage-body"></tbody>
@@ -344,12 +379,12 @@
 
         <!-- 总览：各来源（Cursor 账户含已删除账户保留的数据 + 本地 Codex / Claude 分析）账单小计，按总 Token 降序；置于图表之后 -->
         <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 全部等价费用 ÷ 已知账户套餐月费之和；ChatGPT 为全部设备用量存档，Claude 为本机日志分析，均无实扣金额；标「已删除」的为已删除账户保留的统计数据</span></div>
+          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 全部等价费用 ÷ 已知账户套餐月费之和；ChatGPT 为全部设备用量存档，Claude 为本机日志分析；标「已删除」的为已删除账户保留的统计数据</span></div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>账户</th><th>状态</th><th>数据更新</th><th>套餐</th><th class="num">总 Token</th><th class="num">实际支出</th><th class="num">等价费用</th><th class="num">倍数</th>
+                  <th>账户</th><th>状态</th><th>数据更新</th><th>套餐月费</th><th class="num">总 Token</th><th class="num">等价费用</th><th class="num">倍数</th>
                 </tr>
               </thead>
               <tbody id="usage-overview-body"></tbody>
@@ -777,7 +812,7 @@
                   <option value="720">12 小时</option>
                   <option value="1440">24 小时</option>
                 </select>
-                <p class="muted small">按设定间隔自动刷新全部账户状态，并重新统计用量数据。</p>
+                <p class="muted small">未单独设置同步间隔的账户与共享用量任务使用此间隔。可在各账户的编辑窗口覆盖；关闭全局后，账户的独立间隔仍生效。</p>
                 <p id="interval-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-credentials-title">
@@ -875,6 +910,18 @@
                 </div>
                 <p class="muted small">切换账户时写入 Claude Code 凭据，完成后启动 Claude Desktop。</p>
                 <p id="claude-path-status" class="status" hidden></p>
+              </section>
+              <section class="settings-group" aria-labelledby="settings-opencode-title">
+                <h4 id="settings-opencode-title">OpenCode V2</h4>
+                <label for="opencode-exe-path">CLI 可执行文件</label>
+                <div class="row">
+                  <input id="opencode-exe-path" class="grow" type="text" spellcheck="false" placeholder="OpenCode V2 CLI 完整路径，留空自动探测" />
+                  <button id="opencode-detect" class="secondary compact" type="button">自动搜索</button>
+                </div>
+                <label for="opencode-db-path">数据库路径（选填）</label>
+                <input id="opencode-db-path" type="text" spellcheck="false" placeholder="留空沿用 OpenCode CLI 的数据库路径" />
+                <p class="muted small">用于关联和切换本机登录；套餐和用量使用本应用的独立授权。</p>
+                <p id="opencode-path-status" class="status" hidden></p>
               </section>
             </section>
 
@@ -996,6 +1043,22 @@
 
           <label for="account-note">备注</label>
           <input id="account-note" type="text" spellcheck="false" placeholder="给账户起个名字，便于区分（选填）" />
+
+          <div id="account-interval-field" hidden>
+            <label for="account-refresh-interval">同步间隔</label>
+            <select id="account-refresh-interval" class="compact-select">
+              <option value="">跟随全局</option>
+              <option value="0">关闭</option>
+              <option value="5">5 分钟</option>
+              <option value="15">15 分钟</option>
+              <option value="30">30 分钟</option>
+              <option value="60">1 小时</option>
+              <option value="360">6 小时</option>
+              <option value="720">12 小时</option>
+              <option value="1440">24 小时</option>
+            </select>
+            <p class="muted small">独立间隔覆盖全局，仅控制此账户的定时刷新；ChatGPT / Claude 共享日志仍使用全局间隔。</p>
+          </div>
 
           <label for="account-token">Token</label>
           <textarea id="account-token" rows="3" spellcheck="false" placeholder="user_xxx::eyJ... 或 WorkosCursorSessionToken"></textarea>

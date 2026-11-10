@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const sources = Object.fromEntries(await Promise.all(
-  ["accounts", "usage", "tray_panel", "usage_data"].map(async name =>
+  ["accounts", "usage", "tray_panel", "usage_data", "account_order", "account_refresh"].map(async name =>
     [name, await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8")])
 ));
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -19,11 +19,15 @@ function scan(tokens = 10) {
   return { aggregate: { totalTokens: tokens, totalEquivalentUsd: 1, models: [], daily: [], hourly: [] }, roots: [], sessions: 1 };
 }
 
-async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "idle" } } = {}) {
+async function fixture(name, { sync, ipc, accounts = [], globalMinutes = 0, syncStatus = { state: "idle" } } = {}) {
   const calls = [], timers = new Map(), intervals = new Map(), listeners = new Map(), nodes = new Map();
   const storage = new Map([["trayTab", "cursor"]]);
   const target = new EventTarget();
-  let nextTimer = 0, period = 0;
+  let nextTimer = 0, period = globalMinutes, now = Date.now(), changed, sharedDue;
+  class ClockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   class Node {
     value = ""; hidden = false; disabled = false; textContent = ""; dataset = {}; children = []; handlers = new Map();
     classList = { toggle() {}, add() {}, remove() {}, contains() { return false; } };
@@ -36,7 +40,7 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
     click() { return this.handlers.get("click")?.({ target: this }); }
   }
   const el = id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); };
-  const setTimer = map => (callback, ms) => { const id = ++nextTimer; map.set(id, { callback, ms }); return id; };
+  const setTimer = map => (callback, ms) => { const id = ++nextTimer; map.set(id, { callback, ms, at: now + ms }); return id; };
   const clock = { setTimeout: setTimer(timers), clearTimeout: id => timers.delete(id),
     setInterval: setTimer(intervals), clearInterval: id => intervals.delete(id) };
   const invoke = async (cmd, args) => {
@@ -62,7 +66,7 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
   dismissToast() {}, fillStatus: (node, kind, text) => { node.textContent = text; },
   chartAnimMs: () => 0 };
   class DetailEvent extends Event { constructor(type, options) { super(type); this.detail = options?.detail; } }
-  const context = vm.createContext({ console, ...clock, hooks, Element: Node, Option: Node, CustomEvent: DetailEvent,
+  const context = vm.createContext({ console, Date: ClockDate, ...clock, hooks, Element: Node, Option: Node, CustomEvent: DetailEvent,
     window: { ...clock, addEventListener: target.addEventListener.bind(target), dispatchEvent: target.dispatchEvent.bind(target) },
     document: { querySelector: el, querySelectorAll: () => [], createElement: () => new Node(), addEventListener() {} },
     localStorage: { get length() { return storage.size; }, key: i => [...storage.keys()][i],
@@ -70,7 +74,7 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
   });
   // 测试接缝只替换绘图/行渲染，生产调度、数据加载、事件与加载状态逻辑原样执行。
   const presentation = {
-    accounts: `render = updateRow = hooks.noop; export { refreshAll, loadInitial };`,
+    accounts: `render = updateRow = hooks.noop; export { loadInitial };`,
     usage: `renderOverviewTable = hooks.noop;
       renderOverviewMerged = () => {
         const local = overviewResults.get("local");
@@ -107,17 +111,25 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
   }
   const modules = new Map();
   for (const [path, names] of imports) {
-    if (path === "./usage_data.js") continue;
+    if (["./usage_data.js", "./account_order.js", "./account_refresh.js"].includes(path)) continue;
     modules.set(path, new vm.SyntheticModule([...names], function () {
       for (const key of names) this.setExport(key,
         path === "./shared.js" ? shared[key] || hooks.noop
         : key === "syncError" ? shared.resetError
         : key === "cursorIdentity" ? account => ({ primary: account.note || account.id, secondary: "" })
         : key === "getAccounts" ? () => accounts
+        : key === "onAccountsChanged" ? fn => { changed = fn; }
+        : key === "onSharedUsageRefresh" ? fn => { sharedDue = fn; }
         : key === "getRefreshIntervalMinutes" ? () => period
         : key === "updatePresentation" ? () => ({}) : hooks.noop);
     }, { context }));
   }
+  const order = new vm.SourceTextModule(sources.account_order, { context });
+  await order.link(() => { throw new Error("unexpected import"); }); await order.evaluate();
+  modules.set("./account_order.js", order);
+  const scheduler = new vm.SourceTextModule(sources.account_refresh, { context });
+  await scheduler.link(() => { throw new Error("unexpected import"); }); await scheduler.evaluate();
+  modules.set("./account_refresh.js", scheduler);
   const data = new vm.SourceTextModule(sources.usage_data, { context });
   await data.link(path => modules.get(path));
   await data.evaluate();
@@ -129,6 +141,19 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
   await tick();
   calls.length = 0;
   return { api: entry.namespace, calls, timers, intervals, hooks, el,
+    async advance(ms) {
+      const until = now + ms;
+      let turns = 0;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        assert.ok(++turns < 2000, "timers must not spin");
+        const [id, timer] = next; timers.delete(id); now = timer.at; await timer.callback(); await tick();
+      }
+      now = Math.max(now, until);
+    },
+    async changeAccounts(list, metadata) { accounts = list; changed?.(accounts, metadata); await tick(); },
+    async syncShared() { await sharedDue?.(); await tick(); },
     async event(reason) { for (const fn of listeners.get("codex-usage-changed") || []) fn({ payload: { reason } }); await tick(); },
     async windowEvent(type, detail) { target.dispatchEvent(new DetailEvent(type, { detail })); await tick(); },
     async broadcast(type, payload) { for (const fn of listeners.get(type) || []) fn({ payload }); await tick(); },
@@ -136,33 +161,63 @@ async function fixture(name, { sync, ipc, accounts = [], syncStatus = { state: "
 }
 
 test("global timer runs once without accounts, changes period and stops including delayed startup", async () => {
-  const f = await fixture("accounts");
-  await f.api.setRefreshInterval(5);
-  assert.equal([...f.intervals.values()][0].ms, 300_000);
-  await f.api.refreshAll();
-  assert.equal(f.calls.filter(c => c.cmd === "codex_usage_sync_now").length, 1);
-  assert.equal(f.calls.find(c => c.cmd === "codex_usage_sync_now").args.trigger, "interval");
-  await f.api.setRefreshInterval(15);
-  assert.equal(f.intervals.size, 1);
-  assert.equal([...f.intervals.values()][0].ms, 900_000);
+  const f = await fixture("accounts", { globalMinutes: 5 });
   await f.api.loadInitial();
   const startup = [...f.timers.values()].find(t => t.ms === 3000);
   assert.ok(startup);
+  await f.advance(3000);
+  assert.equal(f.calls.filter(c => c.cmd === "codex_usage_sync_now").length, 1);
+  assert.equal(f.calls.find(c => c.cmd === "codex_usage_sync_now").args.trigger, "interval");
+  await f.api.setRefreshInterval(15);
+  assert.equal(f.timers.size, 1);
+  assert.equal([...f.timers.values()][0].ms, 900_000);
   await f.api.setRefreshInterval(0);
   const before = f.calls.length;
   startup.callback();
-  await f.api.refreshAll();
+  await f.advance(900_000);
+  assert.equal(f.timers.size, 0);
   assert.equal(f.intervals.size, 0);
   assert.equal(f.calls.length, before);
 });
 
 test("one timer cycle syncs once while all managed accounts refresh", async () => {
   const accounts = ["cursor", "codex", "claude"].map(kind => ({ id: kind, kind }));
-  const f = await fixture("accounts", { accounts });
-  await f.api.setRefreshInterval(5);
-  await f.api.refreshAll();
+  const f = await fixture("accounts", { accounts, globalMinutes: 5 });
+  await f.api.loadInitial();
+  await f.advance(3000);
   assert.equal(f.calls.filter(c => c.cmd === "codex_usage_sync_now").length, 1);
   assert.equal(f.calls.filter(c => c.cmd === "account_refresh").length, 3);
+});
+
+test("automatic account updates skip shared logs until the global task while manual updates retain the linkage", async () => {
+  for (const kind of ["cursor", "codex", "claude"]) {
+    const original = { id: kind, kind, token: "fixture", lastRefreshAt: 1 };
+    const f = await fixture("usage", { accounts: [original], globalMinutes: 15 });
+    await f.changeAccounts([original]); f.calls.length = 0;
+    await f.changeAccounts([{ ...original, lastRefreshAt: 2 }], { automaticIds: [kind] });
+    assert.equal(f.calls.filter(call => /scan_sessions|usage_query/.test(call.cmd)).length, 0);
+    assert.equal(f.calls.filter(call => call.cmd === "cursor_usage_fetch").length, kind === "cursor" ? 1 : 0);
+    await f.syncShared();
+    assert.ok(f.calls.some(call => call.cmd === "claude_scan_sessions"));
+    assert.ok(f.calls.some(call => /codex_(scan_sessions|usage_query)/.test(call.cmd)));
+    await f.advance(61_000); f.calls.length = 0;
+    await f.changeAccounts([{ ...original, lastRefreshAt: 3 }]);
+    if (kind !== "cursor") assert.ok(f.calls.some(call => /scan_sessions|usage_query/.test(call.cmd)));
+  }
+});
+
+test("short account overrides never accelerate the global sync and notifications identify automatic refreshes", async () => {
+  const accounts = [{ id: "cursor", kind: "cursor" }, { id: "opencode", kind: "opencode", refreshIntervalMinutes: 5 }];
+  const f = await fixture("accounts", { accounts, globalMinutes: 15 });
+  const automatic = [];
+  f.api.onAccountsChanged((_list, metadata) => automatic.push([...metadata.automaticIds]));
+  await f.api.loadInitial(); await f.advance(3000); f.calls.length = 0; automatic.length = 0;
+  await f.advance(300_000);
+  assert.deepEqual(f.calls.filter(call => call.cmd === "account_refresh").map(call => call.args.id), ["opencode"]);
+  assert.equal(f.calls.some(call => call.cmd === "codex_usage_sync_now"), false);
+  assert.deepEqual(automatic.at(-1), ["opencode"]);
+  await f.api.refreshAccounts(["opencode"]);
+  assert.deepEqual(automatic.at(-1), []);
 });
 
 test("Claude-only statistics finish without waiting for GPT and ignore GPT data notices", async () => {

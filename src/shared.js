@@ -74,6 +74,7 @@ export function escapeHtml(text) {
 
 /** 账户类型 -> 界面展示名（cursor / codex / claude，其它值按 Cursor 处理）。 */
 export function kindLabel(kind) {
+  if (kind === "opencode") return "OpenCode";
   return kind === "codex" ? "ChatGPT" : kind === "claude" ? "Claude" : "Cursor";
 }
 
@@ -165,6 +166,40 @@ export function fmtDateMs(ms) {
 
 export function resetError(err) {
   const message = err instanceof Error ? err.message : String(err);
+  const openCodeErrors = {
+    opencode_auth_required: "请为该工作区完成 OpenCode 独立授权。",
+    opencode_oauth_invalid_response: "OpenCode 授权接口未返回有效的授权地址，请重试。",
+    opencode_http_401: "OpenCode 授权已失效，请重新授权。",
+    opencode_workspace_usage_forbidden: "工作区总用量需要 Owner 或 Admin 授权；成员个人用量不会计入此统计。",
+    opencode_http_403: "当前授权无权读取该工作区数据，请使用有读取权限的账户。",
+    opencode_http_429: "OpenCode 请求过于频繁，请稍后刷新。",
+    opencode_invalid_response: "OpenCode 接口返回了无法识别的数据，已保留缓存。",
+    opencode_invalid_usage: "OpenCode 用量字段不完整或格式有误，未推进同步水位。",
+    opencode_invalid_cursor: "OpenCode 分页游标无效，请重新同步。",
+    opencode_cursor_changed: "OpenCode 分页范围发生变化，请重新同步。",
+    opencode_archive_invalid_backup: "OpenCode 用量备份格式无效，尚未应用备份。",
+    opencode_archive_open_failed: "无法打开 OpenCode 用量归档。",
+    opencode_archive_read_failed: "无法读取 OpenCode 用量归档。",
+    opencode_archive_write_failed: "无法保存 OpenCode 用量归档。",
+    opencode_cli_invalid_response: "OpenCode V2 CLI 返回格式无法识别，请检查版本。",
+    opencode_network_error: "无法连接 OpenCode，已保留缓存。",
+    opencode_workspace_mismatch: "授权工作区不匹配，请选择原工作区。",
+    opencode_choose_workspace: "请在 OpenCode 授权页选择一个工作区后重试。",
+    opencode_oauth_expired: "授权已过期，请重新开始。",
+    opencode_oauth_denied: "授权已被拒绝。",
+    opencode_oauth_cancelled: "授权已取消。",
+    opencode_local_account_not_found: "所选本机账户已不存在，请重新读取账户列表。",
+    opencode_exe_not_found: "未找到 OpenCode CLI，请在设置中配置 V2 可执行文件。",
+    opencode_exe_invalid: "OpenCode CLI 路径无效。",
+    opencode_v2_required: "需要 OpenCode V2，请升级客户端或检查 CLI 路径。",
+    opencode_cli_failed: "OpenCode CLI 操作失败，请确认 V2 客户端可正常使用。",
+    opencode_cli_timeout: "OpenCode CLI 操作超时。",
+    opencode_database_unavailable: "无法读取 OpenCode 数据库，请检查路径与权限。",
+    opencode_client_auth_pending: "已有客户端授权正在进行，请先完成或取消。",
+    opencode_client_auth_failed: "客户端授权未完成，或选择了其它工作区。",
+    opencode_switch_not_confirmed: "未能确认客户端切换结果，请检查 OpenCode 当前登录。",
+  };
+  if (Object.hasOwn(openCodeErrors, message)) return openCodeErrors[message];
   if (message === "update_in_progress") return "应用正在准备安装更新，请稍后操作。";
   if (message === "update_required") return "此版本需要更新，请在「关于」页检查更新或前往 GitHub Releases。";
   return message;

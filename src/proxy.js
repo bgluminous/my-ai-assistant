@@ -1,3 +1,4 @@
+import { createModal } from "./modal.js";
 import { el, invoke, copyText, resetError, fillStatus, toast } from "./shared.js";
 
 // 代理设置弹窗：跟随系统 / 直连 / 自定义（http、https、socks5，可带账号密码）。
@@ -5,6 +6,10 @@ import { el, invoke, copyText, resetError, fillStatus, toast } from "./shared.js
 
 const state = { mode: "system", url: "", path: "" };
 let button = null;
+let modalController;
+function getModal() {
+  return modalController ||= createModal(el("#proxy-modal"));
+}
 
 function mapError(err) {
   const code = resetError(err);
@@ -78,10 +83,12 @@ async function onTest() {
 
 async function onSave() {
   const btn = el("#proxy-save");
-  btn.disabled = true;
+  const operation = getModal().beginSave([btn]);
+  if (!operation) return;
   setStatus("", "保存中…");
   try {
     const view = await invoke("proxy_set", { config: readForm() });
+    if (!operation.current()) return;
     state.mode = view.mode;
     state.url = view.url;
     state.path = view.path;
@@ -91,9 +98,10 @@ async function onSave() {
     closeModal();
     toast("ok", `代理已保存（${label}），后续请求立即生效。`, { key: "proxy" });
   } catch (err) {
+    if (!operation.current()) return;
     setStatus("bad", `保存失败：${mapError(err)}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
@@ -110,27 +118,21 @@ async function onCopyPath() {
 }
 
 function openModal() {
-  el("#proxy-modal").hidden = false;
+  if (getModal().busy) return;
+  getModal().open();
   clearStatus();
   clearTestResult();
   render();
 }
 function closeModal() {
-  el("#proxy-modal").hidden = true;
+  getModal().close();
 }
 
 export async function initProxy() {
   button = el("#proxy-btn");
-  const modal = el("#proxy-modal");
-
-  for (const node of modal.querySelectorAll("[data-close]")) {
-    node.addEventListener("click", closeModal);
-  }
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !modal.hidden) closeModal();
-  });
   for (const seg of el("#proxy-mode").querySelectorAll(".seg")) {
     seg.addEventListener("click", () => {
+      if (getModal().busy) return;
       applyMode(seg.dataset.mode);
       clearTestResult();
     });

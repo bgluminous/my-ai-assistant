@@ -88,7 +88,7 @@ fn gpt_6_usage_keeps_family_cache_and_fast_prices() {
 fn new_price_variants_do_not_fall_back_to_family_prices() {
     let table = defaults();
     // 输入 1 万、输出 1 千、缓存读 5 千、缓存写 2 千，均处于收录的短上下文档。
-    // 覆盖曾回退到基础款的子型号，以及 DeepSeek 旧名称的官方重定向价格。
+    // 覆盖曾回退到基础款的子型号，以及 DeepSeek Flash 的基础价格。
     for (raw, expected_key, expected_usd) in [
         ("cursor-GPT-4-1-Nano-high", "gpt-4.1-nano", 0.001525),
         ("gemini-3-5-flash-lite-high", "gemini-3.5-flash-lite", 0.00565),
@@ -96,7 +96,6 @@ fn new_price_variants_do_not_fall_back_to_family_prices() {
         ("GLM-5-3-Flash-high", "glm-5.3-flash", 0.00215),
         ("glm-5_3-flashx-high", "glm-5.3-flashx", 0.005325),
         ("deepseek-flash", "deepseek-flash", 0.002115),
-        ("deepseek-v4-flash", "deepseek-v4-flash", 0.002115),
         ("claude-sonnet-5-5-thinking", "claude-sonnet-5.5", 0.0355),
         ("claude-5.5-haiku-high", "claude-haiku-5.5", 0.0018),
         ("minimax-m3.1-flash", "minimax-m3.1-flash", 0.002175),
@@ -117,6 +116,46 @@ fn new_price_variants_do_not_fall_back_to_family_prices() {
         assert_eq!(agg.unpriced_models, 0);
         assert!((agg.total_equivalent_usd - expected_usd).abs() < 1e-12,
             "{raw} 聚合费用不对：{}", agg.total_equivalent_usd);
+    }
+}
+
+#[test]
+fn deepseek_flash_versions_keep_separate_usage_with_shared_prices() {
+    let table = defaults();
+    let timestamp = ms("2026-11-11T12:00:00Z");
+    let date = local_ymd_hour(timestamp).unwrap().0;
+    let rows: Vec<_> = [
+        "deepseek-flash", "deepseek-v4-flash", "deepseek-v4.1-flash",
+        "cursor-DeepSeek-v4_1-flash-thinking", "deepseek-v5-flash",
+    ].into_iter().map(|model| TokenRow {
+        output: 1_000.0,
+        cache_read: 5_000.0,
+        cache_write: 2_000.0,
+        ..row(model, 10_000.0, Some(timestamp))
+    }).collect();
+    for usage in &rows {
+        let (key, usd) = price_row(usage, &table).unwrap();
+        assert_eq!(key, "deepseek-flash");
+        assert!((usd - 0.002115).abs() < 1e-12);
+    }
+    let agg = aggregate_and_price_for(rows, &table, Some(&[date]));
+    assert_eq!(agg.models.len(), 4);
+    assert_eq!(agg.unpriced_models, 0);
+    for model in &agg.models {
+        assert_eq!(model.priced_as.as_deref(), Some("deepseek-flash"));
+        let events = if model.model == "deepseek-v4.1-flash" { 2 } else { 1 };
+        assert_eq!(model.events, events);
+        assert!((model.equivalent_usd - events as f64 * 0.002115).abs() < 1e-12);
+    }
+    assert!((agg.total_equivalent_usd - 5.0 * 0.002115).abs() < 1e-12);
+    assert_eq!(agg.daily.len(), 1);
+    assert_eq!(agg.daily[0].models.len(), 4);
+    assert!((agg.daily[0].equivalent_usd - agg.total_equivalent_usd).abs() < 1e-12);
+    assert_eq!(agg.hourly.len(), 1);
+    assert!((agg.hourly[0].equivalent_usd - agg.total_equivalent_usd).abs() < 1e-12);
+    for daily_model in &agg.daily[0].models {
+        let model = agg.models.iter().find(|m| m.model == daily_model.model).unwrap();
+        assert!((daily_model.equivalent_usd - model.equivalent_usd).abs() < 1e-12);
     }
 }
 
@@ -261,6 +300,56 @@ fn entry(key: &str, p: &ModelPrice) -> PricingEntry {
         cache_write: p.cache_write,
         source: String::new(),
     }
+}
+
+#[test]
+fn deepseek_flash_legacy_alias_prices_are_ignored_in_all_layers() {
+    let legacy = table(None, &[
+        ("deepseek-v4-flash", price(99.0, 99.0)),
+        ("deepseek-v4.1-flash", price(88.0, 88.0)),
+        ("cursor-deepseek-v4_1-flash-high", price(77.0, 77.0)),
+    ]);
+    // 只有旧别名变化不会产生有效价格变化，也不修改输入缓存。
+    let original = legacy.clone();
+    assert!(tables_eq(&base_of(legacy.clone()), &defaults()));
+    assert!(tables_eq(&legacy, &original));
+
+    let mut remote = legacy.clone();
+    remote.models.insert("deepseek-flash".into(), price(2.0, 3.0));
+    let mut effective = base_of(remote);
+    let custom = ModelPrice { input: 1.0, output: 2.0, cache_read: 3.0, cache_write: 4.0 };
+    for expected in [price(2.0, 3.0), custom.clone()] {
+        assert_eq!(effective.models.len(), defaults().models.len());
+        for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4.1-flash", "deepseek-v5-flash"] {
+            let (key, actual) = crate::model_match::resolve(&effective, model).unwrap();
+            assert_eq!(key, "deepseek-flash");
+            assert!(price_eq(actual, &expected));
+        }
+        let mut user = legacy.clone();
+        user.models.insert("deepseek-flash".into(), custom.clone());
+        overlay(&mut effective, user);
+    }
+    let (_, usd) = price_row(&TokenRow {
+        output: 1_000.0, cache_read: 5_000.0, cache_write: 2_000.0,
+        ..row("deepseek-v4.1-flash", 10_000.0, None)
+    }, &effective).unwrap();
+    assert!((usd - 0.035).abs() < 1e-12);
+    assert!(tables_eq(&legacy, &original));
+}
+
+#[test]
+fn deepseek_flash_aliases_cannot_be_saved_as_separate_prices() {
+    let base = defaults();
+    for model in [
+        "deepseek-v4-flash", "deepseek-v4.1-flash", "cursor-DeepSeek-v4_1-flash-thinking",
+        "deepseek-v5-flash-fast", "deepseek-flash-latest",
+    ] {
+        let err = diff_overrides(&base, &[entry(model, &price(9.0, 9.0))]).unwrap_err();
+        assert_eq!(err, "DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。");
+    }
+    let overrides = diff_overrides(&base, &[entry("deepseek-flash", &price(9.0, 9.0))]).unwrap();
+    assert_eq!(overrides.len(), 1);
+    assert!(price_eq(&overrides["deepseek-flash"], &price(9.0, 9.0)));
 }
 
 #[test]

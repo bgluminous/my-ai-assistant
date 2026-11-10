@@ -8,6 +8,7 @@ import { parseHTML } from "linkedom";
 const source = await readFile(new URL("../src/app_update.js", import.meta.url), "utf8");
 const presentation = await readFile(new URL("../src/update_status.js", import.meta.url), "utf8");
 const notesSource = await readFile(new URL("../src/release_notes.js", import.meta.url), "utf8");
+const modalSource = await readFile(new URL("../src/modal.js", import.meta.url), "utf8");
 const historySource = await readFile(new URL("../src/update_history.js", import.meta.url), "utf8");
 const markedSource = await readFile(new URL("../src/vendor/marked.esm.js", import.meta.url), "utf8");
 const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
@@ -30,7 +31,7 @@ async function fixture(initial = defaults, responses = {}) {
   nodes.set(selects, about);
   const events = new Map(); const calls = []; let shown = 0;
   const frames = new Map(); let frameId = 0;
-  const context = vm.createContext({ console, URL, document,
+  const context = vm.createContext({ console, URL, document, setTimeout, clearTimeout,
     requestAnimationFrame: callback => { const id = ++frameId; frames.set(id, callback); return id; },
     cancelAnimationFrame: id => frames.delete(id),
     window: { __TAURI__: { core: {}, window: { getCurrentWindow: () => ({ show() { shown++; }, setFocus() { shown++; } }) } } },
@@ -55,7 +56,7 @@ async function fixture(initial = defaults, responses = {}) {
   const marked = new vm.SourceTextModule(markedSource, { context });
   const module = new vm.SourceTextModule(source, { context });
   const modules = { "./shared.js": shared, "./update_status.js": status, "./release_notes.js": notes,
-    "./update_history.js": history, "./vendor/marked.esm.js": marked };
+    "./update_history.js": history, "./vendor/marked.esm.js": marked, "./modal.js": new vm.SourceTextModule(modalSource, { context }) };
   await module.link(name => { assert(modules[name], `Unknown import ${name}`); return modules[name]; });
   await module.evaluate();
   await module.namespace.initAppUpdate();

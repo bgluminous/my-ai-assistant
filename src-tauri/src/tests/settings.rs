@@ -3,6 +3,40 @@
 use super::*;
 
 #[test]
+fn opencode_failure_settings_mutation_keeps_memory_until_disk_save_succeeds() {
+    let mut current: Settings = serde_json::from_value(serde_json::json!({
+        "accounts": [{"id":"a","kind":"opencode","token":"wrk_a","note":"kept"}],
+        "intervalMinutes":15
+    })).unwrap();
+    let before = serde_json::to_value(&current).unwrap();
+    let result = mutate_saved(&mut current, |candidate| {
+        candidate.accounts.clear();
+        candidate.interval_minutes = 5;
+        Ok(())
+    }, |_| Err("settings_write_failed".into()));
+    assert_eq!(result.unwrap_err(), "settings_write_failed");
+    assert_eq!(serde_json::to_value(&current).unwrap(), before);
+
+    let result: Result<(), String> = mutate_saved(&mut current, |candidate| {
+        candidate.accounts.clear();
+        Err("change_failed".into())
+    }, |_| panic!("a failed change must never be persisted"));
+    assert_eq!(result.unwrap_err(), "change_failed");
+    assert_eq!(serde_json::to_value(&current).unwrap(), before);
+
+    let saved = std::cell::RefCell::new(None);
+    mutate_saved(&mut current, |candidate| {
+        candidate.accounts.clear();
+        Ok(())
+    }, |candidate| {
+        *saved.borrow_mut() = Some(serde_json::to_value(candidate).unwrap());
+        Ok(())
+    }).unwrap();
+    assert!(current.accounts.is_empty());
+    assert_eq!(saved.into_inner().unwrap(), serde_json::to_value(current).unwrap());
+}
+
+#[test]
 fn official_urls_migrate_but_custom_sources_and_cached_prices_survive() {
     let legacy = "https://inf.xil.to/kv/MAA-Price-Table";
     let custom = "https://example.org/own-prices.json";

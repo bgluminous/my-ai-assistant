@@ -1,3 +1,4 @@
+import { createModal } from "./modal.js";
 import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml, toast } from "./shared.js";
 import { notifyPricingChanged } from "./usage_data.js";
 import { pricingError } from "./update_status.js";
@@ -19,8 +20,15 @@ const state = {
   checking: false,
 };
 let chip = null;
+let modalController;
+function getModal() {
+  return modalController ||= createModal(el("#pricing-modal"));
+}
 
 const SOURCE_LABEL = { default: "默认", remote: "在线", custom: "自定义" };
+
+// 与后端 model_match 的 Flash 别名规则一致；只允许在基础项修改各版本的共享价格。
+const DEEPSEEK_FLASH_NAME = /^(?:cursor-)?deepseek-(?:v[0-9]+(?:[._-][0-9]+)*-)?flash(?:-[0-9]+)*(?:-(?:fast|xhigh|high|medium|low|minimal|max|thinking|reasoning|latest))*$/;
 
 function numToStr(v) {
   return v === null || v === undefined || !Number.isFinite(v) ? "0" : String(v);
@@ -92,6 +100,7 @@ function render() {
 }
 
 function onEdit(ev) {
+  if (getModal().busy) return;
   const input = ev.target.closest("input.price-input");
   if (!input) return;
   const tr = input.closest("tr");
@@ -110,6 +119,7 @@ function onEdit(ev) {
 }
 
 function onRemove(ev) {
+  if (getModal().busy) return;
   const btn = ev.target.closest("button[data-remove]");
   if (!btn) return;
   const tr = btn.closest("tr");
@@ -122,9 +132,14 @@ function onRemove(ev) {
 }
 
 function onAdd() {
+  if (getModal().busy) return;
   const key = el("#add-key").value.trim().toLowerCase();
   if (!key) {
     setStatus("bad", "请先填写模型名。");
+    return;
+  }
+  if (key !== "deepseek-flash" && DEEPSEEK_FLASH_NAME.test(key)) {
+    setStatus("bad", "DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。");
     return;
   }
   if (state.entries.some((e) => e.key.toLowerCase() === key)) {
@@ -152,8 +167,8 @@ function onAdd() {
 }
 
 async function onSave() {
-  const btn = el("#pricing-save");
-  btn.disabled = true;
+  const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
+  if (!operation) return;
   setStatus("", "保存中…");
   try {
     const models = state.entries.map((e) => ({
@@ -165,26 +180,30 @@ async function onSave() {
     }));
     const status = await invoke("pricing_save", { models, note: state.note ?? null });
     notifyPricingChanged();
+    if (!operation.current()) return;
     await load();
+    if (!operation.current()) return;
     render();
     setChip(status.models);
     // 保存成功即关闭弹窗，结果用右上角 toast 提示；失败时保留弹窗与状态条
     closeModal();
     toast("ok", `价格表已保存，共 ${status.models} 个模型生效，用量统计已按新价重算。`, { key: "pricing" });
   } catch (err) {
+    if (!operation.current()) return;
     setStatus("bad", `保存失败：${resetError(err)}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
 async function onReset() {
-  const btn = el("#pricing-reset");
-  btn.disabled = true;
+  const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
+  if (!operation) return;
   setStatus("", "重置中…");
   try {
     const view = await invoke("pricing_reset");
     notifyPricingChanged();
+    if (!operation.current()) return;
     applyView(view);
     render();
     syncUpdateArea();
@@ -192,9 +211,10 @@ async function onReset() {
     setStatus("ok", "已恢复为内置默认价格表（同时清除了在线表缓存），用量统计已按默认价重算。");
     checkUpdate(); // 重置后重新检测：在线表若与默认表不同会再次提示
   } catch (err) {
+    if (!operation.current()) return;
     setStatus("bad", `重置失败：${resetError(err)}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
@@ -225,13 +245,14 @@ function syncUpdateArea(resetInput = false) {
 }
 
 async function onUpdate() {
-  const btn = el("#pricing-update-btn");
-  btn.disabled = true;
+  const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
+  if (!operation) return;
   setStatus("", "正在拉取在线价格表…");
   try {
     const url = el("#pricing-update-url").value.trim();
     const view = await invoke("pricing_update_apply", { url });
     notifyPricingChanged();
+    if (!operation.current()) return;
     applyView(view);
     state.update = { available: false, models: 0 };
     state.error = "";
@@ -240,11 +261,12 @@ async function onUpdate() {
     setChip(state.entries.length);
     setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型，用量统计已按新价重算。`);
   } catch (err) {
+    if (!operation.current()) return;
     state.error = pricingError(err);
     setStatus("bad", state.error);
     syncUpdateArea();
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
@@ -281,27 +303,19 @@ async function onCopyPath() {
 }
 
 function openModal() {
-  el("#pricing-modal").hidden = false;
+  if (getModal().busy) return;
+  getModal().open();
   clearStatus();
   syncUpdateArea(true);
   render();
   el("#pricing-search").focus();
 }
 function closeModal() {
-  el("#pricing-modal").hidden = true;
+  getModal().close();
 }
 
 export async function initPricing() {
   chip = el("#pricing-chip");
-  const modal = el("#pricing-modal");
-
-  for (const node of modal.querySelectorAll("[data-close]")) {
-    node.addEventListener("click", closeModal);
-  }
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !modal.hidden) closeModal();
-  });
-
   el("#pricing-search").addEventListener("input", render);
   el("#pricing-add-btn").addEventListener("click", onAdd);
   el("#pricing-save").addEventListener("click", onSave);
@@ -309,7 +323,7 @@ export async function initPricing() {
   el("#pricing-copy-path").addEventListener("click", onCopyPath);
   el("#pricing-update-btn").addEventListener("click", onUpdate);
   el("#pricing-update-retry").addEventListener("click", () => { void checkUpdate(true); });
-  el("#pricing-update-proxy").addEventListener("click", () => { closeModal(); el("#proxy-btn").click(); });
+  el("#pricing-update-proxy").addEventListener("click", () => { if (getModal().busy) return; closeModal(); el("#proxy-btn").click(); });
   el("#pricing-update-source").addEventListener("click", () => {
     void invoke("app_update_open_pricing").catch(() => setStatus("bad", "无法打开浏览器，请在 GitHub 公共仓库查看 resources/my-ai-assistant/pricing.json。"));
   });

@@ -9,7 +9,22 @@ pub const UA: &str =
 /// - direct：显式禁用任何代理
 /// - custom：使用指定地址（支持 http/https/socks5，可含账号密码）
 pub fn build_client(cfg: &crate::proxy::ProxyConfig) -> reqwest::Client {
+    build_with_redirects(cfg, reqwest::redirect::Policy::default())
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// OAuth 凭据请求不跟随重定向，避免 307/308 将请求体里的 refresh token 转交其它站点。
+pub fn private_client() -> Result<reqwest::Client, String> {
+    build_with_redirects(&crate::proxy::current(), reqwest::redirect::Policy::none())
+        .map_err(|_| "opencode_network_error".into())
+}
+
+fn build_with_redirects(
+    cfg: &crate::proxy::ProxyConfig,
+    redirects: reqwest::redirect::Policy,
+) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
+        .redirect(redirects)
         .user_agent(UA)
         .timeout(Duration::from_secs(40));
     builder = match cfg.mode.as_str() {
@@ -23,9 +38,7 @@ pub fn build_client(cfg: &crate::proxy::ProxyConfig) -> reqwest::Client {
         "direct" => builder.no_proxy(),
         _ => builder,
     };
-    builder
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    builder.build()
 }
 
 pub fn client() -> reqwest::Client {
@@ -34,9 +47,7 @@ pub fn client() -> reqwest::Client {
 
 /// Cursor 的 User Token 常以 `user_xxx::<jwt>` 形式出现，粘贴时 `::` 可能被 URL 编码为 `%3A%3A`。
 pub fn normalize_cursor_token(raw: &str) -> String {
-    raw.trim()
-        .replace("%3A%3A", "::")
-        .replace("%3a%3a", "::")
+    raw.trim().replace("%3A%3A", "::").replace("%3a%3a", "::")
 }
 
 /// 取 `user_xxx::<jwt>` 中 `::` 之后的 JWT 部分；若无分隔符则原样返回。

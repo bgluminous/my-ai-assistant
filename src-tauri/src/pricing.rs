@@ -83,6 +83,10 @@ fn overlay(base: &mut PricingTable, layer: PricingTable) {
         base.note = layer.note;
     }
     for (k, v) in layer.models {
+        // 仅过滤有效表，不改写原在线缓存或用户配置；Flash 所有版本共用基础项。
+        if crate::model_match::is_deepseek_flash_alias(&k) {
+            continue;
+        }
         base.models.insert(k, v);
     }
 }
@@ -533,6 +537,9 @@ fn diff_overrides(
         let key = m.key.trim().to_lowercase();
         if key.is_empty() {
             continue;
+        }
+        if crate::model_match::is_deepseek_flash_alias(&key) {
+            return Err("DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。".into());
         }
         for val in [m.input, m.output, m.cache_read, m.cache_write] {
             if !val.is_finite() || val < 0.0 {

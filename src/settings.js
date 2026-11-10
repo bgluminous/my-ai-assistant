@@ -1,3 +1,5 @@
+import { createModal } from "./modal.js";
+import { getAccountGroupOrder, setAccountGroupOrder } from "./account_order.js";
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
 import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
 import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sync.js";
@@ -56,10 +58,23 @@ function initSettingsSections() {
   });
 }
 
+let settingsModal;
+function getSettingsModal() {
+  return settingsModal ||= createModal(el("#settings-modal"), {
+    isBusy: () => backupBusy,
+    onClose() { if (scanning) void onScanCancel(); },
+  });
+}
+
 function closeSettings() {
-  if (scanning) void onScanCancel();
-  el("#settings-modal").hidden = true;
-  el("#settings-btn").focus();
+  getSettingsModal().close();
+}
+
+function beginSettingsSave() {
+  return getSettingsModal().beginSave([
+    el("#settings-done"), el("#accounts-interval"), el("#local-sync-interval"),
+    el("#autostart-enabled"), el("#autostart-silent"),
+  ]);
 }
 
 /** 弹窗内某一区块的状态条：set(kind, text) 填充并显示，clear() 隐藏并清空。 */
@@ -97,17 +112,24 @@ function intervalText(minutes) {
 }
 
 async function onIntervalChange() {
+  const operation = beginSettingsSave();
+  if (!operation) return;
   const select = el("#accounts-interval");
   const previous = getRefreshIntervalMinutes();
   try {
     const minutes = await setRefreshInterval(Number(select.value));
+    if (!operation.current()) return;
     intervalStatus.set(
       "ok",
-      minutes > 0 ? `已开启定时刷新，每 ${intervalText(minutes)}自动刷新账户状态与用量统计。` : "已关闭定时刷新。"
+      minutes > 0 ? `全局间隔已设为 ${intervalText(minutes)}，用于未单独设置的账户与共享用量任务。`
+        : "已关闭全局定时刷新，账户的独立间隔仍生效。"
     );
   } catch (error) {
+    if (!operation.current()) return;
     select.value = String(previous);
     intervalStatus.set("bad", `设置定时刷新失败：${resetError(error)}`);
+  } finally {
+    operation.finish();
   }
 }
 
@@ -123,14 +145,20 @@ async function loadLocalSyncInterval() {
 }
 
 async function onLocalSyncChange() {
+  const operation = beginSettingsSave();
+  if (!operation) return;
   const select = el("#local-sync-interval");
   try {
     const minutes = await invoke("local_sync_set", { minutes: Number(select.value) });
+    if (!operation.current()) return;
     const text = minutes === 1440 ? "1 天" : intervalText(minutes);
     localSyncStatus.set("ok", `已设为每 ${text}检查一次本机 auth.json。`);
   } catch (error) {
+    if (!operation.current()) return;
     void loadLocalSyncInterval();
     localSyncStatus.set("bad", `设置同步间隔失败：${resetError(error)}`);
+  } finally {
+    operation.finish();
   }
 }
 
@@ -153,10 +181,13 @@ async function loadAutostart() {
 }
 
 async function onAutostartChange() {
+  const operation = beginSettingsSave();
+  if (!operation) return;
   const enabled = el("#autostart-enabled").checked;
   const silent = el("#autostart-silent").checked;
   try {
     const v = await invoke("autostart_set", { enabled, silent });
+    if (!operation.current()) return;
     reflectAutostart(!!v.enabled, !!v.silent);
     autostartStatus.set(
       "ok",
@@ -167,9 +198,13 @@ async function onAutostartChange() {
         : "已关闭开机自启动。"
     );
   } catch (error) {
+    if (!operation.current()) return;
     // 写系统失败时回读真实状态，避免界面与系统不一致
     void loadAutostart();
     autostartStatus.set("bad", `设置开机启动失败：${resetError(error)}`);
+  } finally {
+    operation.finish();
+    if (operation.current()) el("#autostart-silent").disabled = !el("#autostart-enabled").checked;
   }
 }
 
@@ -210,12 +245,15 @@ function collectUiPrefs() {
   try {
     if (localStorage.getItem("theme") === "light") theme = "light";
   } catch { /* ignore */ }
-  return { theme, numberUnit: getNumberUnit() };
+  return { theme, numberUnit: getNumberUnit(), accountGroupOrder: getAccountGroupOrder() };
 }
 
 /** 应用备份携带的界面偏好：主题即时切换，数字单位广播 unitchange 重绘各视图。 */
 function applyUiPrefs(prefs) {
   if (!prefs || typeof prefs !== "object") return;
+  if (Array.isArray(prefs.accountGroupOrder)) {
+    try { setAccountGroupOrder(prefs.accountGroupOrder); } catch { /* 界面存储不可用不影响数据恢复 */ }
+  }
   if (prefs.theme === "light" || prefs.theme === "dark") {
     document.documentElement.dataset.theme = prefs.theme;
     try { localStorage.setItem("theme", prefs.theme); } catch { /* ignore */ }
@@ -265,7 +303,17 @@ async function doImportApply(path, password) {
     if (exists > 0) parts.push(`跳过 ${exists} 个已存在`);
     if (invalid > 0) parts.push(`${invalid} 个无效`);
     if (usageRestored > 0) parts.push(`恢复 ${usageRestored} 个已删除账户的统计数据`);
-    backupStatus.set("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
+    if (r.opencodeEventsRestored > 0) parts.push(`恢复 ${r.opencodeEventsRestored} 条 OpenCode 请求明细`);
+    if (r.opencodeUsageError) {
+      const reason = {
+        opencode_archive_open_failed: "无法打开归档数据库",
+        opencode_archive_read_failed: "无法读取归档数据库",
+        opencode_archive_write_failed: "归档数据库写入失败",
+      }[r.opencodeUsageError] || resetError(r.opencodeUsageError);
+      backupStatus.set("warn", `部分恢复完成：${parts.join("，")}；账户和设置已应用。OpenCode 归档未恢复（${reason}），本机原有归档未改变，可重试导入同一备份。`);
+    } else {
+      backupStatus.set("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
+    }
     // 新导入的账号后台排队刷新验证，与账户页导入体验一致
     const ids = Array.isArray(r && r.importedIds) ? r.importedIds : [];
     if (ids.length) void refreshAccounts(ids);
@@ -286,13 +334,13 @@ async function doImportApply(path, password) {
 }
 
 function onBackupExportClick() {
-  if (backupBusy) return;
+  if (getSettingsModal().busy) return;
   backupStatus.clear();
   showPasswordRow("export", "");
 }
 
 async function onBackupImportClick() {
-  if (backupBusy) return;
+  if (getSettingsModal().busy) return;
   backupStatus.clear();
   hidePasswordRow();
   backupBusy = true;
@@ -317,7 +365,7 @@ async function onBackupImportClick() {
 }
 
 function onBackupPasswordOk() {
-  if (backupBusy) return;
+  if (getSettingsModal().busy) return;
   const password = el("#backup-password").value.trim();
   if (backupPasswordMode === "export") {
     hidePasswordRow();
@@ -339,6 +387,8 @@ function onBackupPasswordOk() {
 // 三个客户端路径输入框与后端配置命令的对应；name / detect 仅 ChatGPT 与 Claude Desktop 有
 //（它们走一键探测，Cursor 走下面的逐个扫描）
 const CLIENT_PATHS = [
+  { input: "#opencode-exe-path", get: "opencode_client_get", set: "opencode_client_set", invalid: "opencode_exe_invalid",
+    status: statusBox("#opencode-path-status"), name: "OpenCode V2 CLI", detectBtn: "#opencode-detect", detect: "opencode_client_detect", dbInput: "#opencode-db-path" },
   {
     input: "#cursor-exe-path",
     get: "cursor_client_get",
@@ -374,6 +424,7 @@ async function loadClientPaths() {
     try {
       const v = await invoke(c.get);
       el(c.input).value = (v && v.exePath) || "";
+      if (c.dbInput) el(c.dbInput).value = v?.dbPath || "";
     } catch {
       // 浏览器直开等非 Tauri 环境静默
     }
@@ -478,27 +529,38 @@ async function onScanCancel() {
 
 // 点「完成」：保存同步配置与客户端路径并关闭；配置无效则定位错误且不关闭。空路径 = 清除配置。
 async function onDone() {
-  if (!await saveSyncSettings(true)) {
-    selectSettingsSection("sync");
-    el("#gpt-sync-result").focus();
-    return;
-  }
-  if (scanning) void onScanCancel();
-  for (const c of CLIENT_PATHS) {
-    try {
-      await invoke(c.set, { exePath: el(c.input).value.trim() });
-    } catch (error) {
-      if (resetError(error) === c.invalid) {
-        c.status.set("bad", "路径无效或文件不存在，请修正或清空后再完成。");
-      } else {
-        c.status.set("bad", `保存路径失败：${resetError(error)}`);
-      }
-      selectSettingsSection("clients");
-      el(c.input).focus();
+  const operation = beginSettingsSave();
+  if (!operation) return;
+  try {
+    const saved = await saveSyncSettings(true);
+    if (!operation.current()) return;
+    if (!saved) {
+      selectSettingsSection("sync");
+      el("#gpt-sync-result").focus();
       return;
     }
+    if (scanning) void onScanCancel();
+    for (const c of CLIENT_PATHS) {
+      try {
+        await invoke(c.set, { exePath: el(c.input).value.trim(), ...(c.dbInput ? { dbPath: el(c.dbInput).value.trim() } : {}) });
+        if (!operation.current()) return;
+      } catch (error) {
+        if (!operation.current()) return;
+        if (resetError(error) === c.invalid) {
+          c.status.set("bad", "路径无效或文件不存在，请修正或清空后再完成。");
+        } else {
+          c.status.set("bad", `保存路径失败：${resetError(error)}`);
+        }
+        operation.finish();
+        selectSettingsSection("clients");
+        el(c.input).focus();
+        return;
+      }
+    }
+    if (operation.current()) closeSettings();
+  } finally {
+    operation.finish();
   }
-  closeSettings();
 }
 
 /* ---------- 初始化 ---------- */
@@ -506,8 +568,9 @@ async function onDone() {
 export function initSettings() {
   initSettingsSections();
   initSyncSettings();
-  const modal = el("#settings-modal");
   el("#settings-btn").addEventListener("click", () => {
+    if (getSettingsModal().busy) return;
+    getSettingsModal().open();
     renderUnitSeg();
     intervalStatus.clear();
     el("#accounts-interval").value = String(getRefreshIntervalMinutes());
@@ -523,18 +586,9 @@ export function initSettings() {
     sessionActive = false;
     updateScanButton();
     el("#cursor-scan-cancel").hidden = true;
-    modal.hidden = false;
     el("#settings-nav [aria-selected='true']").focus();
     void loadAutostart();
     void loadClientPaths();
-  });
-  for (const node of modal.querySelectorAll("[data-close]")) {
-    node.addEventListener("click", closeSettings);
-  }
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !modal.hidden) {
-      closeSettings();
-    }
   });
   for (const seg of el("#unit-mode").querySelectorAll(".seg")) {
     seg.addEventListener("click", () => {

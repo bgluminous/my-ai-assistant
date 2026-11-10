@@ -1,6 +1,9 @@
 mod accounts;
 mod app_update;
 mod operations;
+mod opencode;
+mod opencode_local;
+mod opencode_store;
 mod update_protocol;
 mod audit;
 mod backup;
@@ -232,6 +235,16 @@ pub fn run() {
             accounts::accounts_import_file,
             accounts::accounts_set_interval,
             accounts::account_refresh,
+            opencode::opencode_oauth_start,
+            opencode::opencode_oauth_poll,
+            opencode::opencode_oauth_cancel,
+            opencode_local::opencode_client_get,
+            opencode_local::opencode_local_accounts,
+            opencode_local::opencode_client_set,
+            opencode_local::opencode_client_detect,
+            opencode_local::opencode_switch_local,
+            opencode_local::opencode_client_oauth_poll,
+            opencode_store::opencode_usage_fetch,
             audit::audit_list,
             audit::audit_clear,
             usage_archive::usage_snapshot_save,

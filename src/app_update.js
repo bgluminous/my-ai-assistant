@@ -1,3 +1,4 @@
+import { createModal, closeAllModals } from "./modal.js";
 import { el, invoke, listen, fmtDateMs, toast, copyText } from "./shared.js";
 import { updatePresentation } from "./update_status.js";
 import { renderReleaseNotes } from "./release_notes.js";
@@ -5,6 +6,13 @@ import { initUpdateHistory, updateHistoryState } from "./update_history.js";
 
 let state = null;
 let confirmingVersion = null;
+let installModal;
+function getInstallModal() {
+  return installModal ||= createModal(el("#app-update-confirm"), {
+    mode: () => "confirm",
+    onClose: () => { confirmingVersion = null; },
+  });
+}
 let panelKey = null;
 let progressFrame = null;
 let lastProgress = null;
@@ -117,7 +125,7 @@ function render(view, forcePanel = false) {
   el("#pricing-chip").disabled = !!view.forceUpdate || ui.paused;
   el("#settings-btn").disabled = ui.paused;
   el("#proxy-btn").disabled = ui.paused;
-  if (ui.paused) for (const modal of document.querySelectorAll(".modal")) modal.hidden = true;
+  if (ui.paused) closeAllModals();
 }
 function report(error) {
   panelKey = null;
@@ -131,13 +139,13 @@ function requestInstall() {
   if (!state?.canInstall || !state.latestVersion) return;
   confirmingVersion = state.latestVersion;
   el("#app-update-confirm-text").textContent = `下载并安装 ${confirmingVersion}，完成后将重启应用。请先保存尚未提交的编辑。`;
-  el("#app-update-confirm").hidden = false;
+  getInstallModal().open();
   el("#app-update-confirm-ok").focus();
 }
 async function install() {
   const version = confirmingVersion;
   confirmingVersion = null;
-  el("#app-update-confirm").hidden = true;
+  getInstallModal().close();
   if (!version) return;
   try { render(await invoke("app_update_install", { version })); } catch (error) { report(error); }
 }
@@ -158,16 +166,10 @@ export async function initAppUpdate() {
     el(selector).addEventListener("click", openChangelogLink);
     el(selector).addEventListener("auxclick", openChangelogLink);
   }
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { confirmingVersion = null; el("#app-update-confirm").hidden = true; }
-  });
   el("#app-update-chip").addEventListener("click", showAbout);
   el("#app-update-check").addEventListener("click", check);
   el("#app-update-install").addEventListener("click", requestInstall);
   el("#app-update-confirm-ok").addEventListener("click", install);
-  for (const node of el("#app-update-confirm").querySelectorAll("[data-close]")) {
-    node.addEventListener("click", () => { confirmingVersion = null; el("#app-update-confirm").hidden = true; });
-  }
   el("#app-update-cancel").addEventListener("click", () => { void invoke("app_update_cancel").catch(report); });
   el("#app-update-proxy").addEventListener("click", () => el("#proxy-btn").click());
   el("#app-update-releases").addEventListener("click", () => { void invoke("app_update_open_releases").catch(report); });

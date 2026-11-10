@@ -1,5 +1,6 @@
 //! 全量数据备份：settings.json 全部内容（设置 + 账号）+ 前端界面偏好 + 已删除 Cursor 账户
-//! 保留的用量事件库，单 JSON 文件。在用账户的事件库不随备份携带（导入后可自行重新同步）。
+//! 保留的用量事件库及 OpenCode 全部工作区归档，单 JSON 文件。
+//! 在用 Cursor 账户的事件库不随备份携带（导入后可自行重新同步）。
 //!
 //! 导出：可选密码加密——PBKDF2-SHA256（随机盐）派生 256 位密钥，AES-256-GCM
 //! 加密 data 段整体；明文导出时 data 段直接内联。
@@ -13,7 +14,7 @@ use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
@@ -210,11 +211,13 @@ pub async fn backup_export(
         .map(Vec::len)
         .unwrap_or(0);
     let usage_archives = usage_archive::export_deleted()?;
+    let opencode_usage = crate::opencode_store::export_archives()?;
     let usage_count = usage_archives.len();
     let data = json!({
         "settings": settings_value,
         "uiPrefs": ui_prefs,
         "usageArchives": usage_archives,
+        "opencodeUsage": opencode_usage,
     });
 
     let file_name = format!(
@@ -320,8 +323,93 @@ pub struct BackupApplyResult {
     pub skipped_invalid: usize,
     /// 恢复的已删除账户统计数据条数。
     pub usage_restored: usize,
+    /// 恢复的 OpenCode 请求明细条数。
+    pub opencode_events_restored: usize,
+    /// 设置与 Cursor 归档已经处理，但 OpenCode 归档恢复失败；原有归档未改变，可重试。
+    pub opencode_usage_error: Option<String>,
     /// 备份携带的界面偏好（主题、数字单位），由前端应用到 localStorage。
     pub ui_prefs: Value,
+}
+
+struct SettingsImport {
+    imported_ids: Vec<String>,
+    added: Vec<(String, String, String, String)>,
+    skipped_exists: usize,
+    skipped_invalid: usize,
+    live_identities: Vec<String>,
+}
+
+fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -> SettingsImport {
+    let mut imported_ids = Vec::new();
+    let mut added = Vec::new();
+    let mut skipped_exists = 0;
+    let mut skipped_invalid = 0;
+    // 账号合并：同身份（离线解析，解析不出回退 token 全等）跳过；
+    // 逐个推入 s.accounts，天然覆盖备份文件内部的重复项。
+    for acc in incoming.accounts {
+        let Ok(kind) = accounts::sanitize_kind(&acc.kind) else {
+            skipped_invalid += 1;
+            continue;
+        };
+        let Ok(token) = accounts::sanitize_token(&kind, &acc.token) else {
+            skipped_invalid += 1;
+            continue;
+        };
+        if kind == "opencode" && acc.opencode_auth.as_deref().is_some_and(|blob| crate::opencode::decode(blob,&token).is_none()) {
+            skipped_invalid += 1;
+            continue;
+        }
+        if accounts::is_duplicate_account(&s.accounts, &kind, &token, None) {
+            skipped_exists += 1;
+            continue;
+        }
+        // 重新生成 id，避免与本机现有账号冲突；状态摘要与刷新时间随备份保留。
+        // ChatGPT 的加密副本已在 sanitize_loaded 里解出 token，这里连副本一起带过来
+        let refresh_token = if kind == "cursor" || kind == "opencode" { None } else { acc.refresh_token };
+        let codex_auth = if kind == "codex" { acc.codex_auth } else { None };
+        let opencode_auth = if kind == "opencode" { acc.opencode_auth } else { None };
+        let entry = Account {
+            id: accounts::new_id(),
+            ignore_api_models: kind == "cursor" && acc.ignore_api_models,
+            kind,
+            note: acc.note,
+            note_auto: acc.note_auto,
+            token,
+            refresh_token,
+            codex_auth,
+            opencode_auth,
+            refresh_interval_minutes: acc.refresh_interval_minutes,
+            last_refresh_at: acc.last_refresh_at,
+            status: acc.status,
+        };
+        imported_ids.push(entry.id.clone());
+        added.push((
+            entry.id.clone(),
+            entry.kind.clone(),
+            entry.token.clone(),
+            accounts::display_name(&entry.kind, &entry.note, &entry.token),
+        ));
+        s.accounts.push(entry);
+    }
+    // 其余设置整体以备份为准（已在 sanitize_loaded 归一化）
+    s.interval_minutes = incoming.interval_minutes;
+    s.proxy = incoming.proxy;
+    s.pricing = incoming.pricing;
+    s.pricing_remote = incoming.pricing_remote;
+    s.app_update = incoming.app_update;
+    s.cursor_client = incoming.cursor_client;
+    s.codex_client = incoming.codex_client;
+    s.claude_client = incoming.claude_client;
+    s.opencode_client = incoming.opencode_client;
+    s.autostart_silent = incoming.autostart_silent;
+    // 旧备份没有该字段时反序列化为默认值，直接覆盖即可
+    s.codex_local_sync_minutes = incoming.codex_local_sync_minutes;
+    if has_sync_config {
+        s.codex_usage_sync = incoming.codex_usage_sync.restore_local_fields(&s.codex_usage_sync);
+    }
+    let live_identities = s.accounts.iter().filter(|a| a.kind == "cursor")
+        .filter_map(|a| accounts::account_identity(&a.kind, &a.token)).collect();
+    SettingsImport { imported_ids, added, skipped_exists, skipped_invalid, live_identities }
 }
 
 /// 解析（必要时解密）备份并合并到本机：账号去重合并，其余设置整体覆盖。
@@ -369,84 +457,30 @@ pub async fn backup_import_apply(
         .cloned()
         .unwrap_or_default();
 
-    let mut imported_ids: Vec<String> = Vec::new();
-    let mut added: Vec<(String, String, String, String)> = Vec::new();
-    let mut skipped_exists = 0usize;
-    let mut skipped_invalid = 0usize;
-    let import_settings = || settings::mutate(|s| {
-        // 账号合并：同身份（离线解析，解析不出回退 token 全等）跳过；
-        // 逐个推入 s.accounts，天然覆盖备份文件内部的重复项。
-        for acc in incoming.accounts {
-            let Ok(kind) = accounts::sanitize_kind(&acc.kind) else {
-                skipped_invalid += 1;
-                continue;
-            };
-            let Ok(token) = accounts::sanitize_token(&kind, &acc.token) else {
-                skipped_invalid += 1;
-                continue;
-            };
-            if accounts::is_duplicate_account(&s.accounts, &kind, &token, None) {
-                skipped_exists += 1;
-                continue;
+    let opencode_usage = data.get("opencodeUsage").cloned().unwrap_or(Value::Null);
+    crate::opencode_store::validate_archives(&opencode_usage)?;
+    // 在任何账户、设置或归档写入前检查原生授权；持锁到设置保存完成，避免检查后启动授权。
+    let import_settings = || settings::mutate(|s| Ok(merge_settings(s, incoming, has_sync_config)));
+    let SettingsImport { imported_ids, added, skipped_exists, skipped_invalid, live_identities } =
+        crate::opencode_local::with_client_config_update(|| {
+            if has_sync_config {
+                crate::codex_sync::update_configuration(import_settings)
+            } else {
+                import_settings()
             }
-            // 重新生成 id，避免与本机现有账号冲突；状态摘要与刷新时间随备份保留。
-            // ChatGPT 的加密副本已在 sanitize_loaded 里解出 token，这里连副本一起带过来
-            let refresh_token = if kind == "cursor" { None } else { acc.refresh_token };
-            let codex_auth = if kind == "codex" { acc.codex_auth } else { None };
-            let entry = Account {
-                id: accounts::new_id(),
-                ignore_api_models: kind == "cursor" && acc.ignore_api_models,
-                kind,
-                note: acc.note,
-                note_auto: acc.note_auto,
-                token,
-                refresh_token,
-                codex_auth,
-                last_refresh_at: acc.last_refresh_at,
-                status: acc.status,
-            };
-            imported_ids.push(entry.id.clone());
-            added.push((
-                entry.id.clone(),
-                entry.kind.clone(),
-                entry.token.clone(),
-                accounts::display_name(&entry.kind, &entry.note, &entry.token),
-            ));
-            s.accounts.push(entry);
-        }
-        // 其余设置整体以备份为准（已在 sanitize_loaded 归一化）
-        s.interval_minutes = incoming.interval_minutes;
-        s.proxy = incoming.proxy;
-        s.pricing = incoming.pricing;
-        s.pricing_remote = incoming.pricing_remote;
-        s.app_update = incoming.app_update;
-        s.cursor_client = incoming.cursor_client;
-        s.codex_client = incoming.codex_client;
-        s.claude_client = incoming.claude_client;
-        s.autostart_silent = incoming.autostart_silent;
-        // 旧备份没有该字段时反序列化为默认值，直接覆盖即可
-        s.codex_local_sync_minutes = incoming.codex_local_sync_minutes;
-        if has_sync_config {
-            s.codex_usage_sync = incoming.codex_usage_sync.restore_local_fields(&s.codex_usage_sync);
-        }
-        // 合并后仍在用的 Cursor 账户身份：备份里同身份的已删除统计数据不再恢复
-        Ok(s
-            .accounts
-            .iter()
-            .filter(|a| a.kind == "cursor")
-            .filter_map(|a| accounts::account_identity(&a.kind, &a.token))
-            .collect::<Vec<String>>())
-    });
-    let live_identities = if has_sync_config {
-        crate::codex_sync::update_configuration(import_settings)?
-    } else {
-        import_settings()?
-    };
+        })?;
     accounts::broadcast_changed(&app);
     crate::app_update::settings_changed(&app);
     if has_sync_config { crate::codex_sync::configuration_changed(&app); }
     // 先恢复备份里的已删除统计数据（同身份在用账户已跳过），再让新增账户接管本机同身份的保留记录
     let usage_restored = usage_archive::import_deleted(&usage_archives, &live_identities).await;
+    let (opencode_events_restored, opencode_usage_error) = match crate::opencode_store::import_archives(&opencode_usage).await {
+        Ok(count) => {
+            let _ = app.emit("opencode-usage-changed", serde_json::json!({}));
+            (count, None)
+        }
+        Err(error) => (0, Some(error)),
+    };
     let adopted = accounts::adopt_deleted_usage(&app, &added).await;
     if usage_restored > 0 && !adopted {
         accounts::notify_usage_archive_changed(&app);
@@ -457,13 +491,15 @@ pub async fn backup_import_apply(
     } else {
         String::new()
     };
-    audit::log(
+    audit::log_at(
+        if opencode_usage_error.is_some() { audit::Level::Warn } else { audit::Level::Info },
         "backup_import",
         format!(
-            "导入全量备份：新增 {} 个账号（{} 个已存在、{} 个无效已跳过）{usage_text}，其余设置已覆盖",
+            "导入全量备份：新增 {} 个账号（{} 个已存在、{} 个无效已跳过）{usage_text}，其余设置已覆盖{}",
             imported_ids.len(),
             skipped_exists,
-            skipped_invalid
+            skipped_invalid,
+            if opencode_usage_error.is_some() { "；OpenCode 归档未恢复，原归档保留，可重试导入" } else { "" }
         ),
         Some(json!({
             "path": path,
@@ -471,6 +507,8 @@ pub async fn backup_import_apply(
             "skippedExists": skipped_exists,
             "skippedInvalid": skipped_invalid,
             "usageRestored": usage_restored,
+            "opencodeEventsRestored": opencode_events_restored,
+            "opencodeUsageError": opencode_usage_error,
         })),
     );
     Ok(BackupApplyResult {
@@ -479,6 +517,12 @@ pub async fn backup_import_apply(
         skipped_exists,
         skipped_invalid,
         usage_restored,
+        opencode_events_restored,
+        opencode_usage_error,
         ui_prefs,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/backup.rs"]
+mod tests;

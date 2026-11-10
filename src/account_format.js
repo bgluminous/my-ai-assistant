@@ -97,6 +97,14 @@ function claudePlanInfo(value, rateLimitTier, seatTier) {
 /** 账户套餐的统一展示名与月费；未知价格为 null，免费套餐为 0。 */
 export function accountPlanInfo(account) {
   const status = account?.status || {};
+  if (account?.kind === "opencode") {
+    const key = planKey(status.plan);
+    const labels = { go: "Go", "go-plus": "Go Plus", "go-teams": "Go Teams", payg: "Console 按量" };
+    const count = Number(status.memberCount);
+    const monthlyUsd = key === "go" ? 10 : key === "go-plus" ? 40
+      : key === "go-teams" && Number.isInteger(count) && count > 0 ? 20 * count : key === "payg" ? 0 : null;
+    return { label: labels[key] || status.plan || "", monthlyUsd };
+  }
   if (account?.kind === "codex") return codexPlanInfo(status.plan);
   if (account?.kind === "claude") return claudePlanInfo(status.plan, status.rateLimitTier, status.seatTier);
   if (account?.kind === "cursor") {
@@ -282,6 +290,12 @@ export function onDemandBrief(status) {
  * 无限显示「余额 无限」；点数放进 title。
  */
 export function creditsBrief(status) {
+  if (status && Object.hasOwn(status, "balanceUsd")) {
+    const amount = status.balanceUsd;
+    if (amount == null || !Number.isFinite(Number(amount))) return null;
+    const stale = !!status.error || status.fields?.balance?.state !== "ok";
+    return { text: "余额 " + usdText(Number(amount)) + (stale ? "（缓存）" : ""), title: "工作区共享余额" };
+  }
   const credits = status && status.alive !== false ? status.credits : null;
   if (credits == null) return null;
   const { unlimited, units, usd } = parseCreditsUsd(credits);

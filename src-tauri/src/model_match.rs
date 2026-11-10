@@ -31,12 +31,58 @@ const EFFORT_SUFFIXES: &[&str] = &[
 /// 本体名字就带 fast 的独立模型（grok-4-fast、grok-code-fast-1）靠精确收录优先命中，不受影响。
 const FAST_SUFFIX: &str = "-fast";
 
+pub(crate) const DEEPSEEK_FLASH: &str = "deepseek-flash";
+
+/// Flash 各数字版本共用一个价格，但保留版本、日期快照与 Fast 展示名。
+/// 独立于价格表识别，避免旧缓存或用户的版本专属条目抢先命中。
+fn deepseek_flash_display_key(raw: &str) -> Option<String> {
+    let mut key = raw.trim().to_lowercase();
+    for prefix in PROVIDER_PREFIXES {
+        if let Some(stripped) = key.strip_prefix(prefix) {
+            key = stripped.to_string();
+            break;
+        }
+    }
+    let mut fast = false;
+    while let Some(was_fast) = strip_one_modifier(&mut key) {
+        fast |= was_fast;
+    }
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let (mut name, suffix) = if let Some(suffix) = key.strip_prefix(DEEPSEEK_FLASH) {
+        (DEEPSEEK_FLASH.to_string(), suffix)
+    } else {
+        let (version, suffix) = key.strip_prefix("deepseek-v")?.split_once("-flash")?;
+        let version = version.replace(['-', '_'], ".");
+        if !version.split('.').all(numeric) {
+            return None;
+        }
+        (format!("deepseek-v{version}-flash"), suffix)
+    };
+    // 只接受数字快照后缀，不能把 flash-lite / flashx 等其它型号当成 Flash。
+    if !suffix.is_empty() && !suffix.strip_prefix('-')?.split('-').all(numeric) {
+        return None;
+    }
+    name.push_str(suffix);
+    if fast {
+        name.push_str(FAST_SUFFIX);
+    }
+    Some(name)
+}
+
+/// 价格表只维护 deepseek-flash；版本名及其它已识别别名不单独改价。
+pub(crate) fn is_deepseek_flash_alias(raw: &str) -> bool {
+    !raw.trim().eq_ignore_ascii_case(DEEPSEEK_FLASH) && deepseek_flash_display_key(raw).is_some()
+}
+
 /// 把 Cursor / Codex 上报的原始模型名归一到价格表里的键。
-/// 先用原始名走一遍匹配流程；失败后剥离已知分发前缀（如 cursor-）再试一遍。
+/// DeepSeek Flash 先取共享价格；其余先匹配原始名，失败后剥离分发前缀（如 cursor-）再试。
 pub fn resolve<'a>(table: &'a PricingTable, raw: &str) -> Option<(&'a str, &'a ModelPrice)> {
     let key = raw.trim().to_lowercase();
     if key.is_empty() {
         return None;
+    }
+    if deepseek_flash_display_key(&key).is_some() {
+        return get(table, DEEPSEEK_FLASH);
     }
     if let Some(hit) = resolve_one(table, &key) {
         return Some(hit);
@@ -267,10 +313,14 @@ fn prefer_dotted(table: &PricingTable, key: String) -> String {
 /// 没有则 resolve 回退到 K 的标准价、priced_as 显示 K），不与标准版合并。
 /// 日期 / 快照段（gpt-5-2025-08-07）不在剥离之列，保持独立；全程未命中的名字保留
 /// 剥离后的原样（带 Fast 标记的补回 -fast）。
+/// DeepSeek Flash 的各版本保留版本名，只有计价键统一为 deepseek-flash。
 pub fn display_key(table: &PricingTable, raw: &str) -> String {
     let mut key = raw.trim().to_lowercase();
     if key.is_empty() {
         return "unknown".into();
+    }
+    if let Some(name) = deepseek_flash_display_key(&key) {
+        return name;
     }
     if let Some((k, _)) = get_normalized(table, &key) {
         return prefer_dotted(table, k.to_string());

@@ -1,424 +1,576 @@
+**English** | [简体中文](README.zh-CN.md)
+
 <p align="center">
   <img src="app-icon.png" width="96" height="96" alt="my-ai-assistant">
 </p>
 
 # my-ai-assistant
 
-**my-ai-assistant** 是一个本地桌面程序，用于管理 Cursor、ChatGPT 与 Claude 账户、查询套餐与额度，
-并按模型汇总 token 用量与费用。
+**my-ai-assistant** is a local desktop app for managing Cursor, ChatGPT, Claude, and OpenCode
+accounts, checking plans and quotas, and summarizing token usage and costs by model.
 
-程序基于 [Tauri](https://tauri.app/) 2，前端为原生 HTML / CSS / JavaScript，
-图表使用 [Chart.js](https://www.chartjs.org/)，更新日志使用
-[Marked](https://marked.js.org/) 解析并以安全 DOM 渲染；网络请求由 Rust 侧 `reqwest` 发出。
-当前面向 **Windows** 与 **macOS**。安装包见
-[GitHub Releases](https://github.com/bgluminous/my-ai-assistant/releases)
-（Windows x64 与 macOS Apple Silicon）；安装包未做代码签名。
+Built with [Tauri](https://tauri.app/) 2, the app uses plain HTML / CSS / JavaScript,
+[Chart.js](https://www.chartjs.org/) for charts, and [Marked](https://marked.js.org/) to parse
+release notes for safe DOM rendering. Network requests are handled by Rust's `reqwest`. It currently
+targets **Windows** and **macOS**. Unsigned installers for Windows x64 and macOS Apple Silicon are
+available on [GitHub Releases](https://github.com/bgluminous/my-ai-assistant/releases).
 
-账户请求发往 Cursor / OpenAI / Anthropic 官方接口；应用更新和默认价格表从 GitHub 读取，
-代理测试使用 `inf.xil.to`。自定义价格表及可选的用量同步使用用户配置的地址。
-更新请求不携带账户凭据。
+Account requests go to official Cursor / OpenAI / Anthropic / OpenCode endpoints. App updates and
+the default pricing table are fetched from GitHub; proxy connectivity checks use `inf.xil.to`.
+Custom pricing sources and optional usage synchronization use addresses configured by the user.
+Update requests never include account credentials.
 
-> 用量与账户状态依赖 Cursor、OpenAI、Anthropic 的非公开接口，字段与可用性可能随时变化。
-> 使用前请自行核对各服务条款。
+> Usage and account status depend on non-public Cursor, OpenAI, Anthropic, and OpenCode APIs. Fields
+> and availability may change at any time. Review each service's terms before use.
 
-## 目录
+## Contents
 
-- [功能](#功能)
-- [界面](#界面)
-- [运行要求](#运行要求)
-- [构建与发布](#构建与发布)
-- [配置](#配置)
-- [应用更新](#应用更新)
-- [价格表](#价格表)
-- [数据来源](#数据来源)
-- [仓库布局](#仓库布局)
-- [声明](#声明)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Requirements](#requirements)
+- [Build and Release](#build-and-release)
+- [Configuration](#configuration)
+- [App Updates](#app-updates)
+- [Pricing Table](#pricing-table)
+- [Data Sources](#data-sources)
+- [Repository Layout](#repository-layout)
+- [License and Disclaimer](#license-and-disclaimer)
 
-## 界面
+## Screenshots
 
-账户管理、用量总览与托盘账户面板（图中为示例数据）：
+Account management, usage overview, and the tray account panel (shown with sample data):
 
 <p align="center">
-  <img src="docs/screenshots/accounts.png" alt="账户管理" width="880">
+  <img src="docs/screenshots/accounts.png" alt="Account management" width="880">
 </p>
 <p align="center">
-  <img src="docs/screenshots/usage.png" alt="用量统计" width="880">
+  <img src="docs/screenshots/usage.png" alt="Usage statistics" width="880">
 </p>
 <p align="center">
-  <img src="docs/screenshots/tray.png" alt="托盘账户面板" width="280">
+  <img src="docs/screenshots/tray.png" alt="Tray account panel" width="280">
 </p>
 
-## 功能
+## Features
 
-### 账户管理
+### Account Management
 
-- 分别维护 Cursor、ChatGPT 与 Claude 账户：添加、编辑、删除、刷新；可按类型导出/导入 JSON，
-  也可从本机已登录客户端导入（仅导入当前类型）。
-- 删除 Cursor 账户时可勾选「保留统计数据」（默认勾选）：先做一次最终同步，再把该账户的用量
-  事件库连同备注 / 邮箱 / 套餐等展示信息（不含 Token）留在本机，用量统计页总览继续计入并标
-  「已删除」；同步失败但本机已有数据时用已有数据保留，本机没有任何数据时会再询问是否仍然删除。
-  之后重新添加同一账号（同 user_id）会直接沿用这份数据，不会重复计数。
-- Claude 账户支持应用内 OAuth 授权添加：打开浏览器用 claude.ai 账号登录，
-  粘贴回调页展示的授权码即可，无需手动找 token。
-- 列表展示存活状态、套餐与有效期、额度摘要、按需消费（Cursor）或 Credits（ChatGPT）、
-  额度窗口（ChatGPT / Claude 的 5 小时与每周窗口）、ChatGPT 剩余额度重置次数与其中最早一次的
-  过期日期（接口提供时显示；托盘副行只显示次数），以及上次刷新时间。
-  重置次数的悬停提示逐条显示接口返回的全部记录，包含状态、过期时间及提供的获得 / 使用时间；
-  剩余为 0 时仍可查看已使用 / 已过期记录，托盘悬停提示同步展示。
-  额度重置时间一律显示具体时刻而非倒计时：不足 24 小时显示时分，否则显示日期，已过则标「已重置」。
-  组内按套餐排序：付费套餐按到期时间由近到远（已到期最前），没有到期信息的居中，Free 垫底；
-  托盘账户面板的列表与「刷新全部」顺序与此一致。
-- 支持按间隔定时刷新（5 / 15 / 30 分钟、1 / 6 / 12 / 24 小时，账户状态与用量统计共用同一间隔），
-  也可手动刷新单个或一组账户。
-  刷新全部（启动后首轮、定时、托盘「刷新」）按界面显示顺序逐个进行：Cursor 组 → ChatGPT 组 →
-  Claude 组，组内按列表顺序。无论从哪个窗口发起刷新，主窗口与托盘面板的行内「刷新中」状态都会同步。
-- 可将本机 Cursor / ChatGPT（或 Codex）客户端切换到指定账户并启动；
-  Claude 切号写入本机 Claude Code 凭据（Windows 为 `~/.claude/.credentials.json`，
-  macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。
-  客户端路径可手动指定，也可自动搜索常见安装位置。
-  切换成功的结果弹窗 3 秒后自动关闭（按钮上倒计时，可手动关闭）；失败结果保留到手动关闭。
-- 可退出本机 Cursor / ChatGPT / Claude Code 的登录（各账户分组标题栏的「退出本机登录」按钮）：
-  运行中的客户端先关闭，再清除本机登录态——Cursor 清除认证库中的登录键，ChatGPT 删除
-  `auth.json` 中的账号凭据（配置了 `OPENAI_API_KEY` 时保留该项），Claude Code 去掉凭据中的
-  账号登录段（其它条目保留）；改动前都会备份。只动本机客户端，托管的账户不受影响，
-  完成后不自动启动客户端。
-- ChatGPT / Claude 账户可保存 `refresh_token`，access token 到期前自动续期。
-  ChatGPT 的续期策略与 Codex CLI 一致：access token 距过期不足 5 分钟（或解析不出过期时刻且距
-  上次获取超过 8 天）就换新整组凭据，请求返回 401 / 403 时补一次；每次续期都会轮换
-  `refresh_token`（它本身不带可读的有效期）。Claude 在 access token 临期或 401 / 403 时续期。
-- ChatGPT 账户保存的是本机 Codex 客户端 `auth.json` 的完整副本（含 `id_token`），续期、切换、
-  从本机导入都整份写入；手动添加或编辑凭据时会立刻用 `refresh_token` 换取完整一组。
-  同步是双向的：程序续期后写回本机 `auth.json`；后台按设置的间隔（默认 5 分钟，可选 1 分钟到
-  1 天）检查本机 `auth.json` 的修改时间，ChatGPT Desktop / Codex CLI 自行续期后，同账号账户的副本
-  会跟着更新（不联网，与定时刷新无关），刷新和切换前也会再取回一次；续期被拒绝时用本机同一账号的
-  凭据重试一次。
-  切换账号时，副本完整且 access token 未到续期窗口就直接写入本机，不换票；否则先换票再写入。
-  若 `refresh_token` 已失效，结果弹窗提供「强制写入并启动」，直接把保存的副本写入本机。
+- Add and edit dialogs guard against accidental dismissal: clicking the backdrop first shows "Click
+  again to close"; clicking it again within 2 seconds closes the dialog. Esc shows the same hint
+  without closing or counting toward backdrop confirmation. Clicking inside or typing clears the
+  confirmation. Close and Cancel dismiss immediately. Closing is disabled while saving, and failed
+  saves preserve the entered values. Hints follow the light or dark theme.
+- Manage Cursor, ChatGPT, Claude, and OpenCode accounts separately: add, edit, delete, and refresh.
+  Import or export JSON by account type, or import the current type from a locally signed-in client.
+- When deleting a Cursor account, "Keep statistics" is enabled by default. The app performs a final
+  sync and retains its usage event archive locally, along with display information such as notes,
+  email, and plan, but no tokens. The overview continues to include it, marked "Deleted". If the
+  final sync fails, existing local data is retained; if none exists, deletion requires another
+  confirmation. Adding the same account again (with the same `user_id`) reuses this archive without
+  double counting.
+- Add Claude accounts through OAuth in the app: sign in to claude.ai in your browser and paste the
+  authorization code shown on the callback page. There is no need to locate tokens manually.
+- The account list shows status, plan and validity, quota summaries, on-demand spending (Cursor) or
+  Credits (ChatGPT), quota windows (5-hour and weekly windows for ChatGPT / Claude), remaining
+  ChatGPT quota resets and their earliest expiration date when provided, and the last refresh time.
+  The tray's secondary line shows only the reset count. Hovering over the count shows all returned
+  reset records, including status, expiration, and acquisition / usage times when available. Used
+  and expired records remain accessible when the remaining count is zero, including in the tray.
+  Quota resets always show a specific time: time of day within 24 hours, a date otherwise, or
+  "Reset" once passed. Within each group, paid plans are ordered by expiration (expired first),
+  followed by plans with unknown expiration, then Free. The tray list and "Refresh all" follow the
+  same order.
+- Refresh automatically every 5 / 15 / 30 minutes or 1 / 6 / 12 / 24 hours, or manually refresh one
+  account or a group. Each account's edit dialog offers "Follow global", a custom interval, or
+  "Off"; new and existing accounts default to following the global setting. Per-account settings
+  override the global interval and can stay enabled when global refresh is off. These settings are
+  preserved in account exports and full backups. Scheduled refreshes process only due accounts, one
+  at a time in the current card and account order; failures wait a full interval before retrying.
+  The initial refresh runs 3 seconds after startup for enabled accounts. Changing an interval
+  restarts its timer from the save time. A completed manual refresh or a refresh from another window
+  postpones that account's next scheduled refresh. Inline refresh indicators stay synchronized
+  across windows. Shared ChatGPT / Claude logs and GPT cross-device sync continue to use the global
+  interval; local credential checks retain their own setting.
+- Reorder the four account group cards by dragging the handle to the left of each title, or focus
+  the handle and use the up / down arrow keys. The order is saved locally and included in full
+  backups. Accounts within each card remain sorted by plan.
+- Switch the local Cursor / ChatGPT (or Codex) client to a chosen account and launch it. Claude
+  switching writes Claude Code credentials locally: `~/.claude/.credentials.json` on Windows, or
+  Keychain on macOS. Claude Desktop is only coordinated as a client: it is closed if running and
+  launched afterward if installed. Client paths can be set manually or found in common locations.
+  Successful switch dialogs close after 3 seconds, with a button countdown and manual dismissal;
+  failure dialogs remain open until dismissed.
+- Sign out of local Cursor / ChatGPT / Claude Code clients using "Sign out locally" in each group
+  header. Running clients are closed before local login data is cleared. Cursor login keys are
+  removed from its authentication database; ChatGPT account credentials are removed from
+  `auth.json`, preserving `OPENAI_API_KEY` if configured; Claude Code's account login section is
+  removed while other entries remain. Files are backed up before changes. Managed accounts are
+  unaffected, and clients are not restarted automatically.
+- ChatGPT / Claude accounts can retain a `refresh_token` and renew before the access token expires.
+  ChatGPT follows the Codex CLI policy: refresh the entire credential set when less than 5 minutes
+  remain, or when expiry cannot be parsed and more than 8 days have passed since acquisition. A 401
+  / 403 response triggers one additional attempt. Each renewal rotates the `refresh_token`, which
+  has no readable expiration date. Claude renews near expiry or after a 401 / 403 response.
+- ChatGPT accounts store a complete copy of the local Codex client's `auth.json`, including
+  `id_token`. Renewal, switching, and local import all write the complete copy. Adding or editing
+  credentials manually immediately exchanges the `refresh_token` for a full set. Synchronization is
+  bidirectional: credentials renewed by the app are written back to local `auth.json`. A background
+  check watches its modification time at the configured interval (5 minutes by default; configurable
+  from 1 minute to 1 day). When ChatGPT Desktop / Codex CLI renews credentials, saved copies for the
+  same account are updated without network access, independently of scheduled refresh. Local
+  credentials are checked again before refresh or switching; if renewal is rejected, the app retries
+  once using local credentials for the same account. Switching writes the saved copy directly when
+  it is complete and outside the renewal window; otherwise, it renews first. If the `refresh_token`
+  is invalid, the result dialog offers "Force write and launch" to write the saved copy directly.
 
-### 用量统计
+### OpenCode Official Plans
 
-- 数据来自已保存的账户，进入页面后自动拉取；结果有短期缓存（与托盘总览共用），可随时手动刷新。
-- 统计对象可多选：点击 chip 切换选中 / 取消，「全部总览」即全选（全部取消后自动回到总览）。
-  只选一项时进入该项的专属视图（单个 Cursor 账户可生成快照，本地分析可指定目录并重新扫描）；
-  选中两项及以上则合并统计，结构与总览相同，「各来源账单」表只列所选来源。
-- 时间范围 = 周期 + 滑动：周期为日（默认，今天）/ 周（周一起）/ 月 / 全部，左右箭头前后滑动一个
-  周期（不越过今天）；「自定义」可选起止日期查询，也能按区间长度前后平移。
-  主窗口关闭到托盘后再打开，范围回到「日 / 今天」。
-  不超过两天的区间展示 0–24 时的按小时柱图（含今天时高亮当前小时），其余为按日柱图，
-  周 / 月按完整日历区间列轴，横轴统一由旧到新；「今天」与托盘总览共用当日缓存。
-- 统一刷新：任意入口（账户页、托盘、定时刷新）刷新账户状态后，自动在后台预取对应来源的用量；
-  统计页「刷新」也会顺带刷新相关账户状态。
-- 托盘总览复用用量页的共享缓存：按天前后滑动统计日（不越过今天，面板重新打开时回到今天），
-  数字与来源饼图取所选日切片，柱状图为该日 24 小时 Token 分布，图表均带图例；
-  头部显示数据更新时间（超过缓存有效期标「缓存」），
-  统计或刷新账户进行中时显示与主窗口统计页同款的悬浮提示。打开面板、切到总览或切换统计日时，
-  数据超过 5 分钟未同步就强制同步一次，不受定时刷新间隔影响。
-- 开启定时刷新后，用量统计随同一间隔自动更新。
-- **总览**：逐来源列出总 token、实际支出与按官方 API 价折算的等价费用；
-  按日 / 按小时 Token 堆叠柱状图（按来源分段），以及各模型 Token 数量、各模型等价费用、
-  Token 构成三张环形图与按模型明细表。
-- **Cursor 账户的数据源**：每个账户在本机维护一份全量用量事件库（原始事件：模型、四类 token、
-  实扣、时间戳、计费类别），任何时间范围都从事件库切片并按当前价格表折算，
-  切换范围不联网；
-  只有刷新才同步——增量同步从库内最后一条事件所在日的 0 点起拉取并替换该日之后的数据，
-  统计页「刷新」按钮强制全量重拉。
-- **不记录 API 额度用量**：每个 Cursor 账户的「编辑账户」弹窗提供独立开关，默认关闭。
-  开启并保存后清除套餐内按 API 价格扣减的记录和超额按量付费记录，后续同步也不保存。
-  按计费类别和模型额度归属判断，不匹配字面模型名 `API`，也不以金额非零作为依据。
-  自有额度内的 Auto、Composer 1.5 / 2 / 2.5、Cursor Grok 等记录保留；
-  自配 API Key 且未产生 Cursor Token Fee、免费及明确不收费的失败记录保留。
-  Cursor 当前未返回逐条额度池，无法精确识别自有模型临时转扣 API 额度的记录。
-  旧账单先联网补齐计费信息；无法匹配或遇到未知计费类型时保存失败，原数据不变。
-  统计、账单、CSV 导出与快照同步排除已清理的事件。关闭不会还原本地数据，
-  再次同步时可能重新获取。开关随账户保存和导入导出，主窗口与托盘同步生效。
-- **单个 Cursor 账户**：按时间范围切片，按模型聚合输入 / 输出 / 缓存读 / 缓存写 token，
-  同时给出实扣金额与等价费用。
-- **套餐月费与倍数**：Cursor 按所选账户计价；ChatGPT、Claude 各自汇总所有已添加账户
-  的已知月费，每个账户计一次。倍数为所选来源全部等价 API 费用除以已知月费之和，
-  未识别套餐只不计入分母，用量仍保留在分子。月费为零或全未知时倍数显示 `—`，
-  不超过两天的范围隐藏倍数卡片。按美元月付标价计算，不按剩余天数、年付折扣或税费折算。
-  ChatGPT 区分 Pro $100 / $200 / $500；Claude 区分 Pro、Max 5x / 20x、Ultra
-  及明确的 Team 席位。套餐自动识别，未知档位不猜价格；设备筛选只改变用量，不重复计月费。
-- **原始账单**：单账户视图工具栏与「各来源账单」表的行内按钮可打开该账户在当前时间范围内的
-  逐笔用量事件（Cursor 上报的原始模型名、四类 token、官方实扣，以及当前价格表下的归一名 / 命中
-  价格键 / 等价费用），数据来自本机事件库不联网；支持按模型名筛选、导出 CSV（UTF-8 BOM）。
-  已删除账户保留的数据同样可查看。
-- **清除本地数据**：原始账单弹窗与「编辑账户」弹窗（Cursor 账户）提供「清除本地数据」，删除该
-  账户在本机的事件库与统计缓存，账户与 Token 保留，下次刷新用量时重新全量拉取。
-- **已删除账户**：删除时选择保留的统计数据在总览表中作为独立行（标「已删除」）计入合计与合并
-  图表，只在所选跨度内有用量时出现；行内「编辑账户」可改显示名（留空恢复自动备注，按邮箱 /
-  账号 ID 兜底），「修改套餐」可从固定档位中指定套餐（删除时会话已失效、没记下套餐的在此补填；
-  在用账户的套餐来自接口不可手改），「删除统计数据」可彻底清理。有保留数据时「统计对象」末尾
-  多一个「已删除」选项，作为一个整体参与多选，单选即全部已删除账户的合并用量与逐账户账单。
-  托盘总览同样计入。
-  「编辑账户」中可关闭「保留 API 额度历史记录」，保存后永久移除相关明细及统计，
-  开关锁定为关闭，备注仍可编辑；导入旧备份也会沿用已关闭的状态及清理方式。
-  缺少计费信息的旧账单按模型归属近似清理：移除第三方模型，保留自有额度模型；
-  可能误删自配 API Key 记录，也可能漏掉自有模型的超额付费。窗口会提示此限制。
-  已有计费信息的记录仍按计费类别判断；遇到未知类别或无法识别的模型时保存失败，
-  原数据不变。
-- **本机 ChatGPT 会话**：扫描 Codex CLI 会话日志（默认 `~/.codex/sessions`），按模型聚合 token
-  并折算等价费用。解析按文件修改时间增量进行。同一会话谱系内按累计用量计数器去重：
-  额度刷新 / 恢复会话时重复上报的用量，以及分叉 / 子 Agent 日志开头复制的父任务历史都只计一次，
-  时间以父任务原始记录为准。
-- **GPT 用量同步**：在设置中填写 HTTPS 中心服务器和账户同步密钥，不同机器的 MAA
-  即可共享用量明细。地址默认为空，不配置时只采集本机数据。
-  可先点击「测试连接」验证账户，再点击设置底部的「完成」保存配置并同步一次。
-  「使用代理」默认开启，跟随全局代理设置；关闭后直接连接同步服务器，
-  忽略系统、环境变量及自定义代理。测试连接使用表单中的当前选择，保存后应用于所有同步。
-  同步周期跟随「账户与刷新 → 定时刷新」，即使没有托管账户也会执行；
-  升级沿用原有全局周期，关闭状态不会自动开启。MAA 在托盘运行时继续执行，退出后停止。
-  Tray 账户页、总览页和统计页的刷新按钮都会同步 GPT 用量，不受统计来源选择限制。
-  打开 Tray 总览、切换总览或统计日期时，距最近成功同步达到 5 分钟会自动补拉。
-  关闭定时刷新后，手动刷新和 Tray 过期刷新仍然有效。
-  多个窗口同时触发会合并到同一轮后台同步。图表先显示已有数据，本机采集完成即更新，
-  服务器同步完成后再补齐其他设备用量；网络失败保留本地统计，手动刷新可立即重试。
-  统计页、同步设置与 Tray 面板共享实时进度：显示扫描、整理、连接、上传和下载阶段；
-  上传按已确认记录显示进度，下载显示已落库条数与页数，不估算整体百分比。
-  完成或失败后保留本轮计数；Tray 成功提示在 5 秒后收起，失败提示保留供查看。
-  首次采集全部历史，后续增量上传与下载；清理 Codex 原日志不会移除已采集的历史。
-  两端均支持本机过滤时，先恢复历史再上传，日常下载不重复传回本机记录。
-  仅本机新增 10 条时显示「已上传 10 条 · 已下载 0 条」；清理缓存后的恢复可包含本机历史。
-  旧服务端继续使用兼容同步流程，升级服务端后自动启用过滤，无需额外设置。
-  仅上传模型、时间、Token 数与会话标识，不上传对话正文、文件路径或 GPT 登录凭据。
-  服务器可读取这些明细，费用由各机器按自己的当前价格表折算。
-  总览和托盘显示全部设备；GPT 单来源视图可以筛选设备。设备表示采集来源，复制的日志
-  可能在多个设备中分别出现，但全部设备总计会去重；没有会话标识的旧日志无法跨机器去重。
-  可按设备清理当前 MAA 的已同步缓存，未上传记录、服务器和其他机器保留，
-  后续扫描或同步可以恢复。采集目录与设备名称保存在本机，不随备份迁移。
-  连接配置（含「使用代理」）随备份保存，设备身份、缓存与游标不随备份复制；
-  不含同步配置的旧备份不覆盖同步配置，缺少「使用代理」字段的配置默认开启该选项。
-  旧配置和旧备份中的独立同步周期会被忽略，不覆盖全局周期。
-  管理员在服务端“MAA同步 → 账户管理”创建账户，同一账户的所有机器填写同一个密钥，
-  各自保留独立设备身份。同步密钥与 OpenAI API Key 或 GPT 登录凭据无关。
-  测试连接仅验证账户；首次成功同步（即使没有日志）才登记设备。
-  账户停用时暂停自动同步，管理员启用后点击统计页的「刷新」恢复；重置密钥后需更新所有机器，
-  服务端历史保留。
-  如需自建服务，在同步设置下方点击“复制提示词”，将完整搭建文档交给自己的 agent。
-  文档随应用提供，可离线复制，包含 v1 接口、存储要求与验收步骤，不带入本机配置或密钥。
-- **本机 Claude Code 会话**：扫描 Claude Code 会话日志（默认 `~/.claude/projects`，
-  支持 `CLAUDE_CONFIG_DIR` 多目录），按模型聚合 token 并折算等价费用；
-  按 message id + request id + 会话去重，流式重复与 sidechain 重放不重复计数。
+- Click "+" in the OpenCode group to choose "Import from this device" or "New OAuth authorization".
+  Both options accept a note. Local import lists workspaces and imports only the selected one after
+  confirmation; independent authorization can be completed later in the edit dialog. Existing
+  accounts support note changes and reauthorization. Each official workspace has one account and one
+  statistics source.
+- Supports Go ($10/month), Go Plus ($40/month), Go Teams ($20/member/month), and Console
+  pay-as-you-go accounts. Teams monthly fees use only the member count returned by the API; unknown
+  counts are not estimated. Quotas cover the authorized member's 5-hour, weekly, and monthly
+  windows. The balance is shared across the workspace. Individual read failures are flagged and
+  retain cached values.
+- Client import and switching support OpenCode V2 only. Settings allow custom CLI executable and
+  database paths. Switching uses the official credential activation API; if no matching login
+  exists, it opens the client's native authorization flow. This app and the OpenCode client hold
+  separate OAuth sessions, so renewing this app's session does not overwrite client credentials.
+- Usage aggregates official model calls across the entire workspace, including all members, devices,
+  and service accounts, without per-member breakdowns. Workspace totals require Owner or Admin
+  authorization; ordinary members' personal records are excluded. The initial sync backfills the
+  last 30 days; subsequent incremental syncs overlap the previous 48 hours. "Refresh" can fetch the
+  last 30 days again while retaining older local history. Missing periods are flagged as incomplete
+  coverage. Hours, days, weeks, and months use local time.
+- Usage statistics show equivalent costs calculated from official API prices; the costs recorded by
+  OpenCode remain in the archive. Positive costs in Go logs are not treated as wallet deductions.
+  Manual resync also checks official per-model token totals for the most recent complete UTC day;
+  discrepancies do not overwrite request-level records.
+- Account exports include encrypted independent authorization. Full backups also include historical
+  archives and coverage periods. Restore associates local logins by workspace without copying client
+  OAuth credentials. The CLI and database paths are restored from the backup. Deleting an OpenCode
+  account also deletes its local archive. Data beyond the server's retention period can only be
+  recovered from backups.
 
-### 其它
+See [OpenCode integration and validation](docs/opencode-integration.md) for plan sources and API
+semantics.
 
-- **审计日志**：记录账户增删改、导入导出、存活状态变化、刷新失败、
-  ChatGPT / Claude 续期与本机登录同步、切换本机登录、用量快照、原始账单导出、已删除账户统计数据的
-  删除与沿用、清除账户本地用量数据、定时间隔变更、开机启动开关、价格表在线更新、全量备份导入导出等。
-  每条记录带级别（信息 / 警告 / 错误）与分类（账户管理 / 状态与刷新 / 凭据与同步 / 用量数据 /
-  设置与系统），页面可按级别与分类筛选或清空；本机 ChatGPT 登录文件每次检测到变化都会记一条
-  同步结果（同步了几个账户，或未同步的原因）。日志为 JSON Lines，超限后轮转并保留最近约 2000 条。
-- **系统托盘**：关闭主窗口时转入托盘，定时刷新继续运行。左键单击打开账户面板，双击打开主窗口；
-  面板失焦或再次单击后隐藏。托盘菜单提供显示主窗口与退出；只有「退出」结束进程。
-  主窗口隐藏或最小化后再打开，回到本次启动首次显示的位置。
-- **开机启动**：设置中可开启开机自启动（Windows 注册表 Run 项 / macOS LaunchAgent），
-  可选「静默启动」——开机拉起时不弹主窗口，仅托盘运行。
-- **数据备份**：设置中可把全部数据（所有设置、账号含 Token、界面偏好、已删除 Cursor 账户保留的
-  统计数据）导出为单个 JSON 文件，支持可选密码加密（PBKDF2-SHA256 + AES-256-GCM）；
-  导入为合并模式——账号按身份去重后合并，已删除账户的统计数据按身份合并（本机同身份账号仍在用
-  则跳过，已有保留记录取较新的一份），其余设置以备份文件为准，导入后立即生效无需重启。
-  在用账户的事件库不随备份携带，导入后刷新即可重新同步。
-- **显示**：深色 / 浅色主题；token 数量可在完整数字、K·M·B、万·亿之间切换。
-- **网络代理**：系统代理、直连或自定义 HTTP / SOCKS 代理，保存后立即生效。
-- **单实例**：重复启动只唤出已有主窗口，避免并发读写配置文件。
+### Usage Statistics
 
-## 运行要求
+- Data comes from saved accounts and is fetched when the page opens. Results have a short-lived
+  cache shared with the tray overview and can be refreshed manually at any time.
+- Select multiple sources by clicking their chips. "All sources" selects everything; deselecting all
+  sources returns to the overview. A single selection opens its dedicated view: individual Cursor
+  accounts support snapshots, and local log analysis supports custom directories and rescanning. Two
+  or more selections combine their statistics in the overview layout, with only the selected sources
+  in the "Bills by source" table.
+- Time ranges combine a period with navigation: day (today by default), week (starting Monday),
+  month, or all time. Arrows move one period backward or forward, never beyond today. "Custom"
+  accepts start and end dates and can shift by the selected range's length. Reopening the main
+  window from the tray resets the range to "Day / Today". Ranges of up to two days use hourly bars
+  from 0 to 24, highlighting the current hour when today is included. Longer ranges use daily bars.
+  Week / month axes cover complete calendar periods, always oldest to newest. "Today" shares the
+  tray overview's daily cache.
+- Refreshing Cursor / OpenCode status prefetches usage for the corresponding account in the
+  background. Per-account scheduled refreshes do not speed up shared ChatGPT / Claude log tasks.
+  Manual refreshes still update local logs, and "Refresh" on the statistics page also refreshes the
+  relevant account status.
+- The tray overview reuses the usage page's shared cache. Navigate by day up to today; reopening the
+  panel returns to today. Totals and the source pie chart use the selected day's data, while the bar
+  chart shows its 24-hour token distribution. All charts include legends. The header shows the
+  data's last update time and marks expired data as "Cached". Statistics and account refreshes show
+  the same floating progress hint as the main statistics page. Opening the panel, switching to the
+  overview, or changing the date forces a sync if data has not synced for more than 5 minutes,
+  regardless of the scheduled refresh interval.
+- With scheduled refresh enabled, Cursor / OpenCode usage follows each account's effective interval;
+  shared logs follow the global interval.
+- **Overview**: shows total tokens, equivalent costs at official API prices, monthly plan fees, and
+  cost multiples for each source. Charts include daily / hourly token bars stacked by source, four
+  doughnut charts for tokens by model, equivalent costs by model, token composition, and tokens by
+  account / source, plus a per-model detail table. Doughnut charts use a two-by-two grid, changing
+  to one column in narrow windows. The source chart aggregates tokens over the selected range,
+  showing the top eight sources and grouping the rest as "Other". Cursor / OpenCode accounts and
+  deleted accounts are counted separately; ChatGPT / Claude logs each form a shared source and are
+  not allocated to individual accounts. OpenCode labels in filters, tables, and legends use the
+  account note, falling back to email and then workspace name.
+- **Cursor account data**: each account maintains a complete local usage event archive containing
+  raw model names, four token categories, actual charges, timestamps, and billing categories. Any
+  time range is sliced from this archive and valued using the current pricing table; switching
+  ranges requires no network request. Only refreshing triggers sync. Incremental sync starts at
+  midnight on the date of the latest stored event and replaces data from that point onward.
+  "Refresh" on the statistics page forces a full fetch.
+- **Exclude API quota usage**: each Cursor account has a separate switch in "Edit account", off by
+  default. Enabling and saving it removes records charged against the plan's API-priced allowance
+  and pay-as-you-go overages, and excludes them from future syncs. Classification uses billing
+  categories and model quota ownership, not a literal model name of `API` or a nonzero charge. Auto,
+  Composer 1.5 / 2 / 2.5, and Cursor Grok records within their own quotas are retained, as are
+  custom API key records without a Cursor Token Fee, free records, and failures explicitly marked as
+  uncharged. Cursor does not currently return each record's quota pool, so temporary charges to the
+  API allowance for first-party models cannot be identified precisely. Older bills first fetch
+  missing billing information online. If records cannot be matched or billing categories are
+  unknown, saving fails and existing data remains unchanged. Statistics, bills, CSV exports, and
+  snapshots all exclude removed events. Disabling the switch does not restore local data, though a
+  later sync may fetch it again. The setting is saved with the account, included in import / export,
+  and shared by the main window and tray.
+- **Individual Cursor accounts**: aggregate input / output / cache read / cache write tokens by
+  model within the selected range, with equivalent costs at official API prices. Snapshots use the
+  same calculation.
+- **Monthly plan fees and cost multiples**: Cursor / OpenCode use the selected accounts; ChatGPT and
+  Claude each total the known monthly fees of all added accounts, counting each account once. The
+  multiple is the selected sources' total equivalent API cost divided by their known monthly fees.
+  Unrecognized plans are excluded only from the denominator; their usage stays in the numerator. If
+  fees are zero or all unknown, the multiple is `—`. The multiple card appears for day, week,
+  month, all-time, and custom ranges. Fees always use the full listed monthly price, with no daily
+  proration. The "Monthly plan fee" column consistently shows USD per month (for example,
+  `$200/month`), or `—` when unknown. Remaining days, annual discounts, and taxes are not factored
+  in. ChatGPT distinguishes Pro $100 / $200 / $500; Claude distinguishes Pro, Max 5x / 20x, Ultra,
+  and identifiable Team seats. Plans are detected automatically; unknown tier prices are not
+  guessed. Device filters change usage only and do not count monthly fees again.
+- **Raw bills**: the single-account toolbar and inline buttons in "Bills by source" open individual
+  usage events for that account and time range. Records include Cursor's raw model name, four token
+  categories, official charges, and the normalized name / matched pricing key / equivalent cost
+  under the current pricing table. Data is read from the local archive without network access.
+  Filter by model name or export CSV with a UTF-8 BOM. Retained data from deleted accounts is also
+  available.
+- **Clear local data**: this action in the raw bill dialog and Cursor's "Edit account" dialog
+  deletes the account's local event archive and statistics cache while retaining the account and
+  token. The next usage refresh fetches the full archive again.
+- **Deleted accounts**: retained statistics appear as separate "Deleted" rows in the overview,
+  totals, and combined charts, only when they contain usage within the selected range. "Edit
+  account" changes the display name; leaving it blank restores an automatic label with email /
+  account ID fallbacks. "Change plan" selects a fixed tier, useful when the session had expired at
+  deletion and the plan was not recorded. Active accounts get their plans from the API and cannot be
+  edited manually. "Delete statistics" permanently removes retained data. When retained data exists,
+  a "Deleted" chip appears at the end of the source selector and acts as one group in
+  multi-selection. Selecting it alone shows combined usage and per-account bills for all deleted
+  accounts. The tray overview also includes this data. In "Edit account", disabling "Keep API quota
+  history" permanently removes related details and statistics and locks the switch off; notes remain
+  editable. Importing older backups respects the disabled state and applies the same cleanup. Older
+  bills without billing details use approximate model ownership: third-party models are removed and
+  models with their own quotas are retained. This may remove custom API key records or miss paid
+  overages for first-party models; the dialog explains this limitation. Records with billing details
+  still use their billing category. Unknown categories or unrecognized models cause saving to fail,
+  leaving existing data unchanged.
+- **Local ChatGPT sessions**: scans Codex CLI logs (default: `~/.codex/sessions`) to aggregate
+  tokens and equivalent costs by model. Parsing is incremental by file modification time. Cumulative
+  usage counters deduplicate records within the same session lineage: repeated usage reports after
+  quota refreshes / session resumes, and parent history copied into fork / sub-agent logs, count
+  only once, using the original parent record's timestamp.
+- **GPT usage sync**: configure an HTTPS central server and an account sync key in Settings to share
+  usage details across machines running MAA. The server address is empty by default; without it,
+  only local data is collected. Use "Test connection" to verify the account, then "Done" at the
+  bottom of Settings to save and sync. "Use proxy" is enabled by default and follows global proxy
+  settings. Disabling it connects directly to the sync server, ignoring system, environment, and
+  custom proxies. Connection tests use the current form selection; saving applies it to all sync
+  operations. Sync follows "Accounts and refresh → Scheduled refresh", even without managed
+  accounts. Upgrades preserve the existing global interval and do not enable a disabled schedule.
+  Sync continues while MAA runs in the tray and stops on exit. Refresh buttons on the tray account
+  page, tray overview, and statistics page all sync GPT usage, regardless of selected sources.
+  Opening or switching to the tray overview, or changing its date, fetches updates when at least 5
+  minutes have passed since the last successful sync. Manual refresh and stale tray refresh remain
+  available when scheduled refresh is disabled. Concurrent triggers from multiple windows share one
+  background sync. Charts first show existing data, update when local collection finishes, then add
+  other devices' usage after server sync. Network failures preserve local statistics, and manual
+  refresh can retry immediately. The statistics page, sync settings, and tray share live progress
+  across scanning, organizing, connecting, uploading, and downloading. Upload progress counts
+  acknowledged records; downloads show stored record and page counts without estimating an overall
+  percentage. Counts remain visible after success or failure. Tray success hints disappear after 5
+  seconds; failure hints remain available. The first collection reads all history; later uploads and
+  downloads are incremental. Removing original Codex logs does not remove collected history. When
+  both ends support filtering local records, history is restored before upload, and routine
+  downloads do not return local records again. If only 10 local records are new, the result is
+  "Uploaded 10 · Downloaded 0"; recovery after clearing the cache may include local history. Older
+  servers keep the compatible sync flow. Upgrading the server enables filtering automatically. Only
+  models, timestamps, token counts, and session identifiers are uploaded, never conversation text,
+  file paths, or GPT login credentials. The server can read these details; each machine calculates
+  costs using its own current pricing table. The overview and tray show all devices; the GPT-only
+  view supports device filtering. Devices identify collection sources, so copied logs may appear
+  under multiple devices, but totals across all devices are deduplicated. Older logs without session
+  identifiers cannot be deduplicated across machines. Synced cache can be cleared by device in the
+  current MAA instance, preserving unuploaded records, server data, and other machines. Later scans
+  or syncs can restore it. Collection directories and device names stay local and are not migrated
+  with backups. Connection settings, including "Use proxy", are backed up; device identity, cache,
+  and cursors are not. Older backups without sync settings leave current settings intact;
+  configurations missing "Use proxy" default to enabling it. Legacy standalone sync intervals in
+  settings and backups are ignored and do not override the global interval. Administrators create
+  accounts under "MAA Sync → Account Management" on the server. All machines for the same account
+  use the same key while keeping separate device identities. Sync keys are unrelated to OpenAI API
+  keys or GPT login credentials. "Test connection" verifies only the account; a device is registered
+  on its first successful sync, even when there are no logs. Disabling an account pauses automatic
+  sync. After an administrator reenables it, click "Refresh" on the statistics page to resume.
+  Resetting a key requires updating every machine; server history is retained. To host your own
+  server, click "Copy prompt" below the sync settings and give the complete setup document to your
+  agent. It ships with the app and can be copied offline, covering the v1 API, storage requirements,
+  and acceptance checks without including local settings or keys.
+- **Local Claude Code sessions**: scans Claude Code logs (default: `~/.claude/projects`, with
+  multiple directories supported through `CLAUDE_CONFIG_DIR`) to aggregate tokens and equivalent
+  costs by model. Deduplication uses message ID + request ID + session, preventing duplicate
+  streaming records and sidechain replays from being counted twice.
 
-- [Node.js](https://nodejs.org/) 20.19 或更高（用于前端依赖与开发工具）。
-- [Rust](https://rustup.rs/) 工具链（`rustup`）。
-- 平台链接器：
-  - **Windows**：Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」（MSVC 与 Windows SDK）。
-  - **macOS**：`xcode-select --install`。
-- **Windows** 需要 [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) 运行时。
-  Windows 11 通常已预装。
+### Other Features
 
-## 构建与发布
+- **Audit log**: records account changes, import / export, status changes, refresh failures, ChatGPT
+  / Claude renewal and local login sync, local account switching, usage snapshots, raw bill exports,
+  deletion and reuse of retained account statistics, local usage cleanup, interval changes, startup
+  settings, online pricing updates, and full backup import / export. Each entry has a level (Info /
+  Warning / Error) and category (Accounts / Status and Refresh / Credentials and Sync / Usage Data /
+  Settings and System). Filter by level or category, or clear the log. Every detected change to the
+  local ChatGPT login file records the sync result: how many accounts were updated, or why none
+  were. Logs use JSON Lines and rotate at the size limit, retaining approximately the latest 2,000
+  entries.
+- **System tray**: closing the main window minimizes the app to the tray and keeps scheduled refresh
+  running. Single-click opens the account panel; double-click opens the main window. The panel hides
+  when it loses focus or is clicked again via the tray icon. The tray menu offers Show Main Window
+  and Quit; only Quit ends the process. Reopening a hidden or minimized main window restores its
+  initial position for the current launch.
+- **Launch at login**: enable startup in Settings (Windows Registry Run entry / macOS LaunchAgent).
+  Optional "Silent startup" launches directly into the tray without showing the main window.
+- **Data backup**: export all settings, accounts including tokens, interface preferences, and
+  retained statistics for deleted Cursor accounts to one JSON file, with optional password
+  encryption using PBKDF2-SHA256 + AES-256-GCM. Import merges accounts by identity. Deleted-account
+  statistics are also merged by identity: entries are skipped if the same account is active locally,
+  and the newer copy wins when retained data already exists. Other settings follow the backup and
+  take effect immediately without restart. Active accounts' event archives are not included; refresh
+  after import to sync them again.
+- **Display**: dark / light themes and token formatting as full numbers, K / M / B, or Chinese
+  ten-thousand / hundred-million units.
+- **Network proxy**: system proxy, direct connection, or a custom HTTP / SOCKS proxy, effective
+  immediately after saving.
+- **Single instance**: launching again brings the existing main window forward, avoiding concurrent
+  configuration reads and writes.
+
+## Requirements
+
+- [Node.js](https://nodejs.org/) 20.19 or later for frontend dependencies and development tools.
+- The [Rust](https://rustup.rs/) toolchain (`rustup`).
+- Platform linker:
+  - **Windows**: Visual Studio Build Tools with "Desktop development with C++" (MSVC and Windows
+    SDK).
+  - **macOS**: `xcode-select --install`.
+- **Windows** requires the [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)
+  runtime, which is usually preinstalled on Windows 11.
+
+## Build and Release
 
 ```bash
 npm install
-npm run tauri dev      # 开发运行
-npm run tauri build    # 打包当前平台安装包
+npm run tauri dev      # Run in development mode
+npm run tauri build    # Build an installer for the current platform
 ```
 
-Windows 可用 `npm run release:windows` 将安装包与便携版收集到 `release/` 并生成 7z。
-成功后默认清理 `src-tauri/target`；保留缓存、复用产物和生成更新签名的参数见
-[打包脚本](scripts/build-release-windows.ps1) 的帮助，可用
-`Get-Help ./scripts/build-release-windows.ps1 -Full` 查看。
+On Windows, `npm run release:windows` collects installers and the portable build into `release/` and
+creates 7z archives. It removes `src-tauri/target` after a successful build by default. For options
+to keep the build cache, reuse artifacts, or generate update signatures, see the
+[packaging script](scripts/build-release-windows.ps1) help:
+`Get-Help ./scripts/build-release-windows.ps1 -Full`.
 
-推送 `Release-X.Y.Z` 分支会正式发布 Windows x64 与 macOS Apple Silicon 版本；
-手动运行 Actions 只构建。凭据配置与失败重跑说明放在
-[发布工作流](.github/workflows/release.yml) 对应步骤旁，版本与平台参数见
-[.version-settings](.version-settings)。
+Pushing a `Release-X.Y.Z` branch publishes Windows x64 and macOS Apple Silicon releases. Manually
+running Actions only builds. Credential setup and retry instructions are documented beside the
+relevant steps in the [release workflow](.github/workflows/release.yml). Version and platform
+parameters are in [.version-settings](.version-settings).
 
-GPT 同步的数据结构与内容哈希见 [codex_store.rs](src-tauri/src/codex_store.rs)，
-传输与恢复流程见 [codex_sync.rs](src-tauri/src/codex_sync.rs)，
-独立验证入口见 [GPT 同步专项测试](scripts/codex-sync-tests/README.md)。
+GPT sync data structures and content hashes are documented in
+[codex_store.rs](src-tauri/src/codex_store.rs); transport and recovery logic are in
+[codex_sync.rs](src-tauri/src/codex_sync.rs). See the
+[GPT sync tests](scripts/codex-sync-tests/README.md) for standalone validation.
 
-## 配置
+## Configuration
 
-用户数据目录：
+User data directories:
 
-| 平台         | 路径                                   |
-|--------------|----------------------------------------|
-| Windows      | `%USERPROFILE%\.xilore\myaiassistant\` |
-| macOS / 其它 | `~/.xilore/myaiassistant/`             |
+| Platform      | Path                                   |
+| ------------- | -------------------------------------- |
+| Windows       | `%USERPROFILE%\.xilore\myaiassistant\` |
+| macOS / Other | `~/.xilore/myaiassistant/`             |
 
-旧版本使用不带点号的 `xilore/myaiassistant/`。启动时若旧目录存在而新目录不存在，
-会自动把旧目录整体移动到新位置；两者都存在时以新目录为准、旧目录不动。
+Older versions used `xilore/myaiassistant/` without the leading dot. At startup, if the old
+directory exists and the new one does not, the entire directory is moved automatically. If both
+exist, the new directory is used and the old one is left untouched.
 
-| 文件                          | 内容                                                                                                               |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `settings.json`               | 账户、刷新间隔、代理、价格覆盖、Cursor / ChatGPT / Claude Desktop 客户端路径、静默启动偏好                         |
-| `audit.jsonl`                 | 审计日志                                                                                                           |
-| `codex-usage.sqlite3`         | GPT 用量存档、设备身份、分空间缓存、同步确认与游标；运行时可能有 SQLite WAL 辅助文件                               |
-| `usage-archive/<账户id>.json` | Cursor 账户的用量事件库（原始事件 + 同步时间；已删除账户的还带备注 / 邮箱 / 套餐等展示信息与删除时间，不含 Token） |
+| File                              | Contents                                                                                                                                        |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.json`                   | Accounts, refresh intervals, proxy, pricing overrides, Cursor / ChatGPT / Claude Desktop / OpenCode client paths, and silent startup preference |
+| `opencode-usage.sqlite`           | Official OpenCode request archive, sync watermarks, and historical coverage periods; SQLite WAL sidecar files may appear at runtime             |
+| `audit.jsonl`                     | Audit log                                                                                                                                       |
+| `codex-usage.sqlite3`             | GPT usage archive, device identity, per-space caches, sync acknowledgments, and cursors; SQLite WAL sidecar files may appear at runtime         |
+| `usage-archive/<account-id>.json` | Cursor usage events and sync times; deleted accounts also retain notes / email / plan and deletion time, without tokens                         |
 
-应用内可复制上述路径。
+These paths can be copied from the app.
 
-`settings.json` 以临时文件写入后原子替换。启动时若读取失败（例如文件被短暂占用）会重试，
-不会用空数据覆盖原文件；JSON 解析失败时先备份为 `settings.json.bad`。
+`settings.json` is written to a temporary file and then replaced atomically. Read failures at
+startup, such as a briefly locked file, are retried without overwriting it with empty data. JSON
+parse failures first create a backup as `settings.json.bad`.
 
-**凭据存放在本机。** Cursor / Claude 的 token 为明文；ChatGPT 账户只保存加密的 `auth.json`
-副本（AES-256-GCM，密钥内置于程序，只能防止被直接读出，不能防御反编译），token 在运行时由副本
-解出，旧版本的明文凭据会在首次启动时自动迁移。不要把该目录提交到版本库，也不要分享
-`settings.json`。审计日志只记录备注或打码后的 token，不含完整凭据。
+**Credentials are stored locally.** Cursor / Claude tokens are plain text. Independent OpenCode
+authorization and ChatGPT's `auth.json` are stored only as encrypted copies using AES-256-GCM. The
+key is embedded in the app, so encryption prevents direct reading but does not protect against
+reverse engineering. Tokens are decrypted at runtime; older plain-text credentials are migrated
+automatically on first launch. Do not commit this directory to version control or share
+`settings.json`. Audit logs contain only notes or masked tokens, never complete credentials.
 
-主题与 token 显示单位保存在 WebView 的 `localStorage` 中，不进入 `settings.json`；
-全量备份导出时会把这两项界面偏好一并写入备份文件。
-开机自启动开关本身注册在系统（Windows 注册表 / macOS LaunchAgent），不随备份迁移。
+Theme, token display units, and account card order are stored in the WebView's `localStorage`,
+outside `settings.json`; full backups include these interface preferences. The launch-at-login
+switch is registered with the operating system (Windows Registry / macOS LaunchAgent) and does not
+migrate with backups.
 
-## 应用更新
+## App Updates
 
-启动 30 秒后自动检查一次，此后每 24 小时检查。可在「设置」关闭自动检查，
-或随时在「关于」页手动检查。当前版本与可升级的新版本说明支持 Markdown 排版。
-应用内更新日志直接展示「新增」「修复」等分类，不再重复总标题；
-安装包列表、下载指引与安装说明在 GitHub Releases 查看。
-每版说明保存在 [docs/releases](docs/releases)，由 agent 审阅本版提交和代码差异后编写，
-随版本一同提交。发布流程只校验并读取这份正文，不再自动拼接提交信息。
-点击「历史更新日志」后，按需读取当前平台已登记的版本，可切换版本、刷新列表或重试日志；
-已读取的历史说明会在本次运行中缓存。未登记的更早版本可前往 GitHub Releases 查看。
-浏览历史不会改变待安装版本；日志中的网页链接在系统浏览器打开，原始 HTML 不执行。
-已是最新版时仍显示当前版本日志。确认更新后下载安装并重启，下载期间可取消。
-下载进度按实际字节数平滑推进；未获知文件总量时显示等待动画，不估算百分比。
-系统开启「减少动态效果」时关闭进度动画。
-检查失败会保留原因，提供重试、代理设置与 GitHub Releases 入口。
-后台失败不弹窗、不打开浏览器，静默启动时继续保持窗口隐藏。
+The app checks for updates 30 seconds after launch and every 24 hours afterward. Disable automatic
+checks in Settings, or check manually from About at any time. Release notes for the current and
+available versions support Markdown. In-app notes show categories such as "Added" and "Fixed"
+directly, without repeating an overall title; installer lists, download guidance, and installation
+instructions are on GitHub Releases.
 
-Windows NSIS / MSI 安装版沿用原安装类型更新；便携版需从 Releases 手动下载。
-macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DMG 或不可写目录运行时，
-界面会引导手动安装。旧客户端需先手动安装一次包含更新模块的版本，之后才能应用内升级。
+Each release's notes live in [docs/releases](docs/releases). An agent prepares them after reviewing
+the release's commits and code changes, and they are committed with the release. The release process
+validates and reads this text rather than assembling it from commit messages. "Release history"
+loads registered versions for the current platform on demand, with version selection, list refresh,
+and retries. Loaded notes are cached for the current app session. Older unregistered versions remain
+available on GitHub Releases.
 
-安装前暂停新业务操作并等待写入完成；失败、超时或取消后恢复操作。
-标记为必须更新的版本会限制旧版业务操作，仍需用户确认安装，可先导出备份。
-更新开关随设置备份迁移。
+Browsing history does not change the pending update. Web links open in the system browser, and raw
+HTML is not executed. Current release notes remain visible when the app is already up to date.
+Confirming an update downloads, installs, and restarts the app; downloads can be canceled. Progress
+follows actual bytes smoothly. When the total size is unknown, an indeterminate animation is shown
+instead of an estimated percentage. Progress animations respect the system's reduced-motion setting.
+Failed checks retain the reason and offer retry, proxy settings, and GitHub Releases. Background
+failures do not open dialogs or browsers, and silent startup keeps the window hidden.
 
-## 价格表
+Windows NSIS / MSI installations update using the same installer type; portable builds require
+manual downloads from Releases. On macOS Apple Silicon, automatic updates work after moving the app
+into a writable installation directory. Running from a DMG or a non-writable directory prompts
+manual installation. Older clients must manually install a version containing the updater once
+before using in-app updates.
 
-- 内置默认表 `src-tauri/resources/pricing.default.json` 共 127 项。
-  2026-10-23 核价时修正了 DeepSeek Flash，并补充了 23 项，
-  包括 Sonnet / Haiku 5.5、GPT-5.1、GPT-4.1 Nano、Chat Latest、Gemini 4 Argon、
-  Gemini Flash-Lite、Grok 4.7、GLM、MiniMax 和 Mistral / Codestral。
-- 单价单位为美元 / 每百万 token，沿用官方 API 标准档、短上下文价，
-  字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
-  `cacheWrite=0` 表示未收录单独按 token 计的写入费用，
-  不代表缓存存储、TTL 等附加费用全部免费。
-- 各厂商的官方定价见
-  [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing)、
-  [OpenAI](https://developers.openai.com/api/docs/pricing)、
-  [Google](https://ai.google.dev/gemini-api/docs/pricing)、
-  [xAI](https://docs.x.ai/developers/pricing)、
-  [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/)、
-  [Z.ai](https://docs.z.ai/guides/overview/pricing)、
-  [MiniMax](https://platform.minimax.io/docs/pricing/overview)、
-  [Mistral](https://docs.mistral.ai/inference/pricing)。
-- Haiku 5.5 按输入不超过 100K 收录；超过后输入、输出、缓存读写单价均为 5 倍。
-  Anthropic 缓存写采用默认 5 分钟档。MiniMax M3 按输入不超过 512K 收录。
-  这些长上下文阶梯尚未纳入折算。
-- Gemini 4 Argon 当前价格截至 2026-11-30，2026-12-01 起翻倍；
-  Gemini 3.8 Flash 当前价格截至 2026-12-31，2027-01-01 起翻倍。
-  价格表不自动按日期切换，需在促销到期时更新。
-- DeepSeek 沿用非高峰价。官方已将 `deepseek-v4-flash` 路由到 `deepseek-flash`，
-  两者均按输入 $0.15、输出 $0.60、缓存读 $0.003 收录。
-- GPT-6 Sol、GPT-6 Luna、GPT-6.1 Sol 的标准与 Fast 价格于 2026-10-15 核对。
-  GPT-6.1 Sol 的缓存读取价为 $0.10 / 百万 token，GPT-6 Sol 为 $0.20；
-  Fast 档的四类单价均为标准档的 2 倍，长上下文加价仍未纳入折算。
-- 2026-11-02 收录 GPT-6.1 Terra 和 GPT-6 Rosalind。每百万 token 的输入、输出、
-  缓存读、30 分钟缓存写单价，Terra 依次为 $1、$5、$0.05、$1.25，Fast 档四项翻倍。
-  Rosalind 标准档依次为 $15、$75、$1.50、$18.75。两者均按短上下文折算。
-- 覆盖顺序为内置表 → 在线缓存 → 用户自定义；只把与基础层不同的用户改价保存到
-  `settings.json` 的 `pricing` 字段。在线检查后由用户手动应用，失败保留缓存和自定义价格。
-- 默认在线来源为公共仓库的
-  [pricing.json](https://raw.githubusercontent.com/bgluminous/open-source-registry/main/resources/my-ai-assistant/pricing.json)。
-  空地址、旧官方默认地址及旧备份会自动迁移，自定义来源保持不变。
-  表内保留 `note`、`models` 和原价格字段，可独立于应用发布更新。
-  更新时直接以同一份内置表同步在线文件，避免旧远端数据再次覆盖已修正价格；
-  已缓存旧表的客户端需要在「在线更新」中检查并应用新表。
-  检查失败时可重试、调整代理或打开公共仓库文件。
-- 表中没有的模型标记为「未定价」。
-  等价费用参照模型厂商官方 API 价目；Cursor 等分发方的账单只用于核对上报模型名。
-  只在 Cursor 提供的 Composer 以 Cursor 官方价目为厂商价。
-- Fast 条目收录已核实的 OpenAI Fast mode、Anthropic Opus 5.5 / 5 / 4.8 fast mode，
-  以及 Cursor Composer 2.5 Fast，键为「基础模型键 + `-fast`」。
-  没有对应 Fast 条目时，Fast 用量独立成行、按标准价折算，并显示套用的基础键。
-  xAI API Priority 为标准价 2 倍，Grok 4.7 Fast 则仅在 Cursor / Grok Build 提供；
-  两者不同，不能仅凭 `-fast` 上报名认定使用了 API Priority。
-  Max 是 effort 等级而非计费档，按基础模型计价。
-- 待核实项：Qwen 需先明确地区与缓存方式，不能直接套通用缓存折扣，见
-  [模型价格](https://www.alibabacloud.com/help/en/model-studio/model-pricing)与
-  [缓存规则](https://www.alibabacloud.com/help/en/model-studio/context-cache)；
-  Kimi K2.6、K2.7 Code Highspeed 待核实具体单价，见
-  [模型列表](https://platform.kimi.ai/docs/models)。
-  Kimi K3 缓存写按 TTL 单独收费，当前 `cacheWrite=0` 表示尚未覆盖，见
-  [计费说明](https://platform.kimi.ai/docs/pricing/chat)。
-  OpenAI Ultrafast 待能够可靠识别服务档位后接入。
-- 默认价格仅供折算参考；人民币定价、多模态费用、未列出的长上下文阶梯与
-  历史分时价格另行处理，使用前请对照厂商现行价目。
-- 内置表随程序一起编译进二进制，新增或修改默认条目后需要重新构建才会生效；
-  已安装的旧版本可通过应用内「在线更新」拉取远端表，或直接在价格表页手动增改。
+Before installation, new app operations are paused until pending writes finish; operations resume on
+failure, timeout, or cancellation. Mandatory updates restrict older versions' operations but still
+require installation confirmation; backups can be exported first. Update preferences migrate with
+settings backups.
 
-## 数据来源
+## Pricing Table
 
-| 来源     | 鉴权                                                                              | 用途                                                                                                         |
-|----------|-----------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| Cursor   | `WorkosCursorSessionToken`（支持 `user_xxx::<jwt>`，`%3A%3A` 会归一为 `::`）      | 用量摘要、计费周期、按事件聚合、Grok 周额度、账户邮箱、本机会话切换                                          |
-| ChatGPT  | `Authorization: Bearer` + `ChatGPT-Account-Id`                                    | 额度窗口、订阅信息；续期走 OAuth `refresh_token`                                                             |
-| Claude   | `Authorization: Bearer`（OAuth access token）+ `anthropic-beta: oauth-2025-04-20` | 额度窗口（5 小时 / 每周）、账户邮箱与组织；授权与续期走 Claude Code 同款 OAuth（PKCE）                       |
-| 本机会话 | 无网络                                                                            | 读取 Codex CLI 的 `sessions/**/*.jsonl` 与 Claude Code 的 `projects/**/*.jsonl`，按轮次 token 与模型归属聚合 |
+- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 126 entries. The
+  2026-10-23 price review corrected DeepSeek Flash and added 23 entries, including Sonnet / Haiku
+  5.5, GPT-5.1, GPT-4.1 Nano, Chat Latest, Gemini 4 Argon, Gemini Flash-Lite, Grok 4.7, GLM,
+  MiniMax, and Mistral / Codestral.
+- Prices are in USD per million tokens, using official standard-tier API prices for short contexts.
+  Fields are `input`, `output`, `cacheRead`, and `cacheWrite`. `cacheWrite=0` means no separate
+  per-token write charge is included; it does not mean that cache storage, TTL, or other additional
+  fees are all free.
+- Official pricing references:
+  [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
+  [OpenAI](https://developers.openai.com/api/docs/pricing),
+  [Google](https://ai.google.dev/gemini-api/docs/pricing),
+  [xAI](https://docs.x.ai/developers/pricing),
+  [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/),
+  [Z.ai](https://docs.z.ai/guides/overview/pricing),
+  [MiniMax](https://platform.minimax.io/docs/pricing/overview), and
+  [Mistral](https://docs.mistral.ai/inference/pricing).
+- Haiku 5.5 uses prices for inputs of up to 100K; above that, input, output, cache read, and cache
+  write prices are all five times higher. Anthropic cache writes use the default 5-minute tier.
+  MiniMax M3 uses prices for inputs of up to 512K. These long-context tiers are not yet included in
+  cost calculations.
+- Gemini 4 Argon's listed prices apply through 2026-11-30 and double on 2026-12-01. Gemini 3.8
+  Flash's listed prices apply through 2026-12-31 and double on 2027-01-01. Prices do not switch
+  automatically by date; the table must be updated when promotions end.
+- DeepSeek uses off-peak pricing. `deepseek-v4-flash`, `deepseek-v4.1-flash`, and other numbered
+  versions all use the effective `deepseek-flash` prices: $0.15 input, $0.60 output, $0.003 cache
+  read, and $0 cache write. Usage statistics retain specific version names, while the pricing table
+  maintains only `deepseek-flash`. Online updates or user changes to this entry apply to every
+  version. Version-specific prices in older tables are ignored without rewriting historical settings
+  on load. Adding or saving a version-specific entry prompts the user to edit the base entry
+  instead.
+- Standard and Fast prices for GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Sol were checked on 2026-10-15.
+  GPT-6.1 Sol cache reads cost $0.10 per million tokens; GPT-6 Sol cache reads cost $0.20. All four
+  Fast prices are twice the standard prices. Long-context surcharges remain excluded.
+- GPT-6.1 Terra and GPT-6 Rosalind were added on 2026-11-02. Terra's input, output, cache read, and
+  30-minute cache write prices per million tokens are $1, $5, $0.05, and $1.25; all four double for
+  Fast. Rosalind's standard prices are $15, $75, $1.50, and $18.75. Both use short-context pricing.
+- Override order is bundled defaults → online cache → user overrides. Only user prices that differ
+  from the underlying defaults / cache are saved in `settings.json` under `pricing`. Online changes
+  are applied manually after checking; failures preserve the cache and user overrides.
+- The default online source is
+  [pricing.json](https://raw.githubusercontent.com/bgluminous/open-source-registry/main/resources/my-ai-assistant/pricing.json)
+  in the public repository. Empty URLs, old official default URLs, and older backups migrate
+  automatically; custom sources remain unchanged. The table retains `note`, `models`, and the
+  existing price fields and can be updated independently of app releases. Updates publish the same
+  bundled table to the online file, preventing stale remote data from overwriting corrected prices.
+  Clients with an older cache must check and apply the new table through "Online update". Failed
+  checks offer retry, proxy adjustment, or the public repository file.
+- Models missing from the table are marked "Unpriced". Equivalent costs use each model provider's
+  official API prices; distributor bills such as Cursor's are used only to verify reported model
+  names. Composer, available only through Cursor, uses Cursor's official prices as its provider
+  prices.
+- Fast entries cover verified OpenAI Fast mode, Anthropic Opus 5.5 / 5 / 4.8 fast mode, and Cursor
+  Composer 2.5 Fast, using the base model key plus `-fast`. Without a matching Fast entry, Fast
+  usage appears as a separate row valued at standard prices, showing the applied base key. xAI API
+  Priority costs twice the standard rate, while Grok 4.7 Fast is available only in Cursor / Grok
+  Build. They are distinct offerings; a reported `-fast` name alone does not establish API Priority
+  usage. Max is an effort level, not a pricing tier, and uses the base model price.
+- Pending verification: Qwen requires a confirmed region and caching method before applying any
+  general cache discount; see
+  [model pricing](https://www.alibabacloud.com/help/en/model-studio/model-pricing) and
+  [cache rules](https://www.alibabacloud.com/help/en/model-studio/context-cache). Exact prices for
+  Kimi K2.6 and K2.7 Code Highspeed remain unverified; see the
+  [model list](https://platform.kimi.ai/docs/models). Kimi K3 cache writes are charged separately by
+  TTL; `cacheWrite=0` currently means this is not covered. See
+  [billing details](https://platform.kimi.ai/docs/pricing/chat). OpenAI Ultrafast will be supported
+  once its service tier can be identified reliably.
+- Default prices are estimates for reference. RMB pricing, multimodal fees, unlisted long-context
+  tiers, and historical time-based prices require separate handling. Check providers' current
+  pricing before use.
+- The default table is compiled into the binary, so changing bundled entries requires rebuilding.
+  Installed versions can fetch the remote table through "Online update" or edit prices manually on
+  the pricing page.
 
-Cursor 套餐有效期取自当期计费周期起止；到期后由官方侧续期并重置额度。
-ChatGPT 套餐有效期来自订阅接口（JWT 通常不含该字段）。
-Claude 接口不提供订阅起止，仅展示额度窗口与重置时间。
+## Data Sources
 
-## 仓库布局
+| Source         | Authentication                                                                          | Purpose                                                                                                                                  |
+| -------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Cursor         | `WorkosCursorSessionToken` (supports `user_xxx::<jwt>`; `%3A%3A` is normalized to `::`) | Usage summaries, billing cycles, event aggregation, weekly Grok quota, account email, and local account switching                        |
+| ChatGPT        | `Authorization: Bearer` + `ChatGPT-Account-Id`                                          | Quota windows and subscription details; renewal uses OAuth `refresh_token`                                                               |
+| Claude         | `Authorization: Bearer` (OAuth access token) + `anthropic-beta: oauth-2025-04-20`       | Quota windows (5-hour / weekly), account email and organization; authorization and renewal use the same OAuth (PKCE) flow as Claude Code |
+| Local sessions | No network access                                                                       | Reads Codex CLI `sessions/**/*.jsonl` and Claude Code `projects/**/*.jsonl`, aggregating per-turn tokens by model                        |
 
-```
+Cursor plan validity comes from the current billing cycle's start and end dates; the provider renews
+it and resets quotas at expiration. ChatGPT plan validity comes from the subscription API, as JWTs
+usually lack this field. Claude's API does not provide subscription start / end dates; only quota
+windows and reset times are shown.
+
+## Repository Layout
+
+```text
 my-ai-assistant/
 ├── LICENSE                   # GNU GPLv3
-├── package.json              # npm 脚本、前端依赖与测试工具
-├── app-icon.png              # 应用图标源图
-├── docs/screenshots/         # README 界面示例图
-├── scripts/                  # JS 语法检查、Windows 本地打包
-├── src/                      # 前端（Tauri frontendDist）
-│   ├── index.html            # 主窗口
-│   ├── tray.html             # 托盘面板
-│   └── vendor/               # 离线打包的 Chart.js、Marked 与许可说明
-└── src-tauri/                # Rust 后端
+├── package.json              # npm scripts, frontend dependencies, and test tools
+├── app-icon.png              # Source app icon
+├── docs/screenshots/         # Sample screenshots for the README
+├── scripts/                  # JS syntax checks and local Windows packaging
+├── src/                      # Frontend (Tauri frontendDist)
+│   ├── index.html            # Main window
+│   ├── tray.html             # Tray panel
+│   └── vendor/               # Bundled Chart.js, Marked, and license notices
+└── src-tauri/                # Rust backend
     ├── Cargo.toml
     ├── tauri.conf.json
     ├── capabilities/
     ├── resources/pricing.default.json
-    └── src/                  # 账户、用量、审计、托盘、代理、价格、本机客户端
-        └── tests/            # 各模块的单元测试，文件名与被测源文件同名（源文件末尾以 #[path] 挂载）
+    └── src/                  # Accounts, usage, audit, tray, proxy, pricing, and local clients
+        └── tests/            # Per-module unit tests, matching source filenames and included via #[path]
 ```
 
-## 声明
+## License and Disclaimer
 
-本程序采用 [GNU GPLv3](https://www.gnu.org/licenses/gpl-3.0.html)。
-可以复制、修改和再分发（含商用）；再分发时必须保留版权声明、提供对应源码，
-并以 GPLv3 授权。参考或衍生请写明作者 BGLuminous
-与项目出处（https://github.com/bgluminous/my-ai-assistant）。
-完整条款见 [LICENSE](LICENSE)。
+This application is licensed under the [GNU GPLv3](https://www.gnu.org/licenses/gpl-3.0.html). You
+may copy, modify, and redistribute it, including commercially. Redistribution must retain copyright
+notices, provide the corresponding source code, and use the GPLv3 license. When referencing or
+deriving from this project, credit BGLuminous and the
+[original project](https://github.com/bgluminous/my-ai-assistant). See [LICENSE](LICENSE) for the
+complete terms.
 
-本程序调用 Cursor、OpenAI 与 Anthropic 的非公开接口，仅供在本机查询自己的账户与用量。
-接口变更、账号限制或服务条款冲突导致的任何后果由使用者自行承担。
-本仓库与 Cursor、OpenAI、Anthropic、Google、xAI 无附属关系。
+This application uses non-public Cursor, OpenAI, and Anthropic APIs solely to query your own
+accounts and usage locally. Users are responsible for consequences arising from API changes, account
+restrictions, or conflicts with service terms. This repository is not affiliated with Cursor,
+OpenAI, Anthropic, Google, or xAI.

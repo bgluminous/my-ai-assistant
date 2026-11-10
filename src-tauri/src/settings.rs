@@ -43,6 +43,8 @@ pub struct Settings {
     pub codex_client: CodexClientConfig,
     #[serde(default)]
     pub claude_client: ClaudeClientConfig,
+    #[serde(default)]
+    pub opencode_client: crate::opencode_local::OpenCodeClientConfig,
     /// 开机自启动拉起时是否静默启动（不弹主窗口，仅托盘运行）。
     /// 自启动开关本身注册在系统里（Windows 注册表 / macOS LaunchAgent），不落本文件。
     #[serde(default)]
@@ -223,7 +225,7 @@ fn save_to_disk(data: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-/// 加写锁修改内存状态，随后立即写盘（同步 IO，锁内完成，保证内存与磁盘顺序一致）。
+/// 在写锁内修改副本，写盘成功后才发布内存状态；闭包或写盘失败均保留原状态。
 pub fn mutate<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce(&mut Settings) -> Result<T, String>,
@@ -232,8 +234,18 @@ where
     let mut guard = cell()
         .write()
         .map_err(|_| "state_lock_poisoned".to_string())?;
-    let result = f(&mut guard)?;
-    save_to_disk(&guard)?;
+    mutate_saved(&mut guard, f, save_to_disk)
+}
+
+fn mutate_saved<T>(
+    current: &mut Settings,
+    change: impl FnOnce(&mut Settings) -> Result<T, String>,
+    save: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<T, String> {
+    let mut candidate = current.clone();
+    let result = change(&mut candidate)?;
+    save(&candidate)?;
+    *current = candidate;
     Ok(result)
 }
 

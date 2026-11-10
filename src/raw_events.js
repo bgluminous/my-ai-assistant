@@ -1,3 +1,4 @@
+import { createModal } from "./modal.js";
 import { el, fmtInt, fmtUsd, fmtDateMs, resetError, toast, fillStatus, escapeHtml } from "./shared.js";
 import { fetchRawEvents, clearCursorLocalData, exportUsageEventsCsv } from "./usage_data.js";
 import { confirmDialog } from "./accounts.js";
@@ -163,36 +164,47 @@ async function onExport() {
 /** 清除在用账户的本地用量数据：确认后删事件库 + 清缓存，成功即关闭弹窗并通知调用方。 */
 async function onClear() {
   if (!state.accountId || state.deleted) return;
+  const session = getRawModal().session;
   const ok = await confirmDialog({
     title: "清除本地数据",
     body: `确定清除“${state.label}”在本机保存的用量事件库与统计缓存吗？账户与 Token 会保留，下次刷新用量时会重新从 Cursor 全量拉取；Cursor 侧已不可查询的历史事件将无法恢复。`,
     confirmText: "清除",
     danger: true,
   });
-  if (!ok) return;
+  if (!ok || !getRawModal().isCurrent(session)) return;
   const btn = el("#raw-clear");
   btn.disabled = true;
   try {
     const result = await clearCursorLocalData(state.accountId);
+    if (!getRawModal().isCurrent(session)) return;
     toast("ok", `已清除“${state.label}”的本地用量数据（${fmtInt(result.events)} 条事件）。`, { key: "raw-clear" });
     const cb = state.onCleared;
     closeModal();
     if (typeof cb === "function") cb();
   } catch (error) {
+    if (!getRawModal().isCurrent(session)) return;
     const code = resetError(error);
     setStatus("bad", code === "no_usage_data" ? "本机没有该账户的用量数据。" : `清除失败：${code}`);
   } finally {
-    btn.disabled = false;
+    if (getRawModal().isCurrent(session)) btn.disabled = false;
   }
 }
 
+let rawModal;
+function getRawModal() {
+  return rawModal ||= createModal(el("#raw-modal"), {
+    mode: () => "view",
+    onClose() {
+      state.loadSeq += 1; // 作废在途加载
+      state.events = [];
+      state.filtered = [];
+      state.onCleared = null;
+      el("#raw-body").replaceChildren();
+    },
+  });
+}
 function closeModal() {
-  el("#raw-modal").hidden = true;
-  state.loadSeq += 1; // 作废在途加载
-  state.events = [];
-  state.filtered = [];
-  state.onCleared = null;
-  el("#raw-body").replaceChildren();
+  getRawModal().close();
 }
 
 function safeFileName(text) {
@@ -226,7 +238,7 @@ export async function openRawEvents({ accountId, label, deleted = false, start =
   el("#raw-clear").hidden = state.deleted;
   el("#raw-clear").disabled = false;
   clearStatus();
-  el("#raw-modal").hidden = false;
+  getRawModal().open();
 
   try {
     const result = await fetchRawEvents(accountId, { start, end });
@@ -254,13 +266,6 @@ export async function openRawEvents({ accountId, label, deleted = false, start =
 }
 
 export function initRawEvents() {
-  const modal = el("#raw-modal");
-  for (const node of modal.querySelectorAll("[data-close]")) node.addEventListener("click", closeModal);
-  document.addEventListener("keydown", (e) => {
-    // 上层的确认弹窗（清除本地数据）打开时，Esc 只关它，不连带关掉本弹窗
-    const confirmOpen = !document.querySelector("#switch-modal").hidden;
-    if (e.key === "Escape" && !modal.hidden && !confirmOpen) closeModal();
-  });
   el("#raw-search").addEventListener("input", render);
   el("#raw-more").addEventListener("click", renderMore);
   el("#raw-export").addEventListener("click", () => { void onExport(); });

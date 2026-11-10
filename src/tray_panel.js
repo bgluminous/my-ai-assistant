@@ -1,3 +1,5 @@
+import { getAccountGroupOrder } from "./account_order.js";
+import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
 import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
@@ -194,7 +196,7 @@ const TAB_KEY = "trayTab";
 function readTab() {
   try {
     const v = localStorage.getItem(TAB_KEY);
-    return v === "cursor" || v === "codex" || v === "claude" || v === "overview" ? v : "overview";
+    return v === "cursor" || v === "codex" || v === "claude" || v === "opencode" || v === "overview" ? v : "overview";
   } catch {
     return "overview";
   }
@@ -286,7 +288,7 @@ function barsFor(account) {
   if (account.kind !== "cursor") {
     // Codex / Claude 的额度窗口结构一致（windows: label / usedPercent）
     const windows = Array.isArray(status.windows) ? status.windows : [];
-    for (const w of windows.slice(0, 2)) {
+    for (const w of windows.slice(0, account.kind === "opencode" ? 3 : 2)) {
       const bar = w && miniBar(w.label || "窗口", w.usedPercent);
       if (bar) bars.push(bar);
     }
@@ -343,6 +345,10 @@ function accountRow(account) {
   const plan = accountPlanInfo(account).label;
   const parts = [];
   if (plan) parts.push(plan);
+  if (account.kind === "opencode") {
+    parts.push(account.opencodeAuthorized ? "当前成员额度 / 工作区用量" : "待独立授权");
+    if (status?.stale) parts.push("部分数据为缓存");
+  }
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
   // Claude 接口不提供订阅起止，不展示有效期
   const endIso = status && status.alive === true && account.kind !== "claude"
@@ -354,16 +360,16 @@ function accountRow(account) {
     const exp = remainInfo(endMs);
     parts.push(exp.expired ? "已到期" : `有效期 ${exp.text}`);
     const endText = new Date(endMs).toLocaleDateString("zh-CN");
-    const renewHint = account.kind === "codex" && status.planWillRenew === true
+    const renewHint = (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === true
       ? "（到期自动续期）"
-      : account.kind === "codex" && status.planWillRenew === false
+      : (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === false
       ? "（到期不续期）"
       : "";
-    titles.push(account.kind === "codex"
+    titles.push(account.kind === "codex" || account.kind === "opencode"
       ? `订阅至 ${endText}${renewHint}`
       : `本期计费周期截止 ${endText}（到期自动续期，额度重置）`);
   }
-  const extra = account.kind === "codex"
+  const extra = account.kind === "codex" || account.kind === "opencode"
     ? creditsBrief(status)
     : account.kind === "cursor"
     ? onDemandBrief(status)
@@ -421,7 +427,10 @@ function accountRow(account) {
   // 仅已验证有效的账户可切换（Codex / Claude 还需 Refresh Token 换新凭据）；确认在弹窗内进行
   const aliveOk = alive === true;
   const switchBtn = iconAction("switch", "切换");
-  if (account.kind === "codex" || account.kind === "claude") {
+  if (account.kind === "opencode") {
+    switchBtn.disabled = rowBusy;
+    switchBtn.title = "切换 OpenCode V2 客户端";
+  } else if (account.kind === "codex" || account.kind === "claude") {
     const hasRt = !!String(account.refreshToken || "").trim();
     switchBtn.disabled = rowBusy || !aliveOk || !hasRt;
     switchBtn.title = !aliveOk
@@ -437,7 +446,10 @@ function accountRow(account) {
     switchBtn.title = aliveOk ? "切换本机 Cursor 到该账户（会关闭正在运行的 Cursor）" : "请先刷新验证该账户";
     switchBtn.setAttribute("aria-label", switchBtn.title);
   }
-  switchBtn.addEventListener("click", () => { void doSwitch(account.id); });
+  switchBtn.addEventListener("click", () => {
+    if (account.kind === "opencode") void switchOpenCode(account.id);
+    else void doSwitch(account.id);
+  });
   actions.append(refreshBtn, switchBtn);
   row.append(actions);
   return row;
@@ -453,7 +465,7 @@ function render() {
   if (trayTab !== "overview") {
     const list = el("#tray-list");
     list.replaceChildren();
-    const kind = trayTab === "codex" ? "codex" : trayTab === "claude" ? "claude" : "cursor";
+    const kind = trayTab === "codex" ? "codex" : trayTab === "claude" ? "claude" : trayTab === "opencode" ? "opencode" : "cursor";
     const subset = sortedAccounts(kind);
     if (!subset.length) {
       const empty = document.createElement("div");
@@ -540,7 +552,7 @@ async function refreshAll() {
   const overview = trayTab === "overview" ? loadOverview({ force: true, synchronize: false }) : Promise.resolve();
   // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
   // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按套餐排序，不在类型间来回跳
-  const ids = ["cursor", "codex", "claude"].flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
+  const ids = getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
   let failed = 0;
   try {
     for (let i = 0; i < ids.length; i += 1) {
@@ -1255,7 +1267,7 @@ function deletedSliceKey(record, scope) {
 function buildOverviewData(scope, fetchErrors = new Map()) {
   const ymd = scope.ymd;
   const peek = dayPeekers(scope);
-  const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
+  const cursorAccounts = accounts.filter((a) => a.kind === "cursor" || a.kind === "opencode");
   const entries = []; // { row, hourlySource, modelSource }
   // 数据时间取所有拿到数据的来源（与当天有没有用量无关），但不计本轮拉取失败与已失效的账户：
   // 它们的缓存时间永远不再前进，计入会把「更新于」拖回很久以前，与实际刷新不符
@@ -1407,7 +1419,7 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
   const revision = deletedRevision;
   const gptRevision = codexViewRevision;
   const stillCurrent = () => trayTab === "overview" && trayDayMs === scope.start && revision === deletedRevision && gptRevision === codexViewRevision;
-  const cursorAccounts = accounts.filter((a) => a.kind === "cursor");
+  const cursorAccounts = accounts.filter((a) => a.kind === "cursor" || a.kind === "opencode");
   const peek = dayPeekers(scope);
   const rule = { force, maxAgeMs: viewing ? VIEW_MAX_AGE_MS : null };
   // 主动查看时过期的来源要真正同步（sync 模式），不能让后端按更长的有效期判定为新鲜而只切片
@@ -1521,7 +1533,7 @@ function reloadCodexOverview() {
         errors.set("local", syncError(error));
       }
       const next = buildOverviewData(scope, errors);
-      applyOverviewErrors(next.data, errors, accounts.filter((a) => a.kind === "cursor"));
+      applyOverviewErrors(next.data, errors, accounts.filter((a) => a.kind === "cursor" || a.kind === "opencode"));
       renderOverview(next.data, next.at, scope);
     } while (handled !== codexReloadRequested);
   }).finally(() => { codexReloadTask = null; });
@@ -1953,7 +1965,7 @@ function scheduleOverviewFromCache(key) {
     // GPT 的跨窗口写入只合并已有缓存，不能连带重试其它来源。
     const scope = dayScope();
     const next = buildOverviewData(scope, overviewErrors);
-    applyOverviewErrors(next.data, overviewErrors, accounts.filter((a) => a.kind === "cursor"));
+    applyOverviewErrors(next.data, overviewErrors, accounts.filter((a) => a.kind === "cursor" || a.kind === "opencode"));
     renderOverview(next.data, next.at, scope);
     return;
   }

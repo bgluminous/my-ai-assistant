@@ -90,6 +90,49 @@ fn error_code_extraction_matches_codex_cli() {
 }
 
 #[test]
+fn refresh_interval_legacy_accounts_inherit_and_explicit_values_survive_exports() {
+    for kind in ["cursor", "codex", "claude", "opencode"] {
+        let legacy = json!({ "id": "fixture", "kind": kind, "token": "fixture" });
+        let account: Account = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(account.refresh_interval_minutes, None);
+        assert!(serde_json::to_value(&account).unwrap().get("refreshIntervalMinutes").is_none());
+        for interval in [Value::Null, json!(0), json!(5), json!(1440)] {
+            let mut value = legacy.clone();
+            value["refreshIntervalMinutes"] = interval.clone();
+            let account: Account = serde_json::from_value(value).unwrap();
+            let stored = serde_json::to_value(&account).unwrap();
+            let restored: Account = serde_json::from_value(stored.clone()).unwrap();
+            let exported: AccountExportItem = serde_json::from_value(stored).unwrap();
+            let imported: AccountExportItem = serde_json::from_value(serde_json::to_value(exported).unwrap()).unwrap();
+            let expected = interval.as_u64().map(|value| value as u32);
+            assert_eq!(restored.refresh_interval_minutes, expected);
+            assert_eq!(imported.refresh_interval_minutes, expected);
+        }
+    }
+    let old_export: AccountExportItem = serde_json::from_value(json!({ "token": "fixture" })).unwrap();
+    assert_eq!(old_export.refresh_interval_minutes, None);
+}
+
+#[test]
+fn refresh_interval_survives_backup_settings_and_account_view() {
+    let mut data = crate::settings::Settings::default();
+    data.interval_minutes = 15;
+    data.accounts = serde_json::from_value(json!([
+        { "id": "inherited", "kind": "cursor", "token": "fixture" },
+        { "id": "disabled", "kind": "claude", "token": "fixture", "refreshIntervalMinutes": 0 },
+        { "id": "custom", "kind": "opencode", "token": "wrk_fixture", "refreshIntervalMinutes": 5 }
+    ])).unwrap();
+    let persisted = crate::settings::persisted_form(&data);
+    let restored = crate::settings::sanitize_loaded(
+        serde_json::from_value(serde_json::to_value(persisted).unwrap()).unwrap()
+    );
+    assert_eq!(restored.interval_minutes, 15);
+    assert_eq!(restored.accounts.iter().map(|account| account.refresh_interval_minutes).collect::<Vec<_>>(),
+        vec![None, Some(0), Some(5)]);
+    assert_eq!(serde_json::to_value(account_view(&restored.accounts[2])).unwrap()["refreshIntervalMinutes"], 5);
+}
+
+#[test]
 fn dead_cursor_status_keeps_previous_profile() {
     let prev = json!({
         "alive": true,

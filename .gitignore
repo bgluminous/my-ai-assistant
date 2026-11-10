@@ -5,6 +5,7 @@
 /src-tauri/target
 /src-tauri/gen
 /scripts/codex-sync-tests/target
+/scripts/opencode-tests/target
 
 # Release artifacts (scripts/build-release-windows.ps1)
 /release

@@ -1,3 +1,7 @@
+import { getAccountGroupOrder, initAccountCardOrder } from "./account_order.js";
+import { createAccountRefreshScheduler } from "./account_refresh.js";
+import { createModal } from "./modal.js";
+import { addOpenCode, editOpenCode, switchOpenCode } from "./opencode_ui.js";
 import {
   el,
   invoke,
@@ -26,7 +30,7 @@ import {
 import { clearCursorLocalData, syncCursorUsageFilters, syncCodexUsage } from "./usage_data.js";
 import { syncError } from "./usage_sync.js";
 
-// 账户管理：Cursor / Codex / Claude 账户的增删改查、单个 / 全部刷新与定时刷新。
+// 账户管理：Cursor / Codex / Claude / OpenCode 的增删改查、手动刷新与账户独立定时刷新。
 // 账户数据由后端持久化，这里只维护一份内存镜像，所有写操作都以后端返回值为准；
 // 刷新失败时保留旧数据，仅在对应行展示错误。
 // 套餐名 / 月费、Token 打码、相对时间等纯格式化助手见 account_format.js（托盘面板共用）。
@@ -43,7 +47,6 @@ const TOKEN_PLACEHOLDERS = {
 
 let accounts = [];
 let intervalMinutes = 0;
-let timerId = null;
 let refreshAllRunning = false;
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
 let importing = false; // 本机导入 / 文件导入导出进行中（防重入，期间禁用相关按钮）
@@ -65,11 +68,36 @@ let editingId = null;
 /* ---------- 对外接口(供用量统计等模块联动) ---------- */
 
 const changeListeners = new Set();
+const sharedUsageListeners = new Set();
+const automaticRefreshIds = new Set();
+
+const refreshScheduler = createAccountRefreshScheduler({
+  getOrder: displayOrderIds,
+  isBlocked: () => switching || importing || refreshAllRunning || groupRefreshing.size > 0,
+  isRefreshing,
+  refreshAccount: async (id) => {
+    automaticRefreshIds.add(id);
+    try { await refreshOne(id); }
+    finally { automaticRefreshIds.delete(id); }
+  },
+  refreshShared: async () => {
+    const [sync] = await Promise.all([
+      syncCodexUsage("interval"),
+      ...[...sharedUsageListeners].map(listener => Promise.resolve().then(listener)),
+    ]);
+    if (sync.error) setStatus("warn", `GPT 用量同步失败：${syncError(sync.error)}`);
+  },
+  onRunningChange: (running) => {
+    refreshAllRunning = running;
+    render();
+  },
+  onError: (error) => setStatus("warn", `定时刷新失败：${resetError(error)}`),
+});
 
 function notifyChange() {
   const snapshot = accounts.slice();
   for (const fn of changeListeners) {
-    try { fn(snapshot); } catch { /* 监听方异常不影响本页 */ }
+    try { fn(snapshot, { automaticIds: [...automaticRefreshIds] }); } catch { /* 监听方异常不影响本页 */ }
   }
 }
 
@@ -81,6 +109,11 @@ export function getAccounts() {
 /** 订阅账户列表变化(增删改、刷新完成)。 */
 export function onAccountsChanged(fn) {
   changeListeners.add(fn);
+}
+
+/** 共享本地日志随全局间隔更新，不随任意账户的独立间隔加速。 */
+export function onSharedUsageRefresh(fn) {
+  sharedUsageListeners.add(fn);
 }
 
 /* ---------- 格式化 ---------- */
@@ -110,59 +143,73 @@ function clearModalStatus() {
 
 /* ---------- 渲染 ---------- */
 
+/** 所有账户的读取问题集中到状态列图标，保留完整原因而不增加行高。 */
+function accountIssues(account) {
+  const status = account.status || {};
+  const issues = new Set();
+  for (const error of [rowErrors.get(account.id), status.refreshError, status.error]) {
+    if (error) issues.add(resetError(error));
+  }
+  if (account.kind === "opencode") {
+    if (!account.opencodeAuthorized) issues.add("请在编辑中完成独立授权，查询套餐与用量。");
+    if (status.workspaceUsageAllowed === false) issues.add("工作区总用量需要管理员授权。");
+    for (const [key, label] of [["subscription", "套餐"], ["quota", "额度"], ["balance", "余额"]]) {
+      const field = status.fields?.[key];
+      if (!field || ["ok", "not_subscribed"].includes(field.state)) continue;
+      const reason = field.error ? resetError(field.error) : field.state === "forbidden" ? "无查看权限" : "暂未获取";
+      const cached = Number(field.at) > 0 ? `；显示 ${fmtDateMs(Number(field.at))} 的缓存` : "";
+      issues.add(`${label}：${reason}${cached}`);
+    }
+  }
+  if (status.stale) issues.add("部分数据未能刷新，保留已知缓存。");
+  return [...issues].join("\n");
+}
+
 function fillStateCell(cell, account) {
   const status = account.status || null;
   const alive = status && typeof status.alive === "boolean" ? status.alive : null;
+  cell.classList.add("account-state-cell");
 
   const wrap = document.createElement("span");
   wrap.className = "account-state";
   const dot = document.createElement("span");
   dot.className = `dot ${alive === true ? "ok" : alive === false ? "bad" : "unknown"}`;
   const text = document.createElement("span");
-  let stateText = alive === true ? "有效" : alive === false ? "已失效" : "未检测";
-  // Codex / Claude 有效时在状态后附上登录凭据（Token）剩余时长，如「有效（7d）」
-  if (account.kind === "codex" && alive === true) {
-    const exp = Number(status && status.exp);
-    if (Number.isFinite(exp) && exp > 0) {
-      const info = remainInfo(exp * 1000);
-      if (!info.expired) {
-        stateText += `（${info.text}）`;
-        text.title = `Token 到期：${fmtDateMs(exp * 1000)}（登录凭据有效期，非套餐周期）`;
-      }
-    }
-  } else if (account.kind === "claude" && alive === true) {
-    // Claude access_token 非 JWT，过期时刻由续期流程记录在 status.tokenExpiresAtMs
-    const expMs = Number(status && status.tokenExpiresAtMs);
-    if (Number.isFinite(expMs) && expMs > 0) {
-      const info = remainInfo(expMs);
-      if (!info.expired) {
-        stateText += `（${info.text}）`;
-        text.title = `Token 到期：${fmtDateMs(expMs)}（登录凭据有效期，有 Refresh Token 会自动续期）`;
-      }
-    }
-  }
-  text.textContent = stateText;
+  text.textContent = alive === true ? "有效" : alive === false ? "已失效" : "未检测";
   wrap.append(dot, text);
   cell.append(wrap);
 
-  // Codex / Claude 有 Refresh Token 时可自动续期，作为状态补充展示在第二行
+  // 登录有效期与续期标签共用第二行，与套餐到期时间对齐。
+  const line = document.createElement("div");
+  line.className = "state-tag-line";
+  const expMs = account.kind === "codex" ? Number(status?.exp) * 1000 : Number(status?.tokenExpiresAtMs);
+  if (alive === true && Number.isFinite(expMs) && expMs > 0) {
+    const info = remainInfo(expMs);
+    if (!info.expired) {
+      const expiry = document.createElement("span");
+      expiry.className = "state-expiry";
+      expiry.textContent = info.text;
+      expiry.title = `Token 到期：${fmtDateMs(expMs)}（登录凭据有效期，非套餐周期）`;
+      line.append(expiry);
+    }
+  }
   if (account.kind !== "cursor" && String(account.refreshToken || "").trim()) {
-    const line = document.createElement("div");
-    line.className = "state-tag-line";
     const tag = document.createElement("span");
     tag.className = "tag renewable";
     tag.textContent = "可续期";
     line.append(tag);
-    cell.append(line);
   }
+  if (line.childNodes.length) cell.append(line);
 
-  // 错误收敛为短语，完整信息放悬停提示（避免撑开固定宽度的状态列）
-  const error = rowErrors.get(account.id) || (status && status.refreshError) || "";
-  if (error) {
+  const issues = accountIssues(account);
+  if (issues) {
     const e = document.createElement("span");
-    e.className = "account-error";
-    e.textContent = "刷新失败";
-    e.title = String(error);
+    e.className = "account-issue";
+    e.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11" r=".8" fill="currentColor"/></svg>';
+    e.title = issues;
+    e.setAttribute("role", "img");
+    e.setAttribute("aria-label", issues);
+    e.tabIndex = 0;
     cell.append(e);
   }
 }
@@ -198,7 +245,7 @@ function fillPlanCell(cell, account) {
   if (!endText) return;
   const expiry = expiryNode(new Date(endIso).getTime());
   const startText = isoDateText(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart);
-  const renewHint = account.kind === "codex"
+  const renewHint = account.kind === "codex" || account.kind === "opencode"
     ? status.planWillRenew === true
       ? "（到期自动续期）"
       : status.planWillRenew === false
@@ -363,6 +410,11 @@ function fillOnDemandCell(cell, account) {
  * 无限额度主行显示「无限」；解析不出显示 —。
  */
 function fillCreditsCell(cell, account) {
+  if (account.kind === "opencode") {
+    const status = account.status || {};
+    cell.textContent = status.balanceUsd == null ? "—" : usdText(status.balanceUsd);
+    return;
+  }
   const status = account.status || null;
   const credits = status && status.alive !== false ? status.credits : null;
   if (credits == null) {
@@ -543,12 +595,18 @@ function accountRow(account) {
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
   const editBtn = iconAction("edit", "编辑");
   editBtn.disabled = busy || switching;
-  editBtn.addEventListener("click", () => openModal(account));
+  editBtn.addEventListener("click", () => account.kind === "opencode"
+    ? editOpenCode(account, async () => { await loadInitial(false); void refreshOne(account.id); }) : openModal(account));
   // 删除使用显式确认弹窗，避免首次点击只变色而看起来没有响应。
   const deleteBtn = iconAction("delete", "删除");
   deleteBtn.disabled = busy || switching;
   deleteBtn.addEventListener("click", () => { void onDeleteClick(account.id); });
-  if (account.kind === "cursor") {
+  if (account.kind === "opencode") {
+    const switchBtn = iconAction("switch", "切换 OpenCode 客户端");
+    switchBtn.disabled = busy || switching;
+    switchBtn.addEventListener("click", () => { void switchOpenCode(account.id); });
+    actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
+  } else if (account.kind === "cursor") {
     // 仅允许切换已验证有效的账户，避免把失效 token 写进本地 Cursor
     const aliveOk = !!(account.status && account.status.alive === true);
     const switchBtn = iconAction("switch", aliveOk ? "切换到该账户" : "请先刷新验证账户后再切换");
@@ -596,12 +654,12 @@ function updateGroupMeta(kind) {
 /** 卡片标题栏的退出登录 / 刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
 function updateHeadingActions() {
   const blocked = switching || importing || refreshAllRunning;
-  for (const kind of ["cursor", "codex", "claude"]) {
+  for (const kind of ["cursor", "codex", "claude", "opencode"]) {
     const running = groupRefreshing.has(kind) || refreshAllRunning;
     const refreshBtn = el(`#accounts-refresh-${kind}`);
     refreshBtn.disabled = blocked || groupRefreshing.has(kind);
     refreshBtn.classList.toggle("busy", running);
-    el(`#accounts-logout-${kind}`).disabled = blocked;
+    if (kind !== "opencode") el(`#accounts-logout-${kind}`).disabled = blocked;
     el(`#accounts-import-${kind}`).disabled = blocked;
     const hasRows = accounts.some((a) => a.kind === kind);
     el(`#accounts-export-${kind}`).disabled = blocked || !hasRows;
@@ -625,6 +683,7 @@ function render() {
   renderGroup("cursor", "#accounts-body-cursor", "#accounts-empty-cursor");
   renderGroup("codex", "#accounts-body-codex", "#accounts-empty-codex");
   renderGroup("claude", "#accounts-body-claude", "#accounts-empty-claude");
+  renderGroup("opencode", "#accounts-body-opencode", "#accounts-empty-opencode");
   updateHeadingActions();
   // 首批进度条渲染完成后，后续重绘不再重放生长动画
   if (!quotaIntroPlayed && document.querySelector(".quota-bar")) quotaIntroPlayed = true;
@@ -632,6 +691,7 @@ function render() {
 
 /** 账户类型对应的表格 tbody 选择器。 */
 function bodyIdFor(kind) {
+  if (kind === "opencode") return "#accounts-body-opencode";
   return kind === "codex"
     ? "#accounts-body-codex"
     : kind === "claude"
@@ -673,8 +733,8 @@ function applyView(view) {
   const n = Number(view && view.intervalMinutes);
   if (Number.isFinite(n)) intervalMinutes = n;
   el("#accounts-interval").value = String(intervalMinutes);
-  // 间隔与现行定时器不一致时重建（如全量备份导入等其它入口改动后热生效）
-  if (intervalMinutes !== timerMinutes) rebuildTimer();
+  // 账户独立设置、增删和全量备份恢复都立即更新调度；未变化的任务保留原到期时间。
+  rebuildTimer();
   // 清理已被移除账户的瞬态状态
   const ids = new Set(accounts.map((a) => a.id));
   for (const id of [...rowErrors.keys()]) {
@@ -746,6 +806,7 @@ async function refreshOne(id) {
     return null;
   } finally {
     refreshingIds.delete(id);
+    refreshScheduler.completed(id);
     updateRow(id);
     notifyChange();
   }
@@ -785,53 +846,19 @@ async function refreshGroup(kind) {
 }
 
 /** 账户类型在页面上的分组顺序（Cursor → ChatGPT → Claude），刷新全部时按此顺序逐组进行。 */
-const KIND_ORDER = ["cursor", "codex", "claude"];
+
 
 /** 全部账户按界面显示顺序排列的 id：先按类型分组、组内按套餐排序，与 render 的顺序一致。 */
 function displayOrderIds() {
-  return KIND_ORDER.flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
+  return getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
 }
 
-/**
- * 全部账户排队逐个刷新（定时刷新与启动自动刷新用）；切换/导入进行中跳过本次。
- * 顺序与界面一致：Cursor 组刷完再刷 ChatGPT 组、Claude 组，不按存储顺序在类型间来回跳。
- */
-async function refreshAll() {
-  if (refreshAllRunning || switching || importing || intervalMinutes <= 0) return;
-  const ids = displayOrderIds();
-  refreshAllRunning = true;
-  clearStatus();
-  render();
-  try {
-    const [failed, sync] = await Promise.all([refreshIds(ids), syncCodexUsage("interval")]);
-    if (sync.error) setStatus("warn", `GPT 用量同步失败：${syncError(sync.error)}`);
-    else if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
-  } finally {
-    refreshAllRunning = false;
-    render();
-  }
-}
-
-// 现行定时器对应的间隔（分钟），applyView 据此判断是否需要重建
-let timerMinutes = 0;
-
-// 全应用共用此定时器：每轮同步一次 GPT 用量（无账户也执行），并逐个刷新账户状态，经 notifyChange
-// 通知用量统计页按当前跨度预取该账户的用量（用量页不再自带定时器，避免两条链重复拉取）。
+// 只有主窗口创建调度器；各账户到期时逐个刷新，共享日志与 GPT 同步单独使用全局间隔。
 function rebuildTimer() {
-  timerMinutes = intervalMinutes;
-  if (timerId != null) {
-    clearInterval(timerId);
-    timerId = null;
-  }
-  if (intervalMinutes > 0) {
-    timerId = setInterval(() => {
-      // 上一轮仍在进行时跳过本次定时触发
-      if (!refreshAllRunning) void refreshAll();
-    }, intervalMinutes * 60_000);
-  }
+  refreshScheduler.update(accounts, intervalMinutes);
 }
 
-/** 定时刷新间隔（分钟，0 = 关闭），账户状态与用量统计共用；设置弹窗用于回显。 */
+/** 全局默认间隔（分钟，0 = 关闭），用于继承的账户及共享用量任务；设置弹窗用于回显。 */
 export function getRefreshIntervalMinutes() {
   return intervalMinutes;
 }
@@ -844,7 +871,6 @@ export async function setRefreshInterval(minutes) {
   const view = await invoke("accounts_set_interval", { intervalMinutes: minutes });
   applyView(view);
   render();
-  rebuildTimer();
   return intervalMinutes;
 }
 
@@ -864,7 +890,7 @@ async function onDeleteClick(id) {
   const isCursor = account.kind === "cursor";
   const ok = await switchModal.toConfirm({
     title: "删除账户",
-    body: `确定删除“${name}”吗？此操作无法撤销。`,
+    body: `确定删除“${name}”吗？此操作无法撤销。` + (account.kind === "opencode" ? "该工作区的本地用量归档也会删除，超过服务端 30 天保留期的记录无法重新拉取。" : ""),
     confirmText: "删除",
     danger: true,
     option: isCursor ? { label: "保留统计数据（用量统计页仍可查看，标记为「已删除」）", checked: true } : null,
@@ -920,7 +946,9 @@ async function doDelete(id, keepUsage) {
     applyView(result.view);
     setStatus("ok", "账户已删除。");
   } catch (error) {
-    setStatus("bad", `删除失败：${mapDeleteError(resetError(error))}`);
+    const code = resetError(error);
+    if (code === "opencode_archive_cleanup_failed_account_deleted") setStatus("warn", mapDeleteError(code));
+    else setStatus("bad", `删除失败：${mapDeleteError(code)}`);
   }
   render();
 }
@@ -931,6 +959,7 @@ function mapDeleteError(code) {
     invalid_session_token: "Token 已失效，无法从 Cursor 拉取用量",
     empty_token: "账户 Token 为空",
     not_found: "账户不存在",
+    opencode_archive_cleanup_failed_account_deleted: "账户已删除，但 OpenCode 本地归档清理失败，历史记录仍保留在本机。",
   };
   if (M[code]) return M[code];
   if (code.startsWith("cursor_http_")) return `Cursor 接口返回 HTTP ${code.slice("cursor_http_".length)}`;
@@ -951,7 +980,7 @@ export async function confirmDialog({ title, body, confirmText, danger = true })
 /**
  * 供其它页面复用的单行文本输入弹窗（如用量统计页修改已删除账户的备注）。
  * input = { label, value, placeholder }。确认返回输入的文本（可为空串）；
- * 取消 / Esc，或弹窗正被切换 / 删除流程占用时返回 null。
+ * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；Esc 仅显示公共关闭提示。
  */
 export async function promptDialog({ title, body, confirmText, input }) {
   if (switchModal.phase !== "hidden") return null;
@@ -962,13 +991,18 @@ export async function promptDialog({ title, body, confirmText, input }) {
 }
 
 /** 已删除账户只允许关闭并移除 API 历史；保存后不能再开启，备注仍可编辑。 */
-export async function editDeletedAccountDialog({ label, note, ignoreApiModels, apiRemovalApproximate, apiRemovalError }) {
+export async function editDeletedAccountDialog({ label, note, ignoreApiModels, apiRemovalApproximate, apiRemovalError, save }) {
   if (switchModal.phase !== "hidden") return null;
+  const readValue = () => ({
+    note: switchModal.inputValue(),
+    removeApiUsage: !ignoreApiModels && !apiRemovalError && !el("#switch-modal-api-input").checked,
+  });
   const ok = await switchModal.toConfirm({
     title: "编辑已删除账户",
     body: `编辑“${label}”的备注及保留的历史记录。`,
     confirmText: "保存",
     danger: false,
+    onConfirm: save ? () => save(readValue()) : null,
     input: { label: "备注", value: note, placeholder: "留空恢复自动备注" },
     apiHistory: {
       checked: !ignoreApiModels,
@@ -983,10 +1017,7 @@ export async function editDeletedAccountDialog({ label, note, ignoreApiModels, a
           : "关闭并保存后，永久移除套餐内 API 额度和超额按量付费的历史明细及统计。保存后不能重新开启；自有模型临时转扣 API 额度的记录暂无法精确识别。"),
     },
   });
-  const result = ok ? {
-    note: switchModal.inputValue(),
-    removeApiUsage: !ignoreApiModels && !apiRemovalError && !el("#switch-modal-api-input").checked,
-  } : null;
+  const result = ok ? readValue() : null;
   switchModal.close();
   return result;
 }
@@ -994,11 +1025,12 @@ export async function editDeletedAccountDialog({ label, note, ignoreApiModels, a
 /**
  * 供其它页面复用的下拉选择弹窗（如用量统计页为已删除账户指定套餐档位）。
  * select = { label, value, options: [{ value, label }] }。确认返回所选项的 value；
- * 取消 / Esc，或弹窗正被切换 / 删除流程占用时返回 null。
+ * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；Esc 仅显示公共关闭提示。
  */
-export async function selectDialog({ title, body, confirmText, select }) {
+export async function selectDialog({ title, body, confirmText, select, save }) {
   if (switchModal.phase !== "hidden") return null;
-  const ok = await switchModal.toConfirm({ title, body, confirmText, danger: false, select });
+  const ok = await switchModal.toConfirm({ title, body, confirmText, danger: false, select,
+    onConfirm: save ? () => save(switchModal.selectValue()) : null });
   const value = ok ? switchModal.selectValue() : null;
   switchModal.close();
   return value;
@@ -1018,8 +1050,23 @@ const switchModal = {
   phase: "hidden", // hidden | busy | confirm | steps | done
   stepIndex: -1,
   confirmResolve: null,
+  confirmAction: null,
   autoCloseTimer: null,
   altHandler: null, // 结果阶段备选操作按钮的回调（finish 的 alt 参数）
+  editable: false,
+  controller: null,
+
+  show() {
+    this.controller ||= createModal(el("#switch-modal"), {
+      mode: () => this.editable ? "edit" : "view",
+      isBusy: () => this.phase === "busy" || this.phase === "steps",
+      closeSelector: "#switch-cancel, #switch-close",
+      onRequestClose: () => this.requestClose(),
+      onClose: () => this.resetState(),
+    });
+    this.controller.reset();
+    this.controller.open();
+  },
 
   /** 打开弹窗并显示忙碌文案（如「正在检测本地 Cursor…」），期间不可关闭。 */
   openBusy(title, text) {
@@ -1040,8 +1087,9 @@ const switchModal = {
     status.textContent = "";
     el("#switch-modal .modal-foot").hidden = true;
     this.phase = "busy";
+    this.editable = false;
     this.stepIndex = -1;
-    el("#switch-modal").hidden = false;
+    this.show();
   },
 
   /**
@@ -1052,7 +1100,7 @@ const switchModal = {
    * select = { label, value, options } 时显示一个下拉选择（如指定已删除账户的套餐档位），
    * 焦点落在下拉框，确认后经 selectValue() 读取。
    */
-  toConfirm({ title, body, confirmText, danger, option, input, select, apiHistory }) {
+  toConfirm({ title, body, confirmText, danger, option, input, select, apiHistory, onConfirm }) {
     return new Promise((resolve) => {
       this.stopAutoClose();
       if (title) el("#switch-modal-title").textContent = title;
@@ -1072,8 +1120,10 @@ const switchModal = {
       ok.textContent = confirmText || "确认";
       ok.classList.toggle("danger", !!danger);
       this.phase = "confirm";
+      this.editable = !!(input || select || apiHistory);
       this.confirmResolve = resolve;
-      el("#switch-modal").hidden = false;
+      this.confirmAction = onConfirm || null;
+      this.show();
       if (input) {
         const field = el("#switch-modal-input");
         field.focus();
@@ -1188,6 +1238,8 @@ const switchModal = {
     );
     box.hidden = false;
     this.phase = "steps";
+    this.editable = false;
+    this.controller?.reset();
     this.stepIndex = -1;
   },
 
@@ -1244,6 +1296,8 @@ const switchModal = {
     btn.textContent = "关闭";
     btn.classList.remove("danger");
     this.phase = "done";
+    this.editable = false;
+    this.controller?.reset();
     btn.focus();
     if (ok) this.startAutoClose();
   },
@@ -1283,13 +1337,17 @@ const switchModal = {
 
   /** 隐藏弹窗并复位。 */
   close() {
+    this.controller?.close();
+  },
+
+  resetState() {
     this.stopAutoClose();
     if (this.confirmResolve) {
       const resolve = this.confirmResolve;
       this.confirmResolve = null;
       resolve(false);
     }
-    el("#switch-modal").hidden = true;
+    this.confirmAction = null;
     el("#switch-modal-body").hidden = false;
     this.setOption(null);
     this.setInput(null);
@@ -1317,8 +1375,22 @@ const switchModal = {
   },
 
   /** 主按钮点击：确认阶段 = 确认，结果阶段 = 关闭。 */
-  onOk() {
+  async onOk() {
     if (this.phase === "confirm") {
+      if (!this.confirmResolve) return;
+      if (this.confirmAction) {
+        const operation = this.controller.beginSave([el("#switch-ok")]);
+        if (!operation) return;
+        try {
+          await this.confirmAction();
+          if (!operation.current()) return;
+        } catch (error) {
+          if (operation.current()) fillStatus(el("#switch-modal-status"), "bad", `保存失败：${resetError(error)}`);
+          return;
+        } finally {
+          operation.finish();
+        }
+      }
       const resolve = this.confirmResolve;
       this.confirmResolve = null;
       if (resolve) resolve(true);
@@ -1741,7 +1813,7 @@ async function onLogoutLocal(kind) {
 // Claude 读 .credentials.json / macOS Keychain）；后端保证同一账号不重复导入，导入后逐个后台验证。
 async function onImportLocal(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
+  const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
   setStatus("", `正在读取本机 ${label} 登录…`);
@@ -1765,6 +1837,7 @@ async function onImportLocal(kind) {
     } else {
       setStatus("warn", `未检测到本机已登录的 ${label} 账号。`);
     }
+    if (target === "opencode" && imported.length) setStatus("ok", "已关联本机工作区，请在账户编辑中完成独立授权。");
     // 新导入的账户尚未验证，后台排队逐个刷新，不阻塞汇总提示
     void refreshIds(imported.map((item) => item.id));
   } catch (error) {
@@ -1779,7 +1852,7 @@ async function onImportLocal(kind) {
 
 async function onExport(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
+  const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
   setStatus("", `正在导出 ${label} 账户…`);
@@ -1804,7 +1877,7 @@ async function onExport(kind) {
 
 async function onImportFile(kind) {
   if (importing || switching || refreshAllRunning) return;
-  const target = kind === "codex" || kind === "claude" ? kind : "cursor";
+  const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
   setStatus("", `正在导入 ${label} 账户…`);
@@ -1846,8 +1919,13 @@ async function onImportFile(kind) {
 
 /* ---------- 添加 / 编辑弹窗 ---------- */
 
+let accountModal;
+function getAccountModal() {
+  return accountModal ||= createModal(el("#account-modal"), { onClose: () => { editingId = null; } });
+}
+
 function setModalKind(kind) {
-  modalKind = kind === "codex" || kind === "claude" ? kind : "cursor";
+  modalKind = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   for (const seg of el("#account-kind").querySelectorAll(".seg")) {
     seg.classList.toggle("active", seg.dataset.kind === modalKind);
   }
@@ -1864,12 +1942,15 @@ function setModalKind(kind) {
 }
 
 function openModal(account, presetKind) {
+  if (getAccountModal().busy) return;
   editingId = account ? account.id : null;
   el("#account-modal-title").textContent = account ? "编辑账户" : "添加账户";
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
   el("#account-ignore-api-models").checked = !!(account && account.ignoreApiModels);
+  el("#account-interval-field").hidden = !account;
+  el("#account-refresh-interval").value = account?.refreshIntervalMinutes == null ? "" : String(account.refreshIntervalMinutes);
   el("#account-oauth-code").value = "";
   setModalKind(account ? account.kind : presetKind || "cursor");
   // 编辑时不允许切换账户类型
@@ -1880,13 +1961,12 @@ function openModal(account, presetKind) {
   clearBtn.hidden = !(account && account.kind === "cursor");
   clearBtn.disabled = false;
   clearModalStatus();
-  el("#account-modal").hidden = false;
+  getAccountModal().open();
   el("#account-note").focus();
 }
 
 function closeModal() {
-  el("#account-modal").hidden = true;
-  editingId = null;
+  getAccountModal().close();
 }
 
 /**
@@ -1894,6 +1974,8 @@ function closeModal() {
  * 账户与 Token 保留，下次刷新用量时重新全量拉取。结果显示在弹窗状态条，弹窗保持打开。
  */
 async function onClearLocalUsage() {
+  if (getAccountModal().busy) return;
+  const session = getAccountModal().session;
   const id = editingId;
   const account = accounts.find((item) => item.id === id);
   if (!account || account.kind !== "cursor") return;
@@ -1905,21 +1987,25 @@ async function onClearLocalUsage() {
     danger: true,
   });
   // 确认期间弹窗可能已被关掉（Esc / 切换到别的账户），不再落地
-  if (!ok || editingId !== id) return;
+  if (!ok || !getAccountModal().isCurrent(session) || editingId !== id) return;
   const btn = el("#account-clear-usage");
-  btn.disabled = true;
+  const operation = getAccountModal().beginSave([btn]);
+  if (!operation) return;
   try {
     const result = await clearCursorLocalData(id);
+    if (!operation.current()) return;
     setModalStatus("ok", `已清除本地用量数据（${result.events} 条事件），下次刷新用量时重新全量拉取。`);
   } catch (error) {
+    if (!operation.current()) return;
     const code = resetError(error);
     setModalStatus("bad", code === "no_usage_data" ? "本机没有该账户的用量数据。" : `清除失败：${code}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
 async function onSave() {
+  if (getAccountModal().busy) return;
   const token = el("#account-token").value.trim();
   if (!token) {
     setModalStatus("bad", modalKind === "claude" ? "请填写 Token，或使用上方 OAuth 授权添加。" : "请填写 Token。");
@@ -1928,29 +2014,33 @@ async function onSave() {
   const note = el("#account-note").value.trim();
   const refreshToken = modalKind !== "cursor" ? el("#account-refresh-token").value.trim() || null : null;
   const ignoreApiModels = modalKind === "cursor" && el("#account-ignore-api-models").checked;
+  const interval = el("#account-refresh-interval").value;
+  const refreshIntervalMinutes = interval === "" ? null : Number(interval);
   const isEdit = editingId != null;
   const id = editingId;
   const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
   const btn = el("#account-save");
-  btn.disabled = true;
+  const operation = getAccountModal().beginSave([btn, el("#account-oauth-finish"), el("#account-import-local")]);
+  if (!operation) return;
   setModalStatus("", "保存中…");
   try {
     const view = isEdit
-      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels })
+      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes })
       : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
     applyView(view);
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
     render();
-    closeModal();
+    if (operation.current()) closeModal();
     setStatus("ok", isEdit ? "账户已更新。" : "账户已添加。");
     // 手动新增与本机/文件导入保持一致：保存后后台拉取一次完整状态，失败留在对应账户行提示。
     if (added) void refreshOne(added.id);
   } catch (error) {
+    if (!operation.current()) return;
     const msg = resetError(error);
     if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
     else setModalStatus("bad", `保存失败：${msg}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
@@ -1958,11 +2048,14 @@ async function onSave() {
 
 // 打开浏览器授权页：后端生成 PKCE 上下文并尝试唤起系统浏览器，失败时提示手动打开。
 async function onOauthOpen() {
+  if (getAccountModal().busy) return;
+  const session = getAccountModal().session;
   const btn = el("#account-oauth-open");
   btn.disabled = true;
   setModalStatus("", "正在打开浏览器授权页…");
   try {
     const r = await invoke("claude_oauth_begin");
+    if (!getAccountModal().isCurrent(session)) return;
     if (r && r.opened) {
       setModalStatus("", "已打开浏览器。登录并授权后，把页面展示的授权码粘贴到输入框，点「完成授权」。");
     } else {
@@ -1971,7 +2064,7 @@ async function onOauthOpen() {
       setModalStatus("warn", "未能自动打开浏览器，授权地址已复制到剪贴板，请手动粘贴到浏览器打开。");
     }
   } catch (error) {
-    setModalStatus("bad", `发起授权失败：${resetError(error)}`);
+    if (getAccountModal().isCurrent(session)) setModalStatus("bad", `发起授权失败：${resetError(error)}`);
   } finally {
     btn.disabled = false;
   }
@@ -1991,25 +2084,27 @@ function mapOauthError(err) {
 
 // 用授权码换取凭据并直接落库；成功后关弹窗并后台刷新新账户。
 async function onOauthFinish() {
+  if (getAccountModal().busy) return;
   const code = el("#account-oauth-code").value.trim();
   if (!code) {
     setModalStatus("bad", "请粘贴浏览器返回的授权码。");
     return;
   }
   const btn = el("#account-oauth-finish");
-  btn.disabled = true;
+  const operation = getAccountModal().beginSave([btn, el("#account-save"), el("#account-import-local")]);
+  if (!operation) return;
   setModalStatus("", "正在换取登录凭证…");
   try {
     const r = await invoke("claude_oauth_finish", { code });
     applyView(r.view);
     render();
-    closeModal();
+    if (operation.current()) closeModal();
     setStatus("ok", `账户已添加：${r.label}`);
     void refreshOne(r.id);
   } catch (error) {
-    setModalStatus("bad", `授权失败：${mapOauthError(error)}`);
+    if (operation.current()) setModalStatus("bad", `授权失败：${mapOauthError(error)}`);
   } finally {
-    btn.disabled = false;
+    operation.finish();
   }
 }
 
@@ -2032,11 +2127,6 @@ async function loadInitial(allowRetry = true) {
     const view = await invoke("accounts_list");
     applyView(view);
     render();
-    if (intervalMinutes > 0) {
-      // 先展示缓存状态，3 秒后自动整体刷新一轮
-      setTimeout(() => { void refreshAll(); }, 3000);
-      rebuildTimer();
-    }
   } catch (error) {
     // 文件被短暂占用属于瞬态故障，自动重试一次再报错
     if (allowRetry) {
@@ -2049,27 +2139,27 @@ async function loadInitial(allowRetry = true) {
 }
 
 export function initAccounts() {
-  for (const kind of ["cursor", "codex", "claude"]) {
-    el(`#accounts-add-${kind}`).addEventListener("click", () => openModal(null, kind));
-    el(`#accounts-logout-${kind}`).addEventListener("click", () => { void onLogoutLocal(kind); });
+  initAccountCardOrder();
+  for (const kind of ["cursor", "codex", "claude", "opencode"]) {
+    el(`#accounts-add-${kind}`).addEventListener("click", () => {
+      if (kind === "opencode") addOpenCode(async ids => {
+        await loadInitial(false);
+        if (ids.length) void refreshIds(ids);
+      });
+      else openModal(null, kind);
+    });
+    if (kind !== "opencode") el(`#accounts-logout-${kind}`).addEventListener("click", () => { void onLogoutLocal(kind); });
     el(`#accounts-refresh-${kind}`).addEventListener("click", () => { void refreshGroup(kind); });
     el(`#accounts-import-${kind}`).addEventListener("click", () => { void onImportFile(kind); });
     el(`#accounts-export-${kind}`).addEventListener("click", () => { void onExport(kind); });
   }
 
-  const modal = el("#account-modal");
-  for (const node of modal.querySelectorAll("[data-close]")) {
-    node.addEventListener("click", closeModal);
-  }
-  document.addEventListener("keydown", (e) => {
-    // 上层的确认弹窗（清除本地数据）打开时，Esc 只关它，不连带关掉编辑弹窗
-    if (e.key === "Escape" && !modal.hidden && el("#switch-modal").hidden) closeModal();
-  });
   for (const seg of el("#account-kind").querySelectorAll(".seg")) {
-    seg.addEventListener("click", () => setModalKind(seg.dataset.kind));
+    seg.addEventListener("click", () => { if (!getAccountModal().busy) setModalKind(seg.dataset.kind); });
   }
   el("#account-save").addEventListener("click", () => { void onSave(); });
   el("#account-import-local").addEventListener("click", () => {
+    if (getAccountModal().busy) return;
     const kind = modalKind;
     closeModal();
     void onImportLocal(kind);
@@ -2081,11 +2171,6 @@ export function initAccounts() {
   // 切换流程弹窗：事件一次性绑定，按 switchModal 当前阶段分发
   el("#switch-ok").addEventListener("click", () => switchModal.onOk());
   el("#switch-alt").addEventListener("click", () => switchModal.onAlt());
-  el("#switch-cancel").addEventListener("click", () => switchModal.requestClose());
-  el("#switch-close").addEventListener("click", () => switchModal.requestClose());
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !el("#switch-modal").hidden) switchModal.requestClose();
-  });
   // 确认阶段的文本输入：回车等同于点主按钮
   el("#switch-modal-input").addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
@@ -2103,7 +2188,10 @@ export function initAccounts() {
     const id = String(payload.id || "");
     if (!id) return;
     if (payload.active) remoteRefreshingIds.add(id);
-    else remoteRefreshingIds.delete(id);
+    else {
+      remoteRefreshingIds.delete(id);
+      if (!refreshingIds.has(id)) refreshScheduler.completed(id);
+    }
     if (accounts.some((a) => a.id === id)) updateRow(id);
   }).catch(() => {
     /* 非 Tauri 环境无事件桥 */
@@ -2122,6 +2210,7 @@ export function initAccounts() {
     updateGroupMeta("cursor");
     updateGroupMeta("codex");
     updateGroupMeta("claude");
+    updateGroupMeta("opencode");
   }, 30_000);
 
   render();

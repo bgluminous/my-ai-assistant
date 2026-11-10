@@ -69,6 +69,53 @@ fn plain_models_still_resolve() {
 }
 
 #[test]
+fn deepseek_flash_versions_share_prices_but_keep_names() {
+    let mut t = table();
+    // 即使直接传入含冲突条目的旧表，计价也必须优先使用基础项。
+    for alias in ["deepseek-v4-flash", "deepseek-v4.1-flash", "cursor-deepseek-v4.1-flash"] {
+        t.models.insert(alias.into(), ModelPrice { input: 99.0, ..ModelPrice::default() });
+    }
+    for (raw, shown) in [
+        ("DeepSeek-Flash", "deepseek-flash"),
+        ("deepseek-v4-flash", "deepseek-v4-flash"),
+        ("deepseek-v4.1-flash", "deepseek-v4.1-flash"),
+        (" cursor-DeepSeek-v4-1-flash-high-thinking ", "deepseek-v4.1-flash"),
+        ("deepseek-v4_1-flash-latest", "deepseek-v4.1-flash"),
+        ("deepseek-v5-flash-reasoning", "deepseek-v5-flash"),
+        ("deepseek-v10.2.3-flash", "deepseek-v10.2.3-flash"),
+        ("deepseek-v1000-flash", "deepseek-v1000-flash"),
+        ("deepseek-v4.1-flash-high-fast", "deepseek-v4.1-flash-fast"),
+        ("deepseek-v4-1-flash-2026-11-11-thinking", "deepseek-v4.1-flash-2026-11-11"),
+        ("cursor-deepseek-flash-20261111-high", "deepseek-flash-20261111"),
+    ] {
+        assert_eq!(resolve(&t, raw).unwrap().0, DEEPSEEK_FLASH, "{raw}");
+        assert_eq!(resolve(&t, raw).unwrap().1.input, t.models[DEEPSEEK_FLASH].input);
+        assert_eq!(display_key(&t, raw), shown, "{raw}");
+        assert_eq!(resolve(&t, shown).unwrap().0, DEEPSEEK_FLASH);
+    }
+    // 缺少基础价时不能重新启用版本专属价格。
+    t.models.remove(DEEPSEEK_FLASH);
+    assert!(resolve(&t, "deepseek-v4.1-flash").is_none());
+}
+
+#[test]
+fn deepseek_flash_rule_does_not_capture_other_models() {
+    let t = table();
+    for model in ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner", "deepseek-v3", "deepseek-r1"] {
+        assert_eq!(resolve(&t, model).unwrap().0, model);
+        assert_eq!(display_key(&t, model), model);
+    }
+    for raw in [
+        "deepseek-v4.1-flash-lite", "deepseek-v4.1-flashx", "deepseek-v4.1-pro",
+        "deepseek-v-flash", "deepseek-v4..1-flash", "deepseek-v4a-flash", "gemini-3.5-flash",
+    ] {
+        assert!(deepseek_flash_display_key(raw).is_none(), "{raw}");
+        assert!(!is_deepseek_flash_alias(raw), "{raw}");
+    }
+    assert!(!is_deepseek_flash_alias(" DeepSeek-Flash "));
+}
+
+#[test]
 fn fable_5_1_never_priced_as_fable_5() {
     let t = table();
     // 点号 / 连字符（官方 API ID）两种写法、带 effort 后缀与 cursor- 前缀

@@ -34,9 +34,11 @@ const memAgg = new Map();
 const inflight = new Map();
 const accountCacheRevisions = new Map();
 let cursorUsageFilters = new Map();
+let openCodeAccounts = [];
 
 /** 每次账户列表变化时同步口径；主窗口与托盘都在读取聚合缓存前调用。 */
 export function syncCursorUsageFilters(accounts) {
+  openCodeAccounts = accounts.filter(a => a.kind === "opencode");
   const previous = cursorUsageFilters;
   cursorUsageFilters = new Map(
     accounts.filter((a) => a.kind === "cursor").map((a) => [a.id, !!a.ignoreApiModels])
@@ -243,6 +245,7 @@ function withTimeout(promise, label) {
  * 再以带 usageCache 的错误抛出，调用方按「更新失败（仍显示上次数据）」处理。
  */
 export function fetchCursorAggregate(account, rangeKey, { start, end, force, full } = {}) {
+  if (account.kind === "opencode") return fetchOpenCodeAggregate(account, rangeKey, { start, end, force, full });
   if (!cursorUsageFilters.has(account.id)) cursorUsageFilters.set(account.id, !!account.ignoreApiModels);
   const ignoreApiModels = cursorUsageFilters.get(account.id);
   const revision = accountCacheRevisions.get(account.id) || 0;
@@ -280,6 +283,30 @@ export function fetchCursorAggregate(account, rangeKey, { start, end, force, ful
     .finally(() => inflight.delete(inflightKey));
   inflight.set(inflightKey, p);
   return p;
+}
+
+/** OpenCode 以工作区归档，前端继续使用账户 ID 缓存；账户层保证同工作区只有一行。 */
+export function fetchOpenCodeAggregate(account, rangeKey, { start, end, force, full } = {}) {
+  const key = account.id + ":" + rangeKey;
+  const cached = getCachedAgg(account.id, rangeKey);
+  if (!force && !full && cached && isUsageCacheFresh(cached.at)) return Promise.resolve(cached);
+  const inflightKey = "opencode:" + key + ":" + (full ? "full" : force ? "sync" : "auto");
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+  const revision = accountCacheRevisions.get(account.id) || 0;
+  const promise = withTimeout(invoke("opencode_usage_fetch", {
+    accountId: account.id, start: start ?? null, end: end ?? null,
+    mode: full ? "full" : force ? "sync" : "auto", maxAgeMs: ttlMs,
+  }), "opencode_usage_fetch").then(result => {
+    const entry = { agg: result.agg, at: Number(result.syncedAt) || 0, ignoreApiModels: false };
+    if (revision === (accountCacheRevisions.get(account.id) || 0)) {
+      memAgg.set(key, entry);
+      cacheStore("agg:" + key, entry);
+    }
+    if (result.syncError) throw attachUsageCache(new Error(result.syncError), entry);
+    return entry;
+  }).catch(error => { throw attachUsageCache(error, cached); }).finally(() => inflight.delete(inflightKey));
+  inflight.set(inflightKey, promise);
+  return promise;
 }
 
 /**
@@ -630,3 +657,9 @@ export function modelsOnDay(agg, ymd, rangeKey) {
   }
   return [];
 }
+
+// 恢复归档后既有账户 ID 不变，也必须丢弃旧聚合；正常分页同步由其调用者写入新缓存。
+listen("opencode-usage-changed", event => {
+  if (event.payload?.workspaceId) return;
+  for (const account of openCodeAccounts) purgeAccountCache(account.id);
+}).catch(() => {});

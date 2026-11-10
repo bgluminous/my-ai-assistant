@@ -325,7 +325,6 @@ function tableRows(agg) {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 0,
-    actualUsd: 0,
     equivalentUsd: 0,
     inputUsd: 0,
     outputUsd: 0,
@@ -338,7 +337,6 @@ function tableRows(agg) {
     merged.cacheReadTokens += m.cacheReadTokens;
     merged.cacheWriteTokens += m.cacheWriteTokens;
     merged.totalTokens += m.totalTokens;
-    merged.actualUsd += m.actualUsd;
     merged.equivalentUsd += m.equivalentUsd;
     merged.inputUsd += m.inputUsd;
     merged.outputUsd += m.outputUsd;
@@ -358,7 +356,6 @@ const TABLE_COLS = [
   { key: "cacheWrite", label: "缓存写", w: 118, align: "right" },
   { key: "output", label: "输出", w: 118, align: "right" },
   { key: "total", label: "合计 Token", w: 118, align: "right" },
-  { key: "actual", label: "实扣", w: 96, align: "right" },
   { key: "equivalent", label: "等价 API 价", w: 130, align: "right" },
 ];
 
@@ -378,7 +375,6 @@ function renderSnapshot(account, data, appInfo) {
   // 卡片列表（套餐月费卡片仅在月费已知时出现）
   const cards = [
     { label: "总等价费用（官方 API 价）", value: fmtUsd(agg.totalEquivalentUsd), accent: true },
-    { label: "实际支出（Cursor）", value: fmtUsd(agg.totalActualUsd) },
     {
       label: "总 Token",
       value: fmtTokens(agg.totalTokens),
@@ -674,14 +670,7 @@ function renderSnapshot(account, data, appInfo) {
           baseline: "middle",
         });
         x += cols[5].w;
-        text(fmtUsd(m.actualUsd), x + cols[6].w - 12, yMid, {
-          size: 12.5,
-          color: t.text,
-          align: "right",
-          baseline: "middle",
-        });
-        x += cols[6].w;
-        text(m.priced ? fmtUsd(m.equivalentUsd) : "—", x + cols[7].w - 12, yMid, {
+        text(m.priced ? fmtUsd(m.equivalentUsd) : "—", x + cols[6].w - 12, yMid, {
           size: 12.5,
           weight: 600,
           color: m.priced ? t.text : t.muted,
@@ -726,15 +715,14 @@ function renderSnapshot(account, data, appInfo) {
       totalCell(cols[3].w, fmtTokens(sums.cacheWrite));
       totalCell(cols[4].w, fmtTokens(sums.output));
       totalCell(cols[5].w, fmtTokens(agg.totalTokens));
-      totalCell(cols[6].w, fmtUsd(agg.totalActualUsd));
-      totalCell(cols[7].w, fmtUsd(agg.totalEquivalentUsd));
+      totalCell(cols[6].w, fmtUsd(agg.totalEquivalentUsd));
     }
   }
   y += tableBoxH + 14;
 
   // ---- 页脚 ----
   text(
-    `等价费用按官方 API 价折算，实扣为 Cursor 实际计费 · 共 ${(agg.models || []).length} 个模型 / ${fmtInt(events)} 次调用 · 由 my-ai-assistant 生成`,
+    `等价费用按官方 API 价折算 · 共 ${(agg.models || []).length} 个模型 / ${fmtInt(events)} 次调用 · 由 my-ai-assistant 生成`,
     W / 2,
     y + 14,
     { size: 11, color: t.muted, align: "center" }
