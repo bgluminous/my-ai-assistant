@@ -1669,6 +1669,14 @@ input.price-input {
 .toggle input:disabled + .toggle-track { opacity: 0.45; }
 .toggle input:disabled ~ .toggle-text { color: var(--faint); }
 .toggle:has(input:disabled) { cursor: not-allowed; }
+/* 编辑账户的同步间隔：按字段分组，避免嵌套标签与 OpenCode 网格叠加间距。 */
+#account-note,
+.opencode-edit-fields > input,
+.account-interval-field > select { display: block; }
+.account-interval-field { margin-top: 14px; }
+.account-interval-field > label { margin: 0 0 7px; }
+.account-interval-field > p { margin: 8px 0 0; }
+.opencode-edit-workspace { margin: 0; overflow-wrap: anywhere; }
 /* 编辑账户：与上方字段留出 16px，开关与说明间隔 8px，左右沿用表单内边距。 */
 #account-modal textarea { display: block; }
 #account-api-field { gap: 8px; margin: 16px 0 0; }

@@ -1,4 +1,4 @@
-// 所有主窗口弹窗共用关闭策略与层级；编辑窗的 Esc 只提示，遮罩需在 2 秒内再次点击。
+// 所有主窗口弹窗共用关闭策略与层级；编辑窗需在 2 秒内再次按 Esc 或再次点击遮罩。
 const stack = [];
 const inertBefore = new Map();
 const top = () => stack[stack.length - 1];
@@ -40,12 +40,15 @@ function updateLayers() {
 document.addEventListener("keydown", event => {
   const modal = top();
   if (!modal) return;
-  modal.reset();
   if (event.key === "Escape") {
+    // 阻止原生 dialog 再触发 cancel；长按不计为第二次，也不延长确认时间。
     event.preventDefault();
     event.stopImmediatePropagation();
-    modal.escape();
-  } else if (event.key === "Tab") {
+    if (!event.repeat) modal.escape();
+    return;
+  }
+  modal.reset();
+  if (event.key === "Tab") {
     const items = focusables(modal.root);
     const index = items.indexOf(document.activeElement);
     if (!items.length) { event.preventDefault(); focusInside(modal.root); }
@@ -105,6 +108,16 @@ export function createModal(root, {
     if (onRequestClose) return onRequestClose();
     api.close();
   }
+  function confirmClose(source) {
+    if (top() !== api || blocked()) return;
+    if (mode() !== "edit" || (armed?.source === source && Date.now() - armed.at < 2000)) {
+      void requestClose();
+      return;
+    }
+    reset();
+    armed = { source, at: Date.now() };
+    showHint(source === "escape" ? "再次按 Esc 关闭" : "再次点击关闭");
+  }
   function isBackdrop(event) {
     if (!native) return event.target === root.querySelector(".modal-backdrop");
     if (event.target !== root) return false;
@@ -149,10 +162,7 @@ export function createModal(root, {
       }
     },
     escape() {
-      reset();
-      if (blocked()) return;
-      if (mode() === "edit") showHint("再次点击关闭");
-      else void requestClose();
+      confirmClose("escape");
     },
     // 每次保存绑定打开时的会话；旧请求完成不得关闭或解锁后来打开的表单。
     beginSave(buttons = []) {
@@ -187,9 +197,7 @@ export function createModal(root, {
     pointerTarget = null;
     if (top() !== api) return;
     if (backdrop) {
-      if (blocked()) return;
-      if (mode() !== "edit" || (armed !== null && Date.now() - armed < 2000)) void requestClose();
-      else { armed = Date.now(); showHint("再次点击关闭"); }
+      confirmClose("backdrop");
       return;
     }
     reset();

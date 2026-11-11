@@ -82,6 +82,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {} } =
     const event = new dom.Event(type, { bubbles: true, cancelable: true });
     Object.assign(event, properties);
     if (node === window) window.dispatchEvent(event); else node.dispatchEvent(event);
+    return event;
   };
   return { api: entry.namespace, document, window, values, storage, calls, timers, event,
     advance(ms) {
@@ -368,7 +369,7 @@ test("credential expiry sits below state and alongside renewal instead of inside
   }
 });
 
-test("all account editors share the backdrop and Escape hint and restore focus on explicit close", async () => {
+test("all account editors confirm Escape and backdrop separately and restore focus after closing", async () => {
   for (const kind of ["cursor", "codex", "claude", "opencode"]) {
     const f = await fixture(kind === "opencode" ? oauthSource : accountSource);
     const trigger = f.document.querySelector(`#accounts-add-${kind}`);
@@ -381,35 +382,69 @@ test("all account editors share the backdrop and Escape hint and restore focus o
     const root = open(), hint = root.querySelector(".modal-close-hint");
     f.backdrop(root);
     assert.equal(hint.hidden, false); assert.equal(hint.textContent, "再次点击关闭");
-    f.event(root, "keydown", { key: "Escape" });
-    assert.equal(hint.textContent, "再次点击关闭");
-    f.event(root, "keydown", { key: "Escape" });
+    const escape = f.event(root, "keydown", { key: "Escape" });
+    assert.equal(escape.defaultPrevented, true);
+    assert.equal(hint.textContent, "再次按 Esc 关闭");
     assert.equal(root.hidden, false);
-    f.backdrop(root); assert.equal(root.hidden, false);
-    f.backdrop(root); await tick();
+    f.event(root, "keydown", { key: "Escape" });
+    await tick();
     assert.ok(root.hidden || !root.isConnected);
     assert.equal(f.document.activeElement, trigger);
     const reopened = open();
     assert.equal(reopened.querySelector(".modal-close-hint").hidden, true);
-    f.event(reopened.querySelector("[data-close]:not(.modal-backdrop)"), "click"); await tick();
+    f.event(reopened, "keydown", { key: "Escape" });
+    assert.equal(reopened.hidden, false, "a new session starts with no confirmation");
+    f.backdrop(reopened); assert.equal(reopened.hidden, false);
+    assert.equal(reopened.querySelector(".modal-close-hint").textContent, "再次点击关闭");
+    f.backdrop(reopened); await tick();
     assert.ok(reopened.hidden || !reopened.isConnected);
+    assert.equal(f.document.activeElement, trigger);
+    const explicit = open();
+    f.event(explicit.querySelector("[data-close]:not(.modal-backdrop)"), "click"); await tick();
+    assert.ok(explicit.hidden || !explicit.isConnected);
     assert.equal(f.document.activeElement, trigger);
   }
 });
 
-test("backdrop confirmation expires and resets on form interaction, typing and pointer cancellation", async () => {
+test("Escape ignores held-key repeats without extending its two-second confirmation window", async () => {
+  for (const kind of ["cursor", "opencode"]) {
+    const f = await fixture(kind === "opencode" ? oauthSource : accountSource);
+    if (kind === "opencode") f.api.editOpenCode({ id: "a", token: "wrk_a", note: "draft" });
+    else f.api.openModal(null, kind);
+    const root = f.document.querySelector(kind === "opencode" ? "dialog" : "#account-modal");
+    const hint = root.querySelector(".modal-close-hint");
+    f.event(root, "keydown", { key: "Escape" });
+    f.advance(1999);
+    f.event(root, "keydown", { key: "Escape", repeat: true });
+    assert.equal(root.hidden, false);
+    f.advance(1);
+    assert.equal(hint.hidden, true, "repeats must not extend the original timeout");
+    f.event(root, "keydown", { key: "Escape", repeat: true });
+    assert.equal(hint.hidden, true, "repeats must not start a new confirmation");
+    f.event(root, "keydown", { key: "Escape" });
+    assert.equal(root.hidden, false);
+    assert.equal(hint.textContent, "再次按 Esc 关闭");
+    f.advance(1999);
+    f.event(root, "keydown", { key: "Escape" }); await tick();
+    assert.ok(root.hidden || !root.isConnected);
+  }
+});
+
+test("close confirmation expires and resets on form interaction, typing and pointer cancellation", async () => {
   const f = await fixture(accountSource);
   f.api.openModal(null, "cursor");
   const root = f.document.querySelector("#account-modal"), hint = root.querySelector(".modal-close-hint");
   const input = f.document.querySelector("#account-note"), backdrop = root.querySelector(".modal-backdrop");
-  f.backdrop(root); f.advance(2000);
-  assert.equal(hint.hidden, true);
-  for (const type of ["click", "input", "change", "keydown"]) {
-    f.backdrop(root);
-    f.event(input, type, { key: "a" });
-    assert.equal(hint.hidden, true, type);
-    f.backdrop(root); assert.equal(root.hidden, false, type);
-    f.advance(2000);
+  for (const close of [() => f.backdrop(root), () => f.event(root, "keydown", { key: "Escape" })]) {
+    close(); f.advance(2000);
+    assert.equal(hint.hidden, true);
+    for (const type of ["pointerdown", "click", "input", "change", "keydown", "pointercancel"]) {
+      close();
+      f.event(input, type, { key: "a" });
+      assert.equal(hint.hidden, true, type);
+      close(); assert.equal(root.hidden, false, type);
+      f.advance(2000);
+    }
   }
   f.event(input, "pointerdown"); f.event(backdrop, "click");
   assert.equal(hint.hidden, true, "dragging out of a field is not a backdrop click");
@@ -423,7 +458,7 @@ test("nested confirmations cancel only the top layer and clear the underlying ed
   const f = await fixture(accountSource);
   f.api.openModal({ id: "a", kind: "cursor", note: "draft", token: "token" });
   const root = f.document.querySelector("#account-modal"), trigger = f.document.querySelector("#account-clear-usage");
-  trigger.focus(); f.backdrop(root);
+  trigger.focus(); f.event(root, "keydown", { key: "Escape" });
   const pending = f.api.confirmDialog({ title: "确认", body: "确认内容", confirmText: "确认" });
   const confirm = f.document.querySelector("#switch-modal");
   assert.equal(root.hasAttribute("inert"), true);
@@ -438,7 +473,12 @@ test("nested confirmations cancel only the top layer and clear the underlying ed
   f.event(confirm, "keydown", { key: "Escape" });
   assert.equal(await again, false); assert.equal(root.hidden, false);
   assert.equal(root.querySelector(".modal-close-hint").hidden, true);
-  f.api.closeModal();
+  f.event(root, "keydown", { key: "Escape", repeat: true });
+  assert.equal(root.querySelector(".modal-close-hint").hidden, true);
+  f.event(root, "keydown", { key: "Escape" });
+  assert.equal(root.hidden, false);
+  f.event(root, "keydown", { key: "Escape" });
+  assert.equal(root.hidden, true);
   assert.equal(f.document.querySelectorAll("[inert]").length, 0);
 });
 
@@ -454,7 +494,7 @@ test("account saves block every close path, deduplicate submissions and keep fai
   await f.api.onSave(); assert.equal(f.calls.length, 1);
   for (const close of [() => f.backdrop(root), () => f.event(root, "keydown", { key: "Escape" }),
     () => f.event(f.document.querySelector("#account-close"), "click")]) {
-    close(); assert.equal(root.hidden, false);
+    close(); close(); assert.equal(root.hidden, false);
     assert.equal(hint.hidden, false); assert.equal(hint.textContent, "正在保存，请稍候。");
   }
   pending.reject(new Error("write failed")); await saving;
@@ -492,7 +532,7 @@ test("deleted-account editing keeps failed saves open and uses the shared close 
   const root = f.document.querySelector("#switch-modal"), input = f.document.querySelector("#switch-modal-input");
   input.value = "new";
   f.event(root, "keydown", { key: "Escape" });
-  assert.equal(root.hidden, false); assert.equal(root.querySelector(".modal-close-hint").textContent, "再次点击关闭");
+  assert.equal(root.hidden, false); assert.equal(root.querySelector(".modal-close-hint").textContent, "再次按 Esc 关闭");
   await f.api.switchModal.onOk();
   assert.equal(root.hidden, false); assert.equal(input.value, "new");
   assert.match(f.document.querySelector("#switch-modal-status").textContent, /write failed/);
@@ -509,7 +549,7 @@ test("OpenCode saving uses the same busy hint for Escape, backdrop and explicit 
   assert.equal(input.disabled, true);
   for (const action of [() => f.event(root, "keydown", { key: "Escape" }), () => f.backdrop(root),
     () => f.event(root.querySelector("[data-close]"), "click")]) {
-    action(); const hint = root.querySelector(".modal-close-hint");
+    action(); action(); const hint = root.querySelector(".modal-close-hint");
     assert.equal(hint.hidden, false); assert.equal(hint.textContent, "正在保存，请稍候。");
     assert.equal(root.isConnected, true);
   }
@@ -548,9 +588,12 @@ for (const name of ["pricing", "proxy", "settings"]) {
     f.event(trigger, "click"); await tick();
     const root = f.document.querySelector(`#${name}-modal`), hint = root.querySelector(".modal-close-hint");
     f.backdrop(root); assert.equal(hint.textContent, "再次点击关闭");
-    f.event(root, "keydown", { key: "Escape" }); assert.equal(hint.textContent, "再次点击关闭");
+    f.event(root, "keydown", { key: "Escape" }); assert.equal(hint.textContent, "再次按 Esc 关闭");
     f.backdrop(root); assert.equal(root.hidden, false);
     f.backdrop(root); assert.equal(root.hidden, true);
+    f.event(trigger, "click"); await tick();
+    f.event(root, "keydown", { key: "Escape" }); assert.equal(root.hidden, false);
+    f.event(root, "keydown", { key: "Escape" }); assert.equal(root.hidden, true);
     f.event(trigger, "click"); await tick();
     const save = name === "settings" ? f.api.onDone : f.api.onSave;
     const saving = save(); await save(); assert.equal(saves, 1);

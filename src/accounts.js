@@ -980,7 +980,7 @@ export async function confirmDialog({ title, body, confirmText, danger = true })
 /**
  * 供其它页面复用的单行文本输入弹窗（如用量统计页修改已删除账户的备注）。
  * input = { label, value, placeholder }。确认返回输入的文本（可为空串）；
- * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；Esc 仅显示公共关闭提示。
+ * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；2 秒内再次按 Esc 可关闭。
  */
 export async function promptDialog({ title, body, confirmText, input }) {
   if (switchModal.phase !== "hidden") return null;
@@ -1025,7 +1025,7 @@ export async function editDeletedAccountDialog({ label, note, ignoreApiModels, a
 /**
  * 供其它页面复用的下拉选择弹窗（如用量统计页为已删除账户指定套餐档位）。
  * select = { label, value, options: [{ value, label }] }。确认返回所选项的 value；
- * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；Esc 仅显示公共关闭提示。
+ * 取消 / 关闭，或弹窗正被切换 / 删除流程占用时返回 null；2 秒内再次按 Esc 可关闭。
  */
 export async function selectDialog({ title, body, confirmText, select, save }) {
   if (switchModal.phase !== "hidden") return null;

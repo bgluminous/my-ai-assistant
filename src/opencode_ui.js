@@ -209,6 +209,8 @@ export function switchOpenCode(id, onComplete) {
 
 export function editOpenCode(account, onComplete) {
   const view = dialog("编辑 OpenCode 账户");
+  const fields = document.createElement("div");
+  fields.className = "opencode-edit-fields";
   const label = document.createElement("label");
   label.textContent = "备注";
   const note = document.createElement("input");
@@ -226,12 +228,16 @@ export function editOpenCode(account, onComplete) {
   const intervalHint = document.createElement("p");
   intervalHint.className = "muted small";
   intervalHint.textContent = "独立间隔覆盖全局，刷新此账户的状态与工作区用量。";
+  const intervalField = document.createElement("div");
+  intervalField.className = "account-interval-field";
+  intervalField.append(intervalLabel, interval, intervalHint);
+  fields.append(label, note, intervalField);
   const workspace = document.createElement("p");
-  workspace.className = "muted small"; workspace.textContent = "工作区：" + account.token;
+  workspace.className = "muted small opencode-edit-workspace"; workspace.textContent = "工作区：" + account.token;
   const auth = document.createElement("button");
   auth.type = "button"; auth.className = "secondary"; auth.textContent = account.opencodeAuthorized ? "重新授权" : "独立授权";
   auth.onclick = () => { void authorizeOpenCode(account.token, onComplete); };
-  view.content.append(label, note, intervalLabel, interval, intervalHint, workspace, auth);
+  view.content.append(fields, workspace, auth);
   const save = document.createElement("button");
   save.type = "button"; save.className = "primary"; save.textContent = "保存";
   save.onclick = async () => {

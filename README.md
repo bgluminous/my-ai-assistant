@@ -55,10 +55,12 @@ Account management, usage overview, and the tray account panel (shown with sampl
 ### Account Management
 
 - Add and edit dialogs guard against accidental dismissal: clicking the backdrop first shows "Click
-  again to close"; clicking it again within 2 seconds closes the dialog. Esc shows the same hint
-  without closing or counting toward backdrop confirmation. Clicking inside or typing clears the
-  confirmation. Close and Cancel dismiss immediately. Closing is disabled while saving, and failed
-  saves preserve the entered values. Hints follow the light or dark theme.
+  again to close"; clicking it again within 2 seconds closes the dialog. Esc shows "Press Esc again
+  to close" and closes on a second press within 2 seconds. Esc and backdrop clicks count separately;
+  switching between them restarts confirmation. Holding Esc does not count as another press or
+  extend the timeout. Clicking inside, typing, or pressing another key clears confirmation.
+  Close and Cancel dismiss immediately. Closing is disabled while saving, and failed saves preserve
+  the entered values. Hints follow the light or dark theme.
 - Manage Cursor, ChatGPT, Claude, and OpenCode accounts separately: add, edit, delete, and refresh.
   Import or export JSON by account type, or import the current type from a locally signed-in client.
 - When deleting a Cursor account, "Keep statistics" is enabled by default. The app performs a final
