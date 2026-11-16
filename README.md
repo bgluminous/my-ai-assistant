@@ -453,7 +453,7 @@ settings backups.
 
 ## Pricing Table
 
-- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 126 entries. The
+- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 158 entries. The
   2026-10-23 price review corrected DeepSeek Flash and added 23 entries, including Sonnet / Haiku
   5.5, GPT-5.1, GPT-4.1 Nano, Chat Latest, Gemini 4 Argon, Gemini Flash-Lite, Grok 4.7, GLM,
   MiniMax, and Mistral / Codestral.
@@ -464,19 +464,21 @@ settings backups.
 - Official pricing references:
   [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
   [OpenAI](https://developers.openai.com/api/docs/pricing),
-  [Google](https://ai.google.dev/gemini-api/docs/pricing),
+  [Google](https://aistudio.google.com/docs/pricing),
   [xAI](https://docs.x.ai/developers/pricing),
   [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/),
   [Z.ai](https://docs.z.ai/guides/overview/pricing),
-  [MiniMax](https://platform.minimax.io/docs/pricing/overview), and
-  [Mistral](https://docs.mistral.ai/inference/pricing).
+  [MiniMax](https://platform.minimax.io/docs/pricing/overview),
+  [Mistral](https://docs.mistral.ai/inference/pricing),
+  [Qwen](https://www.alibabacloud.com/help/en/model-studio/model-pricing), and
+  [Meta Muse](https://dev.meta.ai/docs/pricing-rate-limits).
 - Haiku 5.5 uses prices for inputs of up to 100K; above that, input, output, cache read, and cache
   write prices are all five times higher. Anthropic cache writes use the default 5-minute tier.
   MiniMax M3 uses prices for inputs of up to 512K. These long-context tiers are not yet included in
   cost calculations.
-- Gemini 4 Argon's listed prices apply through 2026-11-30 and double on 2026-12-01. Gemini 3.8
-  Flash's listed prices apply through 2026-12-31 and double on 2027-01-01. Prices do not switch
-  automatically by date; the table must be updated when promotions end.
+- Gemini 4 Carbon / Argon's listed prices apply through 2026-11-30 and double on 2026-12-01.
+  Gemini 3.8 Flash's listed prices apply through 2026-12-31 and double on 2027-01-01.
+  Prices do not switch automatically by date; the table must be updated when promotions end.
 - DeepSeek uses off-peak pricing. `deepseek-v4-flash`, `deepseek-v4.1-flash`, and other numbered
   versions all use the effective `deepseek-flash` prices: $0.15 input, $0.60 output, $0.003 cache
   read, and $0 cache write. Usage statistics retain specific version names, while the pricing table
@@ -490,6 +492,27 @@ settings backups.
 - GPT-6.1 Terra and GPT-6 Rosalind were added on 2026-11-02. Terra's input, output, cache read, and
   30-minute cache write prices per million tokens are $1, $5, $0.05, and $1.25; all four double for
   Fast. Rosalind's standard prices are $15, $75, $1.50, and $18.75. Both use short-context pricing.
+- Added 32 entries on 2026-11-16: 23 Qwen models, Gemini 4 Carbon / Hydrogen, and seven Meta Muse
+  models. Qwen covers Max / Plus / Flash / Coder and Qwen3.8 / 3.6 / 3.5 open-weight text models,
+  using Singapore International USD list prices. Tiered models use inputs up to 256K, except
+  Qwen3.7 Flash / Qwen3 Coder Flash, which use inputs up to 32K. Supported explicit caches use the
+  5-minute tier with model-specific rates; `qwen-max` uses implicit cache reads. Qwen3.6 / 3.5
+  open-weight models and Qwen3.7 Max Preview do not support caching and have zero cache prices.
+  Qwen3.8 Max / 2.4T-A95B input, output, explicit cache read, and cache write prices are $2, $6,
+  $0.17, and $2.5. Its implicit cache reads cost $0.25 and are not distinguished separately.
+  Qwen3.8 Flash's four prices are $0.15, $0.47, $0.016, and $0.2; Qwen4 Max's are $1.5, $4.5,
+  $0.075, and $1.875, excluding 1-hour cache writes. Legacy `qwen-plus` uses thinking-mode output
+  at $4; non-thinking output at $1.2 is not distinguished by mode. Qwen3.7 Plus uses list prices,
+  excluding temporary and nighttime discounts. See the
+  [cache rules](https://www.alibabacloud.com/help/en/model-studio/context-cache) and each model's
+  pricing page. The old display name `qwen3.8` aliases `qwen3.8-max`; unknown submodels do not.
+- Gemini 4 Hydrogen input, output, and cache reads cost $1.50, $7.50, and $0.075 across the full 1M
+  context. It supports only implicit caching, with zero cache write price. Muse Spark 1.3 / 1.2 /
+  1.1 Standard costs $1.25, $4.25, and $0.15; 1.3 / 1.2 Contributor costs $0.10, $0.20, and $0.002.
+  The modes are priced separately; missing Contributor prices stay unpriced without falling back
+  to Standard. Muse Wonder 1.0 costs $4, $20, and $0.20. Muse Ember 1.0 costs $0.10, $0.50, and
+  $0.004 for inputs up to 200K; its threefold long-context rates are not included. Meta cache
+  writes are zero; additional charges such as search tools remain excluded.
 - Override order is bundled defaults → online cache → user overrides. Only user prices that differ
   from the underlying defaults / cache are saved in `settings.json` under `pricing`. Online changes
   are applied manually after checking; failures preserve the cache and user overrides.
@@ -510,13 +533,10 @@ settings backups.
   usage appears as a separate row valued at standard prices, showing the applied base key. xAI API
   Priority costs twice the standard rate, while Grok 4.7 Fast is available only in Cursor / Grok
   Build. They are distinct offerings; a reported `-fast` name alone does not establish API Priority
-  usage. Max is an effort level, not a pricing tier, and uses the base model price.
-- Pending verification: Qwen requires a confirmed region and caching method before applying any
-  general cache discount; see
-  [model pricing](https://www.alibabacloud.com/help/en/model-studio/model-pricing) and
-  [cache rules](https://www.alibabacloud.com/help/en/model-studio/context-cache). Exact prices for
-  Kimi K2.6 and K2.7 Code Highspeed remain unverified; see the
-  [model list](https://platform.kimi.ai/docs/models). Kimi K3 cache writes are charged separately by
+  usage. An added Max effort marker uses the base price; Max in official model names such as Qwen
+  Max is retained as part of the model name.
+- Pending verification: Exact prices for Kimi K2.6 and K2.7 Code Highspeed remain unverified; see
+  the [model list](https://platform.kimi.ai/docs/models). Kimi K3 cache writes are charged separately by
   TTL; `cacheWrite=0` currently means this is not covered. See
   [billing details](https://platform.kimi.ai/docs/pricing/chat). OpenAI Ultrafast will be supported
   once its service tier can be identified reliably.

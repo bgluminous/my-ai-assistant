@@ -160,6 +160,41 @@ fn deepseek_flash_versions_keep_separate_usage_with_shared_prices() {
 }
 
 #[test]
+fn qwen_gemini_and_muse_usage_use_their_own_cache_and_tier_prices() {
+    let table = defaults();
+    // 短上下文：输入 1 万、输出 1 千、缓存读 5 千、缓存写 2 千。
+    // 特别覆盖 Qwen 3.8 专属缓存价，以及 Muse Contributor 与 Standard 的价差。
+    for (raw, expected_key, expected_usd) in [
+        ("qwen3.8", "qwen3.8-max", 0.03185),
+        ("cursor-qwen3-8-max-thinking", "qwen3.8-max", 0.03185),
+        ("qwen3.8-flash", "qwen3.8-flash", 0.00245),
+        // Preview 不支持缓存，不能沿用正式版的缓存读写价格。
+        ("qwen3.7-max-preview", "qwen3.7-max-preview", 0.0325),
+        ("qwen4-max-high", "qwen4-max", 0.023625),
+        ("gemini-4-hydrogen-xhigh", "gemini-4-hydrogen", 0.022875),
+        ("gemini-4-carbon", "gemini-4-carbon", 0.0305),
+        ("muse-spark-1-3-contributor-high", "muse-spark-1.3-contributor", 0.00121),
+        ("muse-spark-1.3", "muse-spark-1.3", 0.0175),
+        ("muse-ember-1.0", "muse-ember-1.0", 0.00152),
+    ] {
+        let usage = TokenRow {
+            output: 1_000.0,
+            cache_read: 5_000.0,
+            cache_write: 2_000.0,
+            ..row(raw, 10_000.0, None)
+        };
+        let (key, usd) = price_row(&usage, &table).unwrap();
+        assert_eq!(key, expected_key, "{raw}");
+        assert!((usd - expected_usd).abs() < 1e-12, "{raw} 单条费用不对：{usd}");
+        let agg = aggregate_and_price(vec![usage], &table);
+        assert_eq!(agg.models[0].model, expected_key, "{raw}");
+        assert_eq!(agg.models[0].priced_as.as_deref(), Some(expected_key));
+        assert_eq!(agg.unpriced_models, 0);
+        assert!((agg.total_equivalent_usd - expected_usd).abs() < 1e-12, "{raw}");
+    }
+}
+
+#[test]
 fn same_day_merges() {
     let table = defaults();
     let a = ms("2026-06-15T12:00:00Z");

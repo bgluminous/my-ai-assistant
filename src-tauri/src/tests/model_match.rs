@@ -220,6 +220,20 @@ fn added_model_variants_keep_their_own_prices() {
         ("Gemini-3-5-Flash-Lite-high", "gemini-3.5-flash-lite"),
         ("gemini-3_1-flash-lite", "gemini-3.1-flash-lite"),
         ("gemini-4-argon", "gemini-4-argon"),
+        ("gemini-4-carbon-high", "gemini-4-carbon"),
+        ("cursor-gemini-4-hydrogen-xhigh", "gemini-4-hydrogen"),
+        ("qwen4-max-high", "qwen4-max"),
+        ("Qwen3-8-Max-thinking", "qwen3.8-max"),
+        ("qwen3_8-flash-high", "qwen3.8-flash"),
+        ("qwen3.8-27b-high", "qwen3.8-27b"),
+        ("qwen3.8-2.4t-a95b", "qwen3.8-2.4t-a95b"),
+        ("qwen3.7-max-preview-high", "qwen3.7-max-preview"),
+        ("qwen3-coder-flash", "qwen3-coder-flash"),
+        ("muse-spark-1-3-contributor-high", "muse-spark-1.3-contributor"),
+        ("cursor-muse-spark-1.3-high", "muse-spark-1.3"),
+        ("muse-spark-1_2-contributor-thinking", "muse-spark-1.2-contributor"),
+        ("muse-wonder-1-0-max", "muse-wonder-1.0"),
+        ("muse-ember-1.0-high", "muse-ember-1.0"),
         ("glm-5.3", "glm-5.3"),
         ("GLM-5-3-Flash-high", "glm-5.3-flash"),
         ("glm-5_3-flashx-xhigh", "glm-5.3-flashx"),
@@ -237,6 +251,40 @@ fn added_model_variants_keep_their_own_prices() {
         assert_eq!(shown, expected, "{raw} 展示名不对");
         assert_eq!(resolve(&t, &shown).map(|hit| hit.0), Some(expected));
     }
+}
+
+#[test]
+fn qwen_short_name_only_aliases_the_max_model() {
+    let mut t = table();
+    for raw in ["qwen3.8", "Qwen3-8", "cursor-qwen3_8-high", "qwen3.8-thinking"] {
+        assert_eq!(resolve(&t, raw).unwrap().0, "qwen3.8-max", "{raw}");
+        assert_eq!(display_key(&t, raw), "qwen3.8-max", "{raw}");
+    }
+    assert_eq!(display_key(&t, "qwen3.8-high-fast"), "qwen3.8-max-fast");
+    assert_eq!(resolve(&t, "qwen3.8-high-fast").unwrap().0, "qwen3.8-max");
+    for raw in ["qwen3.8-flashx", "qwen3-8-lite", "qwen3.8-72b", "qwen3.9-max"] {
+        assert!(resolve(&t, raw).is_none(), "{raw} 不能通过简写别名套用 Max 价格");
+    }
+    // 用户明确收录的简写价格仍优先；移除正式项后，不编造别名价格。
+    t.models.insert("qwen3.8".into(), ModelPrice { input: 9.0, ..ModelPrice::default() });
+    assert_eq!(resolve(&t, "qwen3.8-high").unwrap().1.input, 9.0);
+    t.models.remove("qwen3.8");
+    t.models.remove("qwen3.8-max");
+    assert!(resolve(&t, "qwen3.8").is_none());
+}
+
+#[test]
+fn contributor_mode_never_falls_back_to_standard_prices() {
+    let mut t = table();
+    let standard = resolve(&t, "muse-spark-1.3").unwrap().1;
+    let contributor = resolve(&t, "muse-spark-1.3-contributor").unwrap().1;
+    assert!(contributor.input < standard.input && contributor.output < standard.output);
+    for raw in ["muse-spark-1.1-contributor", "muse-wonder-1.0-contributor-high"] {
+        assert!(resolve(&t, raw).is_none(), "{raw} 不应使用 Standard 价");
+    }
+    t.models.remove("muse-spark-1.3-contributor");
+    assert!(resolve(&t, "cursor-muse-spark-1-3-contributor-high").is_none());
+    assert!(resolve(&t, "muse-spark-1.3").is_some());
 }
 
 #[test]

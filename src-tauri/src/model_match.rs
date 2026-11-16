@@ -199,11 +199,23 @@ fn lookup<'a>(table: &'a PricingTable, candidate: &str, fast: bool) -> Option<(&
     Some((k, price))
 }
 
+/// 兼容旧展示名 qwen3.8：未收录时，qwen3.8-max 的 -max 曾被当成 effort 剥离。
+/// 别名只匹配完整上报名或剥除修饰后的名字，不参与逐段去尾，避免把未知子型号套成 Max。
+fn lookup_reported<'a>(table: &'a PricingTable, candidate: &str, fast: bool) -> Option<(&'a str, &'a ModelPrice)> {
+    lookup(table, candidate, fast).or_else(|| {
+        let dotted = dotted_alias(candidate);
+        match dotted.as_deref().unwrap_or(candidate) {
+            "qwen3.8" => lookup(table, "qwen3.8-max", fast),
+            _ => None,
+        }
+    })
+}
+
 /// 单个候选名的匹配流程：精确匹配（含等价写法归一）-> 逐个剥掉 Fast 标记 / 思考 / 努力度后缀，
 /// 每剥一层查一次表 -> 逐段去尾 -> 前缀匹配兜底。去尾与兜底均带版本截断防护，
 /// 避免 5.1 / 5-1 这类小版本被按 5 计价；全程带着 Fast 标记，命中基础键后优先取其 Fast 条目。
 fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a ModelPrice)> {
-    if let Some(hit) = get_normalized(table, key) {
+    if let Some(hit) = lookup_reported(table, key, false) {
         return Some(hit);
     }
 
@@ -211,7 +223,7 @@ fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a M
     let mut fast = false;
     while let Some(was_fast) = strip_one_modifier(&mut base) {
         fast |= was_fast;
-        if let Some(hit) = lookup(table, &base, fast) {
+        if let Some(hit) = lookup_reported(table, &base, fast) {
             return Some(hit);
         }
     }
@@ -219,6 +231,10 @@ fn resolve_one<'a>(table: &'a PricingTable, key: &str) -> Option<(&'a str, &'a M
     let mut segments: Vec<&str> = base.split('-').collect();
     while segments.len() > 1 {
         let removed = segments.pop().unwrap_or_default();
+        // Contributor 是独立计费档，缺少该档价格时不能回退到 Standard。
+        if removed == "contributor" {
+            return None;
+        }
         let candidate = segments.join("-");
         // 版本截断防护：候选以数字结尾且刚移除的是短数字段时，截点落在 `5-1`
         // 这类版本号中间（claude-fable-5-1 不得按 claude-fable-5 计价），跳过该候选；
@@ -322,14 +338,14 @@ pub fn display_key(table: &PricingTable, raw: &str) -> String {
     if let Some(name) = deepseek_flash_display_key(&key) {
         return name;
     }
-    if let Some((k, _)) = get_normalized(table, &key) {
+    if let Some((k, _)) = lookup_reported(table, &key, false) {
         return prefer_dotted(table, k.to_string());
     }
     for prefix in PROVIDER_PREFIXES {
         if let Some(stripped) = key.strip_prefix(prefix) {
             if !stripped.is_empty() {
                 key = stripped.to_string();
-                if let Some((k, _)) = get_normalized(table, &key) {
+                if let Some((k, _)) = lookup_reported(table, &key, false) {
                     return prefer_dotted(table, k.to_string());
                 }
                 break;
@@ -339,7 +355,7 @@ pub fn display_key(table: &PricingTable, raw: &str) -> String {
     let mut fast = false;
     while let Some(was_fast) = strip_one_modifier(&mut key) {
         fast |= was_fast;
-        if let Some((k, _)) = lookup(table, &key, fast) {
+        if let Some((k, _)) = lookup_reported(table, &key, fast) {
             let k = prefer_dotted(table, k.to_string());
             return if fast && !k.ends_with(FAST_SUFFIX) {
                 format!("{k}{FAST_SUFFIX}")

@@ -359,7 +359,7 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 
 ## 价格表
 
-- 内置默认表 `src-tauri/resources/pricing.default.json` 共 126 项。
+- 内置默认表 `src-tauri/resources/pricing.default.json` 共 158 项。
   2026-10-23 核价时修正了 DeepSeek Flash，并补充了 23 项，
   包括 Sonnet / Haiku 5.5、GPT-5.1、GPT-4.1 Nano、Chat Latest、Gemini 4 Argon、
   Gemini Flash-Lite、Grok 4.7、GLM、MiniMax 和 Mistral / Codestral。
@@ -370,16 +370,18 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 - 各厂商的官方定价见
   [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing)、
   [OpenAI](https://developers.openai.com/api/docs/pricing)、
-  [Google](https://ai.google.dev/gemini-api/docs/pricing)、
+  [Google](https://aistudio.google.com/docs/pricing)、
   [xAI](https://docs.x.ai/developers/pricing)、
   [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/)、
   [Z.ai](https://docs.z.ai/guides/overview/pricing)、
   [MiniMax](https://platform.minimax.io/docs/pricing/overview)、
-  [Mistral](https://docs.mistral.ai/inference/pricing)。
+  [Mistral](https://docs.mistral.ai/inference/pricing)、
+  [Qwen](https://www.alibabacloud.com/help/en/model-studio/model-pricing)、
+  [Meta Muse](https://dev.meta.ai/docs/pricing-rate-limits)。
 - Haiku 5.5 按输入不超过 100K 收录；超过后输入、输出、缓存读写单价均为 5 倍。
   Anthropic 缓存写采用默认 5 分钟档。MiniMax M3 按输入不超过 512K 收录。
   这些长上下文阶梯尚未纳入折算。
-- Gemini 4 Argon 当前价格截至 2026-11-30，2026-12-01 起翻倍；
+- Gemini 4 Carbon / Argon 当前价格截至 2026-11-30，2026-12-01 起翻倍；
   Gemini 3.8 Flash 当前价格截至 2026-12-31，2027-01-01 起翻倍。
   价格表不自动按日期切换，需在促销到期时更新。
 - DeepSeek 沿用非高峰价。`deepseek-v4-flash`、`deepseek-v4.1-flash` 及其它数字版本
@@ -393,6 +395,28 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 - 2026-11-02 收录 GPT-6.1 Terra 和 GPT-6 Rosalind。每百万 token 的输入、输出、
   缓存读、30 分钟缓存写单价，Terra 依次为 $1、$5、$0.05、$1.25，Fast 档四项翻倍。
   Rosalind 标准档依次为 $15、$75、$1.50、$18.75。两者均按短上下文折算。
+- 2026-11-16 新增 32 项：Qwen 23 项、Gemini 4 Carbon / Hydrogen 2 项、Meta Muse 7 项。
+  Qwen 覆盖 Max / Plus / Flash / Coder 及 Qwen3.8 / 3.6 / 3.5 开源文本型号，
+  使用新加坡 International 美元标准价；阶梯型号按输入不超过 256K 收录，
+  Qwen3.7 Flash / Qwen3 Coder Flash 则按不超过 32K 收录。
+  支持显式缓存的型号采用 5 分钟档，逐型号核实缓存价格；
+  `qwen-max` 采用隐式缓存读价；Qwen3.6 / 3.5 开源型号及 Qwen3.7 Max Preview
+  不支持缓存，读写记 0。
+  Qwen3.8 Max / 2.4T-A95B 的输入、输出、显式缓存读写分别为 $2、$6、$0.17、$2.5；
+  隐式缓存读另为 $0.25，当前不单独区分。Qwen3.8 Flash 分别为 $0.15、$0.47、$0.016、$0.2。
+  Qwen4 Max 的四项为 $1.5、$4.5、$0.075、$1.875，1 小时缓存写未计入。
+  `qwen-plus` 暂按思考模式输出 $4 折算，非思考模式输出 $1.2 尚未按模式区分；
+  Qwen3.7 Plus 使用标准标价，不计限时或夜间优惠。缓存口径见
+  [缓存规则](https://www.alibabacloud.com/help/en/model-studio/context-cache)及各型号定价页。
+  旧展示名 `qwen3.8` 兼容映射至 `qwen3.8-max`，未知子型号不套用此别名。
+- Gemini 4 Hydrogen 的输入、输出、缓存读为 $1.50、$7.50、$0.075，全 1M 上下文同价；
+  仅支持隐式缓存，缓存写记 0。
+  Muse Spark 1.3 / 1.2 / 1.1 Standard 的三项为 $1.25、$4.25、$0.15，
+  1.3 / 1.2 Contributor 则为 $0.10、$0.20、$0.002，两档独立计价；
+  缺少 Contributor 价格时保持未定价，不回退 Standard。
+  Muse Wonder 1.0 为 $4、$20、$0.20，Muse Ember 1.0 为 $0.10、$0.50、$0.004；
+  Ember 按输入不超过 200K 收录，超过后三项均为 3 倍，尚未纳入折算。
+  Meta 缓存写记 0，搜索工具等额外费用另行处理。
 - 覆盖顺序为内置表 → 在线缓存 → 用户自定义；只把与基础层不同的用户改价保存到
   `settings.json` 的 `pricing` 字段。在线检查后由用户手动应用，失败保留缓存和自定义价格。
 - 默认在线来源为公共仓库的
@@ -410,11 +434,8 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
   没有对应 Fast 条目时，Fast 用量独立成行、按标准价折算，并显示套用的基础键。
   xAI API Priority 为标准价 2 倍，Grok 4.7 Fast 则仅在 Cursor / Grok Build 提供；
   两者不同，不能仅凭 `-fast` 上报名认定使用了 API Priority。
-  Max 是 effort 等级而非计费档，按基础模型计价。
-- 待核实项：Qwen 需先明确地区与缓存方式，不能直接套通用缓存折扣，见
-  [模型价格](https://www.alibabacloud.com/help/en/model-studio/model-pricing)与
-  [缓存规则](https://www.alibabacloud.com/help/en/model-studio/context-cache)；
-  Kimi K2.6、K2.7 Code Highspeed 待核实具体单价，见
+  附加的 Max effort 标记按基础价计价；Qwen Max 等正式型号名中的 Max 保留为型号的一部分。
+- 待核实项：Kimi K2.6、K2.7 Code Highspeed 待核实具体单价，见
   [模型列表](https://platform.kimi.ai/docs/models)。
   Kimi K3 缓存写按 TTL 单独收费，当前 `cacheWrite=0` 表示尚未覆盖，见
   [计费说明](https://platform.kimi.ai/docs/pricing/chat)。
