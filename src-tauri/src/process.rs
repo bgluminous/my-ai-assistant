@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: u32,
+    pub parent_pid: u32,
     pub name: String,
     pub exe: Option<PathBuf>,
 }
@@ -106,6 +107,7 @@ fn windows_toolhelp() -> Vec<ProcessInfo> {
                 if pid != 0 {
                     out.push(ProcessInfo {
                         pid,
+                        parent_pid: entry.th32_parent_process_id,
                         name: wide_to_string(&entry.sz_exe_file),
                         exe: image_path(pid),
                     });
@@ -125,7 +127,7 @@ fn list_macos() -> Vec<ProcessInfo> {
         return Vec::new();
     }
     let output = match std::process::Command::new("ps")
-        .args(["-axo", "pid=,command="])
+        .args(["-ww", "-axo", "pid=,ppid=,comm="])
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
@@ -144,7 +146,9 @@ fn list_macos() -> Vec<ProcessInfo> {
         let Ok(pid) = pid_s.parse::<u32>() else {
             continue;
         };
-        let command = rest.trim();
+        let Some((parent, command)) = rest.trim().split_once(char::is_whitespace) else { continue; };
+        let Ok(parent_pid) = parent.parse::<u32>() else { continue; };
+        let command = command.trim();
         if command.is_empty() {
             continue;
         }
@@ -154,9 +158,32 @@ fn list_macos() -> Vec<ProcessInfo> {
             .unwrap_or_else(|| command.to_string());
         out.push(ProcessInfo {
             pid,
+            parent_pid,
             name,
             exe: Some(PathBuf::from(command)),
         });
     }
     out
+}
+
+/// Include only descendants of the selected GUI roots, not unrelated CLI processes
+/// that happen to use the same bundled executable.
+pub fn family(processes: &[ProcessInfo], roots: &[u32]) -> Vec<ProcessInfo> {
+    let mut ids: std::collections::HashSet<u32> = roots.iter().copied().collect();
+    loop {
+        let before=ids.len();
+        for p in processes { if ids.contains(&p.parent_pid) { ids.insert(p.pid); } }
+        if before==ids.len(){break;}
+    }
+    processes.iter().filter(|p|ids.contains(&p.pid)).cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn gui_family_excludes_cli_launched_from_a_terminal() {
+        let process=|pid,parent_pid,name:&str|ProcessInfo{pid,parent_pid,name:name.into(),exe:Some(name.into())};
+        let all=vec![process(10,1,"Desktop"),process(11,10,"bundled-cli"),process(12,11,"worker"),process(20,2,"bundled-cli")];
+        assert_eq!(family(&all,&[10]).iter().map(|p|p.pid).collect::<Vec<_>>(),vec![10,11,12]);
+    }
 }

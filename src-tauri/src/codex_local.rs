@@ -13,8 +13,8 @@ use std::time::Duration;
 use tauri::AppHandle;
 
 use crate::local_client::{
-    kill_pids, launch_detached_windows, path_starts_with_ci, run_hidden, wait_exit, ClientStatus,
-    CloseResult, DetectResult, LaunchResult, LogoutResult, SwitchResult,
+    kill_pids, launch_detached_windows, path_starts_with_ci, run_hidden, wait_exit, CloseResult,
+    LaunchResult, LogoutResult, SwitchResult,
 };
 use crate::{accounts, audit, http, paths, process, settings};
 
@@ -28,6 +28,8 @@ use crate::{accounts, audit, http, paths, process, settings};
 pub struct CodexClientConfig {
     #[serde(default)]
     pub exe_path: String,
+    #[serde(default)]
+    pub cli_exe_path: String,
 }
 
 fn current() -> CodexClientConfig {
@@ -37,38 +39,6 @@ fn current() -> CodexClientConfig {
 // ---------------------------------------------------------------------------
 // auth.json 读写
 // ---------------------------------------------------------------------------
-
-/// Codex 登录文件路径：$CODEX_HOME/auth.json（环境变量非空优先），否则 ~/.codex/auth.json。
-fn auth_json_path() -> Option<PathBuf> {
-    let root = std::env::var("CODEX_HOME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| paths::home_dir().map(|h| h.join(".codex")))?;
-    Some(root.join("auth.json"))
-}
-
-/// 写 auth.json：先写临时文件再 rename 原子替换，写入中途崩溃不会损坏原文件。
-/// Unix 下以 0600 权限落盘（先建空临时文件设好权限再写内容，与 Codex CLI 一致）。
-fn write_auth_json(path: &Path, value: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-    }
-    let text =
-        serde_json::to_string_pretty(value).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&tmp, "").map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-    }
-    std::fs::write(&tmp, text).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-    Ok(())
-}
 
 /// 从 access_token 的 JWT 里解析 chatgpt_account_id（可能缺失）。
 pub(crate) fn account_id_from_token(access_token: &str) -> Option<String> {
@@ -89,17 +59,10 @@ pub(crate) fn account_id_from_token(access_token: &str) -> Option<String> {
 /// 读取本机 ChatGPT / Codex 登录凭据。文件不存在视为从未登录；
 /// 存在但 tokens.access_token 缺失或解析失败视为 invalid。refresh_token 可选。
 pub fn read_local_login() -> accounts::LocalLoginRead {
-    let Some(path) = auth_json_path() else {
-        return accounts::LocalLoginRead::Missing;
-    };
-    if !path.exists() {
-        return accounts::LocalLoginRead::Missing;
-    }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return accounts::LocalLoginRead::Invalid;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return accounts::LocalLoginRead::Invalid;
+    let v = match crate::codex_auth_store::read() {
+        Ok(Some(value)) => value,
+        Ok(None) => return accounts::LocalLoginRead::Missing,
+        Err(_) => return accounts::LocalLoginRead::Invalid,
     };
     let tokens = v.get("tokens");
     let Some(access_token) = tokens
@@ -152,21 +115,11 @@ pub fn local_login_of_same_account(account_token: &str) -> Option<accounts::Loca
 /// 续期账户是同一账号（account_id 均非空且一致）时写入，否则静默跳过。
 /// 任何失败只记审计日志，绝不向调用方报错，不影响刷新主流程。
 pub fn sync_auth_json(access_token: &str, refresh_token: &Option<String>, id_token: Option<&str>) {
-    let Some(path) = auth_json_path() else { return };
-    if !path.exists() {
-        return;
-    }
-    let mut value = match std::fs::read_to_string(&path)
-        .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
-    {
-        Ok(v) => v,
-        Err(e) => {
-            audit::log(
-                "codex_sync_failed",
-                format!("同步本机 ChatGPT 登录失败：auth.json 读取/解析失败（{e}）"),
-                None,
-            );
+    let mut value = match crate::codex_auth_store::read() {
+        Ok(Some(value)) => value,
+        Ok(None) => return,
+        Err(error) => {
+            audit::log("codex_sync_failed", format!("读取本机 Codex 登录失败：{error}"), None);
             return;
         }
     };
@@ -192,7 +145,7 @@ pub fn sync_auth_json(access_token: &str, refresh_token: &Option<String>, id_tok
     if let Some(obj) = value.as_object_mut() {
         obj.insert("last_refresh".into(), json!(Utc::now().to_rfc3339()));
     }
-    if let Err(e) = write_auth_json(&path, &value) {
+    if let Err(e) = crate::codex_auth_store::write(&value) {
         audit::log(
             "codex_sync_failed",
             format!("同步本机 ChatGPT 登录失败：{e}"),
@@ -310,21 +263,21 @@ fn detect_candidates() -> Vec<PathBuf> {
     out
 }
 
-fn resolve_exe_path() -> Result<PathBuf, String> {
+pub(crate) fn resolve_exe_path() -> Result<PathBuf, String> {
     let configured = current().exe_path.trim().to_string();
     if !configured.is_empty() {
         let p = PathBuf::from(&configured);
-        if p.exists() {
-            return Ok(p);
-        }
+        if crate::local_client::valid_desktop_path(&p) { return Ok(p); }
+        return Err("codex_exe_invalid".into());
     }
     detect_candidates()
         .into_iter()
-        .find(|p| p.exists())
+        .find(|p| crate::local_client::valid_desktop_path(p))
         .ok_or_else(|| "codex_exe_not_found".to_string())
 }
 
 fn can_launch() -> bool {
+    if !current().exe_path.is_empty() { return resolve_exe_path().is_ok(); }
     if cfg!(target_os = "windows") && windows_store_app_id().is_some() {
         return true;
     }
@@ -377,7 +330,7 @@ impl DesktopMatcher {
             is_windows_desktop_exe(exe)
         } else if cfg!(target_os = "macos") {
             let s = exe.to_string_lossy().to_ascii_lowercase();
-            self.macos_needles.iter().any(|n| s.contains(n))
+            s.contains("/contents/macos/") && self.macos_needles.iter().any(|n| s.contains(n))
         } else {
             false
         }
@@ -401,6 +354,9 @@ fn is_windows_desktop_exe(exe: &Path) -> bool {
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
+    if lower.contains(r"\resources\") { return false; }
+    let filename=exe.file_name().map(|s|s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !matches!(filename.as_str(), "chatgpt.exe" | "codex.exe") { return false; }
     if lower.contains(r"\windowsapps\openai.codex_") {
         return true;
     }
@@ -437,30 +393,14 @@ fn is_windowsapps_path(path: &Path) -> bool {
 }
 
 /// 关闭本地 ChatGPT / Codex Desktop：先优雅退出，约 8 秒超时后强制结束，再等约 3 秒确认。
-fn close_desktop() -> bool {
-    let matcher = DesktopMatcher::new();
-    if !matcher.is_running() {
-        return true;
-    }
-    let running = || matcher.is_running();
-    if cfg!(target_os = "windows") {
-        let pids = matcher.pids();
-        kill_pids(&pids, false);
-        if !wait_exit(running, Duration::from_secs(8)) {
-            kill_pids(&matcher.pids(), true);
-            let _ = wait_exit(running, Duration::from_secs(3));
+pub(crate) fn close_desktop() -> bool {
+    let roots=DesktopMatcher::new().pids();
+    crate::local_client::close_family(&roots,|| {
+        if cfg!(windows) { kill_pids(&roots,false); }
+        else if cfg!(target_os="macos") {
+            let _=Command::new("osascript").args(["-e",&format!("tell application id \"{CODEX_BUNDLE_ID}\" to quit")]).output();
         }
-    } else if cfg!(target_os = "macos") {
-        // bundle id 在 Codex / ChatGPT 品牌包上相同，避免误关经典 ChatGPT（com.openai.chat）。
-        let _ = Command::new("osascript")
-            .args(["-e", &format!("tell application id \"{CODEX_BUNDLE_ID}\" to quit")])
-            .output();
-        if !wait_exit(running, Duration::from_secs(8)) {
-            kill_pids(&matcher.pids(), true);
-            let _ = wait_exit(running, Duration::from_secs(3));
-        }
-    }
-    !matcher.is_running()
+    })
 }
 
 fn launch_store_app(app_id: &str) -> bool {
@@ -498,11 +438,15 @@ fn launch_path(exe: &Path) -> bool {
     }
 }
 
-fn launch_desktop() -> bool {
+pub(crate) fn launch_desktop() -> bool {
+    launch_desktop_unchecked() && wait_exit(||!is_desktop_running(),Duration::from_secs(15))
+}
+fn launch_desktop_unchecked() -> bool {
     let configured = current().exe_path.trim().to_string();
     if !configured.is_empty() {
         let p = PathBuf::from(&configured);
-        if p.exists() && !(cfg!(target_os = "windows") && is_windowsapps_path(&p)) {
+        if !crate::local_client::valid_desktop_path(&p) { return false; }
+        if !(cfg!(target_os = "windows") && is_windowsapps_path(&p)) {
             return launch_path(&p);
         }
     }
@@ -517,7 +461,7 @@ fn launch_desktop() -> bool {
     false
 }
 
-fn is_desktop_running() -> bool {
+pub(crate) fn is_desktop_running() -> bool {
     DesktopMatcher::new().is_running()
 }
 
@@ -529,12 +473,14 @@ fn is_desktop_running() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct CodexClientView {
     pub exe_path: String,
+    pub cli_exe_path: String,
     pub path: String,
 }
 
 fn view(cfg: &CodexClientConfig) -> CodexClientView {
     CodexClientView {
         exe_path: cfg.exe_path.clone(),
+        cli_exe_path: cfg.cli_exe_path.clone(),
         path: settings::path_display(),
     }
 }
@@ -547,13 +493,19 @@ pub fn codex_client_get() -> Result<CodexClientView, String> {
 }
 
 #[tauri::command]
-pub fn codex_client_set(exe_path: String) -> Result<CodexClientView, String> {
+pub fn codex_client_set(exe_path: String, cli_exe_path: Option<String>) -> Result<CodexClientView, String> {
     let _operation = crate::operations::begin()?;
     let exe_path = exe_path.trim().to_string();
-    if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
+    if !exe_path.is_empty() && !crate::local_client::valid_desktop_path(Path::new(&exe_path)) {
         return Err("codex_exe_invalid".into());
     }
-    let cfg = CodexClientConfig { exe_path };
+    let _lease = crate::linked_clients::lease("codex")?;
+    let mut cfg = current();
+    cfg.exe_path = exe_path;
+    if let Some(path) = cli_exe_path {
+        crate::local_client::validate_optional_path(&path, false)?;
+        cfg.cli_exe_path = path.trim().into();
+    }
     settings::mutate(|s| {
         s.codex_client = cfg.clone();
         Ok(())
@@ -563,25 +515,16 @@ pub fn codex_client_set(exe_path: String) -> Result<CodexClientView, String> {
 
 /// 探测常见安装位置（含 Windows Store 包），不写配置。
 #[tauri::command]
-pub fn codex_client_detect() -> DetectResult {
-    DetectResult {
-        exe_path: resolve_exe_path()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string()),
-    }
+pub fn codex_client_detect() -> Value {
+    let desktop=resolve_exe_path().ok();
+    json!({"exePath":desktop.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "cliExePath":crate::local_client::independent_cli("codex", "", desktop.as_deref()).map(|p|p.to_string_lossy().to_string())})
 }
 
 #[tauri::command]
-pub async fn codex_client_status() -> Result<ClientStatus, String> {
-    let _operation = crate::operations::begin()?;
-    let exe_path = resolve_exe_path()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    Ok(ClientStatus {
-        running: is_desktop_running(),
-        exe_configured: can_launch(),
-        exe_path,
-    })
+pub async fn codex_client_status() -> Result<Value, String> {
+    let _operation=crate::operations::begin()?;
+    tauri::async_runtime::spawn_blocking(linked_status).await.map_err(|_|"client_status_failed")?
 }
 
 #[tauri::command]
@@ -603,15 +546,14 @@ pub fn codex_client_launch() -> Result<LaunchResult, String> {
 
 /// 切换本机 ChatGPT 登录：用账户的 refresh_token 换取全新凭据组后写入 auth.json。
 /// 写文件要求客户端已关闭（关闭由 codex_client_close 单独负责），与 Cursor 切号一致。
-#[tauri::command]
-pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResult, String> {
+pub(crate) async fn switch_credentials(app: AppHandle, id: String, require_desktop_closed: bool) -> Result<SwitchResult, String> {
     let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }
 
-    // 与账户刷新共用同一全局队列：切换同样会消费并轮换 refresh_token。
-    let _queued = accounts::refresh_queue().lock().await;
+    // 与 ChatGPT 账户刷新共用队列：切换同样会消费并轮换 refresh_token。
+
 
     let acc = accounts::account_snapshot(&id)?;
     if acc.kind != "codex" {
@@ -642,7 +584,7 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         (copy_is_complete(&copy) && !renew).then_some(copy)
     });
     if let Some(copy) = fresh_copy {
-        if is_desktop_running() {
+        if require_desktop_closed && is_desktop_running() {
             return Err("codex_running".into());
         }
         write_local_auth(copy)?;
@@ -692,7 +634,7 @@ pub async fn codex_switch_local(app: AppHandle, id: String) -> Result<SwitchResu
         return Err("codex_id_token_missing".into());
     };
 
-    if is_desktop_running() {
+    if require_desktop_closed && is_desktop_running() {
         return Err("codex_running".into());
     }
 
@@ -731,8 +673,8 @@ fn copy_is_complete(v: &Value) -> bool {
 }
 
 /// 本机 auth.json 的修改时间（文件不存在为 None），供定时同步判断是否有变化。
-fn auth_json_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(auth_json_path()?).ok()?.modified().ok()
+fn auth_json_mtime() -> Option<String> {
+    crate::codex_auth_store::revision().ok().flatten()
 }
 
 /// 后台定时同步：ChatGPT Desktop / Codex CLI 运行时会自行续期并改写 auth.json，这里按设置的间隔
@@ -758,7 +700,7 @@ pub fn start_local_sync(app: AppHandle) {
             if now == seen {
                 continue;
             }
-            seen = now;
+            seen = now.clone();
             if now.is_none() {
                 audit::log(
                     "codex_local_changed",
@@ -767,7 +709,8 @@ pub fn start_local_sync(app: AppHandle) {
                 );
                 continue;
             }
-            let _queued = accounts::refresh_queue().lock().await;
+            let Ok(queue) = accounts::refresh_queue("codex") else { continue; };
+            let _queued = queue.lock().await;
             match accounts::sync_codex_from_local(&app) {
                 Ok(outcome) => {
                     let level = match outcome {
@@ -826,22 +769,8 @@ pub fn local_sync_set(minutes: u32) -> Result<u32, String> {
 /// 把一组完整凭据写成本机 auth.json：先备份原文件为 auth.json.bak；副本里没有 OPENAI_API_KEY 时
 /// 保留原文件里的值，避免覆盖用户配置的 API Key。
 fn write_local_auth(mut value: Value) -> Result<(), String> {
-    let Some(path) = auth_json_path() else {
-        return Err("codex_auth_write_failed: home_dir_unavailable".into());
-    };
-    let mut existing_api_key = Value::Null;
-    if path.exists() {
-        let backup = path.with_extension("json.bak");
-        std::fs::copy(&path, &backup)
-            .map_err(|e| format!("codex_auth_write_failed: backup_failed: {e}"))?;
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                if let Some(k) = v.get("OPENAI_API_KEY") {
-                    existing_api_key = k.clone();
-                }
-            }
-        }
-    }
+    let existing_api_key = crate::codex_auth_store::read()?
+        .and_then(|v|v.get("OPENAI_API_KEY").cloned()).unwrap_or(Value::Null);
     if let Some(obj) = value.as_object_mut() {
         let keep_existing = obj
             .get("OPENAI_API_KEY")
@@ -850,7 +779,7 @@ fn write_local_auth(mut value: Value) -> Result<(), String> {
             obj.insert("OPENAI_API_KEY".into(), existing_api_key);
         }
     }
-    write_auth_json(&path, &value)
+    crate::codex_auth_store::write(&value)
 }
 
 /// 本机 auth.json 里是否有 ChatGPT 账号登录（tokens.access_token 非空）。
@@ -863,16 +792,7 @@ fn has_chatgpt_login(v: &Value) -> bool {
 /// 本机 auth.json 存在、能解析为对象但没有账号登录（已退出登录或只配置了 OPENAI_API_KEY）。
 /// 供定时同步把这种情况与「文件无法解析」区分开。
 pub(crate) fn local_auth_logged_out() -> bool {
-    let Some(path) = auth_json_path() else {
-        return false;
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .filter(Value::is_object)
-        .is_some_and(|v| !has_chatgpt_login(&v))
+    crate::codex_auth_store::read().ok().flatten().is_some_and(|v| !has_chatgpt_login(&v))
 }
 
 /// 退出登录后 auth.json 应有的内容：用户配置了 OPENAI_API_KEY 时只保留这一项（API Key 模式
@@ -898,41 +818,20 @@ pub async fn codex_logout_local() -> Result<LogoutResult, String> {
         return Err("unsupported_platform".into());
     }
     // 与刷新 / 切换 / 后台同步共用同一队列，避免刚删掉文件又被回同步写回
-    let _queued = accounts::refresh_queue().lock().await;
+    let _queued = accounts::refresh_queue("codex")?.lock().await;
     if is_desktop_running() {
         return Err("codex_running".into());
     }
-    let Some(path) = auth_json_path() else {
-        return Err("codex_auth_write_failed: home_dir_unavailable".into());
+    let _lease = crate::linked_clients::lease("codex")?;
+    let Some(existing) = crate::codex_auth_store::read()? else {
+        return Ok(LogoutResult { was_logged_in:false, message:"本机 Codex 当前未登录。".into() });
     };
-    let not_logged_in = || LogoutResult {
-        was_logged_in: false,
-        message: "本机 ChatGPT 当前未登录，无需退出。".into(),
-    };
-    if !path.exists() {
-        return Ok(not_logged_in());
+    if !has_chatgpt_login(&existing) {
+        return Ok(LogoutResult { was_logged_in:false, message:"本机 Codex 当前未登录。".into() });
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("codex_auth_read_failed: {e}"))?;
-    // 解析不了的文件视为有登录残留，整份删掉（已备份）；能解析但没有账号凭据（只有 API Key
-    // 或为空）的文件不算登录，不动它
-    let existing = serde_json::from_str::<Value>(&text)
-        .ok()
-        .filter(Value::is_object);
-    if existing.as_ref().is_some_and(|v| !has_chatgpt_login(v)) {
-        return Ok(not_logged_in());
-    }
-    let backup = path.with_extension("json.bak");
-    std::fs::copy(&path, &backup)
-        .map_err(|e| format!("codex_auth_write_failed: backup_failed: {e}"))?;
-    let kept_api_key = match existing.as_ref().and_then(logged_out_auth_value) {
-        Some(value) => {
-            write_auth_json(&path, &value)?;
-            true
-        }
-        None => {
-            std::fs::remove_file(&path).map_err(|e| format!("codex_auth_write_failed: {e}"))?;
-            false
-        }
+    let kept_api_key = match logged_out_auth_value(&existing) {
+        Some(value) => { crate::codex_auth_store::write(&value)?; true },
+        None => { crate::codex_auth_store::clear()?; false },
     };
     let suffix = if kept_api_key { "（保留了 OPENAI_API_KEY）" } else { "" };
     audit::log(
@@ -951,8 +850,7 @@ pub async fn codex_logout_local() -> Result<LogoutResult, String> {
 /// 「强制写入并启动」的写入步骤：不向 OpenAI 换新凭据，直接用账户里保存的 auth.json 副本覆盖
 /// 本机文件。供切换时 refresh_token 已失效、拿不到新 access_token 的场景兜底；副本不完整
 ///（缺 id_token / access_token / refresh_token）时报 codex_auth_incomplete。
-#[tauri::command]
-pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String> {
+pub(crate) async fn force_credentials(id: String, require_desktop_closed: bool) -> Result<SwitchResult, String> {
     let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
@@ -983,7 +881,7 @@ pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String>
             }
         }
     }
-    if is_desktop_running() {
+    if require_desktop_closed && is_desktop_running() {
         return Err("codex_running".into());
     }
     write_local_auth(value)?;
@@ -1004,3 +902,30 @@ pub async fn codex_force_write_local(id: String) -> Result<SwitchResult, String>
 #[cfg(test)]
 #[path = "tests/codex_local.rs"]
 mod tests;
+
+#[tauri::command]
+pub async fn codex_switch_local(app: AppHandle, id: String, close_desktop: Option<bool>) -> Result<Value, String> {
+    crate::linked_clients::local_clients_switch(app, "codex".into(), id, close_desktop.unwrap_or(false), None, None).await
+}
+
+#[tauri::command]
+pub async fn codex_force_write_local(app: AppHandle, id: String, close_desktop: Option<bool>) -> Result<Value, String> {
+    crate::linked_clients::local_clients_switch(app, "codex".into(), id, close_desktop.unwrap_or(false), Some(true), None).await
+}
+
+pub(crate) fn linked_status() -> Result<Value, String> {
+    let cfg = current();
+    let desktop = resolve_exe_path().ok();
+    let cli = crate::local_client::independent_cli("codex", &cfg.cli_exe_path, desktop.as_deref());
+    let mut status = crate::local_client::linked_status(cli, desktop, is_desktop_running());
+    if !cfg.exe_path.is_empty() && status["desktop"]["installed"] != true { status["desktop"]["error"] = json!("codex_exe_invalid"); }
+    if !cfg.cli_exe_path.is_empty() && status["cli"]["installed"] != true { status["cli"]["error"] = json!("client_path_invalid"); }
+    if can_launch() { status["desktop"]["installed"] = json!(true); status["desktop"]["switchable"] = json!(true); status["exeConfigured"] = json!(true); }
+    if let Err(error) = crate::codex_auth_store::check() {
+        for endpoint in ["cli","desktop"] {
+            status[endpoint]["switchable"] = json!(false);
+            status[endpoint]["error"] = json!(error);
+        }
+    }
+    Ok(status)
+}

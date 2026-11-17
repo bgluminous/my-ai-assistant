@@ -12,6 +12,9 @@ pub trait Emitter {
 }
 impl Emitter for AppHandle {}
 pub mod async_runtime {
+    pub fn spawn<F: std::future::Future + Send + 'static>(future: F) -> tokio::task::JoinHandle<F::Output>
+        where F::Output: Send + 'static { tokio::spawn(future) }
+
     pub fn spawn_blocking<F: FnOnce() -> R + Send + 'static, R: Send + 'static>(
         f: F,
     ) -> tokio::task::JoinHandle<R> {
@@ -21,7 +24,22 @@ pub mod async_runtime {
 mod audit {
     pub fn log(_: &str, _: String, _: Option<serde_json::Value>) {}
 }
+mod process {
+    pub struct ProcessInfo { pub pid: u32, pub exe: Option<std::path::PathBuf> }
+    pub fn list_processes() -> Vec<ProcessInfo> { Vec::new() }
+    pub fn family(_: &[ProcessInfo],_: &[u32]) -> Vec<ProcessInfo> { Vec::new() }
+}
+#[path = "../../src-tauri/src/local_client.rs"]
+mod local_client;
+#[path = "../../src-tauri/src/opencode_clients.rs"]
+mod opencode_clients;
+mod linked_clients {
+    pub struct Lease;
+    pub fn lease(_: &str) -> Result<Lease,String> { Ok(Lease) }
+}
 mod paths {
+    pub fn config_dir() -> Option<std::path::PathBuf> { None }
+
     pub fn home_dir() -> Option<std::path::PathBuf> {
         None
     }
@@ -60,6 +78,11 @@ mod settings {
     }
 }
 mod accounts {
+    pub fn refresh_queue(_: &str) -> Result<&'static tokio::sync::Mutex<()>,String> {
+        static QUEUE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        Ok(QUEUE.get_or_init(||tokio::sync::Mutex::new(())))
+    }
+
     use serde::Serialize;
     #[derive(Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -69,6 +92,7 @@ mod accounts {
         pub token: String,
         pub note: String,
         pub opencode_auth: Option<String>,
+        pub auto_refresh_token: bool,
         pub status: Option<serde_json::Value>,
     }
     #[derive(Serialize)]
@@ -98,6 +122,7 @@ mod accounts {
             token: workspace.into(),
             note: note.unwrap_or_default().into(),
             opencode_auth: auth.map(|a| a.seal()).transpose()?,
+            auto_refresh_token: true,
             status: None,
         };
         crate::settings::mutate(|s| {

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -49,6 +49,9 @@ pub struct Account {
     /// 独立定时刷新间隔（分钟）：None 跟随全局，Some(0) 关闭此账户的自动刷新。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_interval_minutes: Option<u32>,
+    /// 查询状态与用量时是否允许续期凭据；主动切换、修改凭据与重新授权不受影响。
+    #[serde(default = "default_auto_refresh_token")]
+    pub auto_refresh_token: bool,
     /// Cursor user token / Codex access_token（JWT）/ Claude access_token（不透明值）。
     /// ChatGPT 账户有 codex_auth 副本时，本字段只在内存里由副本解出，不落盘。
     pub token: String,
@@ -69,6 +72,13 @@ pub struct Account {
     /// 缓存的状态摘要（cursor_inspect_token / codex_usage 去掉 raw 后的结果）。
     #[serde(default)]
     pub status: Option<Value>,
+}
+
+fn default_auto_refresh_token() -> bool { true }
+
+/// 每次发起自动续期前读取，避免排队或查询期间保存的设置被旧快照覆盖。
+fn auto_refresh_token_enabled(id: &str) -> Result<bool, String> {
+    Ok(snapshot(id)?.auto_refresh_token)
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +268,13 @@ pub struct AccountsFile {
     pub interval_minutes: u32,
 }
 
+/// 只串行化短暂的写盘与事件发布，不持锁进行网络请求。
+/// 多个供应商并行刷新时，防止较早的完整视图晚于新视图广播，让窗口回退到旧数据。
+fn change_publication_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
 /// 加写锁修改账户字段，随后立即写盘（同步 IO，锁内完成，保证内存与磁盘顺序一致）。
 /// 本函数是同步的，调用方天然不会在持锁期间 await。
 /// 写入成功后在锁外广播 accounts-changed 事件（携带最新视图），
@@ -266,6 +283,7 @@ fn mutate<F>(app: &AppHandle, f: F) -> Result<AccountsFile, String>
 where
     F: FnOnce(&mut AccountsFile) -> Result<(), String>,
 {
+    let _publication = change_publication_lock().lock().map_err(|_| "state_lock_poisoned")?;
     let data = settings::mutate(|s| {
         let mut data = s.accounts_file();
         f(&mut data)?;
@@ -283,6 +301,7 @@ fn current() -> AccountsFile {
 /// 绕过本模块 mutate 直接改动账户数据的入口（如全量备份导入）在写盘后调用，
 /// 向所有窗口广播最新账户视图；广播失败不影响数据。
 pub(crate) fn broadcast_changed(app: &AppHandle) {
+    let Ok(_publication) = change_publication_lock().lock() else { return; };
     let _ = app.emit("accounts-changed", view(&current()));
 }
 
@@ -582,7 +601,7 @@ pub(crate) fn save_opencode(
             d.accounts.push(Account { id:id.clone(),kind:"opencode".into(),note:manual_note.map(str::to_string)
                 .unwrap_or_else(|| crate::opencode::default_note(email, name, workspace)),
                 note_auto:manual_note.is_none(),ignore_api_models:false,token:workspace.into(),refresh_token:None,codex_auth:None,
-                opencode_auth:blob,refresh_interval_minutes:None,last_refresh_at:None,
+                opencode_auth:blob,refresh_interval_minutes:None,auto_refresh_token:true,last_refresh_at:None,
                 status:Some(json!({"workspaceId":workspace,"workspaceName":name,"name":name,"email":email,"alive":null})) });
         }
         Ok(())
@@ -643,6 +662,7 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         note_auto,
         token,
         refresh_token: sanitize_refresh_token(account.refresh_token),
+        auto_refresh_token: true,
         codex_auth: None,
         opencode_auth: None,
         refresh_interval_minutes: None,
@@ -730,15 +750,25 @@ pub async fn accounts_update(
     refresh_token: Option<String>,
     ignore_api_models: Option<bool>,
     refresh_interval_minutes: Option<u32>,
+    auto_refresh_token: Option<bool>,
+    update_credentials: Option<bool>,
 ) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
+    let update_credentials = update_credentials.unwrap_or(true);
+    // 仅修改设置不排队，关闭开关可以立即影响后续续期；主动改凭据与该供应商刷新互斥。
+    let kind = snapshot(&id)?.kind;
+    let _queued = if update_credentials {
+        Some(refresh_queue(&kind)?.lock().await)
+    } else {
+        None
+    };
     let before = snapshot(&id)?;
-    if before.kind == "opencode" && (token.trim() != before.token || refresh_token.as_deref().is_some_and(|s| !s.is_empty())) {
+    if update_credentials && before.kind == "opencode" && (token.trim() != before.token || refresh_token.as_deref().is_some_and(|s| !s.is_empty())) {
         return Err("opencode_use_oauth".into());
     }
-    let token = sanitize_token(&before.kind, &token)?;
-    let refresh_token = sanitize_refresh_token(refresh_token);
-    let credentials_changed = token != before.token || refresh_token != before.refresh_token;
+    let token = if update_credentials { sanitize_token(&before.kind, &token)? } else { before.token.clone() };
+    let refresh_token = if update_credentials { sanitize_refresh_token(refresh_token) } else { before.refresh_token.clone() };
+    let credentials_changed = update_credentials && (token != before.token || refresh_token != before.refresh_token);
     // ChatGPT 改了凭据：与添加时一样立刻换一组完整凭据存成副本（换不到退回骨架副本）
     let mut exchange_note = String::new();
     let new_codex_auth = if before.kind == "codex" && credentials_changed {
@@ -786,7 +816,7 @@ pub async fn accounts_update(
             .ok_or_else(|| "not_found".to_string())?;
         let kind = d.accounts[pos].kind.clone();
         // 改后的凭据与其它同类账户查重（排除自身）
-        if is_duplicate_account(&d.accounts, &kind, &token, Some(id.as_str())) {
+        if update_credentials && is_duplicate_account(&d.accounts, &kind, &token, Some(id.as_str())) {
             return Err("duplicate_account".into());
         }
         let acc = &mut d.accounts[pos];
@@ -794,17 +824,17 @@ pub async fn accounts_update(
         let trimmed_note = note.trim().to_string();
         let new_note_auto = trimmed_note.is_empty();
         let new_note = if new_note_auto {
-            if kind == "opencode" { best_identity(acc) } else { default_note_from_token(&kind, &token) }
+            if kind == "opencode" || !update_credentials { best_identity(acc) } else { default_note_from_token(&kind, &token) }
         } else {
             trimmed_note
         };
         if new_note != acc.note {
             changed.push("备注");
         }
-        if token != acc.token {
+        if update_credentials && token != acc.token {
             changed.push("Token");
         }
-        if refresh_token != acc.refresh_token {
+        if update_credentials && refresh_token != acc.refresh_token {
             changed.push("Refresh Token");
         }
         if kind == "cursor" {
@@ -825,14 +855,24 @@ pub async fn accounts_update(
         }
         acc.note = new_note;
         acc.note_auto = new_note_auto;
-        acc.token = token.clone();
-        acc.refresh_token = refresh_token.clone();
+        if update_credentials {
+            acc.token = token.clone();
+            acc.refresh_token = refresh_token.clone();
+        }
         if let Some(v) = &new_codex_auth {
             set_codex_auth(acc, v)?;
         }
         if acc.refresh_interval_minutes != refresh_interval_minutes {
             changed.push("同步间隔");
             acc.refresh_interval_minutes = refresh_interval_minutes;
+        }
+        if kind != "cursor" {
+            if let Some(enabled) = auto_refresh_token {
+                if acc.auto_refresh_token != enabled {
+                    changed.push(if enabled { "开启自动续期 Token" } else { "关闭自动续期 Token" });
+                    acc.auto_refresh_token = enabled;
+                }
+            }
         }
         name = display_name(&acc.kind, &acc.note, &acc.token);
         Ok(())
@@ -1066,6 +1106,13 @@ fn carry_subscription_profile(kind: &str, status: &mut Value, prev: Option<&Valu
         _ => false,
     };
     let Some(obj) = status.as_object_mut() else { return };
+    // Desktop 绑定依赖已验证的账户身份，临时查询失败不能清除它。
+    // 手动修改凭据时会清空整个状态，避免沿用旧账户身份。
+    if kind == "claude" && obj.get("accountUuid").and_then(Value::as_str).is_none_or(str::is_empty) {
+        if let Some(uuid) = json_str_at(prev, identity) {
+            obj.insert("accountUuid".into(), json!(uuid));
+        }
+    }
     if new_plan.is_none() || use_cached {
         if let Some(plan) = old_plan.as_ref() {
             obj.insert("plan".into(), json!(plan));
@@ -1372,6 +1419,7 @@ pub(crate) fn adopt_newer_local_codex(
 enum CodexRenewal {
     Renewed,
     NoRefreshToken,
+    Disabled,
     /// refresh token 最终被拒绝（含本机凭据重试）：归类原因与服务端说明。
     Denied(RefreshDenial, String),
 }
@@ -1395,6 +1443,9 @@ async fn renew_codex(
     token: &mut String,
     refresh_token: &mut Option<String>,
 ) -> Result<CodexRenewal, String> {
+    if !auto_refresh_token_enabled(id)? {
+        return Ok(CodexRenewal::Disabled);
+    }
     let Some(own_rt) = refresh_token.clone() else {
         return Ok(CodexRenewal::NoRefreshToken);
     };
@@ -1405,6 +1456,9 @@ async fn renew_codex(
             .and_then(|l| l.refresh_token)
             .filter(|l| *l != own_rt);
         if let Some(local_rt) = local_rt {
+            if !auto_refresh_token_enabled(id)? {
+                return Ok(CodexRenewal::Disabled);
+            }
             // 还有本机凭据可以重试，尚未失败，只记 warn；重试结果另有记录
             audit::log_at(
                 audit::Level::Warn,
@@ -1469,7 +1523,7 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
     if codex_token_needs_renewal(&token, last_refresh) {
         match renew_codex(app, id, &name, &mut token, &mut refresh_token).await? {
             CodexRenewal::Renewed => refreshed = true,
-            CodexRenewal::NoRefreshToken => {}
+            CodexRenewal::NoRefreshToken | CodexRenewal::Disabled => {}
             CodexRenewal::Denied(reason, detail) => {
                 return finish(app, id, denied_status(reason, &detail));
             }
@@ -1481,7 +1535,7 @@ async fn refresh_codex_account(app: &AppHandle, id: &str, snap: Account) -> Resu
     if !usage.alive && (usage.status == 401 || usage.status == 403) && !refreshed {
         match renew_codex(app, id, &name, &mut token, &mut refresh_token).await? {
             CodexRenewal::Renewed => usage = codex::codex_usage(token.clone()).await?,
-            CodexRenewal::NoRefreshToken => {}
+            CodexRenewal::NoRefreshToken | CodexRenewal::Disabled => {}
             CodexRenewal::Denied(reason, detail) => {
                 return finish(app, id, denied_status(reason, &detail));
             }
@@ -1533,7 +1587,7 @@ async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Res
     let near_expiry = expires_at_ms
         .map(|ms| ms / 1000 - Utc::now().timestamp() < REFRESH_AHEAD_SECS)
         .unwrap_or(false);
-    if near_expiry {
+    if near_expiry && auto_refresh_token_enabled(id)? {
         if let Some(rt) = refresh_token.clone() {
             match claude_oauth::request_claude_refresh(&rt).await? {
                 claude_oauth::ClaudeRefreshOutcome::Success {
@@ -1560,7 +1614,7 @@ async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Res
 
     // 2) 查询额度；token 失效（401/403）且本次尚未续期过则补一次续期并重试一次
     let mut usage = claude::claude_usage(token.clone()).await?;
-    if !usage.alive && (usage.status == 401 || usage.status == 403) && !refreshed {
+    if !usage.alive && (usage.status == 401 || usage.status == 403) && !refreshed && auto_refresh_token_enabled(id)? {
         if let Some(rt) = refresh_token.clone() {
             match claude_oauth::request_claude_refresh(&rt).await? {
                 claude_oauth::ClaudeRefreshOutcome::Success {
@@ -1593,19 +1647,24 @@ async fn refresh_claude_account(app: &AppHandle, id: &str, snap: Account) -> Res
     finish(app, id, status)
 }
 
-/// 全局凭据操作队列：所有账户刷新与本机 Codex 切换（见 codex_local::codex_switch_local，
-/// 同样会轮换 refresh_token）在此排队，同一时刻只执行一个。
-/// tokio Mutex 公平（FIFO），先到先执行；主窗口、托盘面板等所有入口共用一条队列，
-/// 避免并发请求一次性打出大量请求触发服务端限流/风控，
-/// 也防止两个操作并发消费同一 refresh_token（OpenAI 轮换后旧值随即作废）。
-pub(crate) fn refresh_queue() -> &'static tokio::sync::Mutex<()> {
-    static QUEUE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    QUEUE.get_or_init(|| tokio::sync::Mutex::new(()))
+/// 每个供应商一条 FIFO 凭据队列，所有窗口共用；供应商之间可以并行。
+/// 刷新、主动修改凭据及原有的切换/退出/本机同步保护使用同一供应商的锁。
+/// 内部续期不再次取锁，避免重入死锁；OpenCode 另保留账户级凭据锁。
+pub(crate) fn refresh_queue(kind: &str) -> Result<&'static tokio::sync::Mutex<()>, String> {
+    static QUEUES: OnceLock<[tokio::sync::Mutex<()>; 4]> = OnceLock::new();
+    let index = match kind {
+        "cursor" => 0,
+        "codex" => 1,
+        "claude" => 2,
+        "opencode" => 3,
+        _ => return Err("invalid_kind".into()),
+    };
+    Ok(&QUEUES.get_or_init(|| std::array::from_fn(|_| tokio::sync::Mutex::new(())))[index])
 }
 
 /// 刷新单个账户的状态摘要；Codex 账户自动处理 access_token 续期。
 /// 存活状态发生变化或刷新失败时写入审计日志。
-/// 所有刷新全局排队执行（每次一个）；快照在拿到队列后再取，
+/// 同一供应商的刷新排队执行（每次一个）；凭据快照在拿到队列后再取，
 /// 保证排队期间前序刷新轮换的凭据（Codex token）能被本次读到。
 /// 开始（含排队等待）与结束时广播 account-refreshing，主窗口与托盘据此同步行内「刷新中」状态，
 /// 不论刷新由哪个窗口发起。
@@ -1619,7 +1678,8 @@ pub async fn account_refresh(app: AppHandle, id: String) -> Result<AccountView, 
 }
 
 async fn refresh_account_inner(app: &AppHandle, id: &str) -> Result<Account, String> {
-    let _queued = refresh_queue().lock().await;
+    let kind = snapshot(id)?.kind;
+    let _queued = refresh_queue(&kind)?.lock().await;
     let snap = snapshot(id)?;
     let kind = snap.kind.clone();
     let name = display_name(&snap.kind, &snap.note, &snap.token);
@@ -1828,6 +1888,7 @@ pub async fn accounts_import_local(app: AppHandle, kind: String, workspace_id: O
                     note_auto: true,
                     token,
                     refresh_token: login.refresh_token,
+                    auto_refresh_token: true,
                     codex_auth: None,
                     opencode_auth: None,
                     refresh_interval_minutes: None,
@@ -1886,6 +1947,8 @@ struct AccountExportItem {
     ignore_api_models: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_interval_minutes: Option<u32>,
+    #[serde(default = "default_auto_refresh_token")]
+    auto_refresh_token: bool,
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
@@ -1983,6 +2046,7 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
             note_auto: a.note_auto,
             ignore_api_models: a.kind == "cursor" && a.ignore_api_models,
             refresh_interval_minutes: a.refresh_interval_minutes,
+            auto_refresh_token: a.auto_refresh_token,
             token: a.token.clone(),
             // Cursor 没有 refresh_token 概念；Codex / Claude 随导出（用于自动续期）
             refresh_token: if kind == "cursor" {
@@ -2121,6 +2185,7 @@ pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<Import
                     codex_auth: if kind == "codex" { item.codex_auth } else { None },
                     opencode_auth: if kind == "opencode" { item.opencode_auth } else { None },
                     refresh_interval_minutes: item.refresh_interval_minutes,
+                    auto_refresh_token: item.auto_refresh_token,
                     last_refresh_at: None,
                     status: None,
                 };
@@ -2186,6 +2251,7 @@ pub async fn claude_oauth_finish(app: AppHandle, code: String) -> Result<ClaudeO
         note_auto: true,
         token: result.access_token,
         refresh_token: result.refresh_token,
+        auto_refresh_token: true,
         codex_auth: None,
         opencode_auth: None,
         refresh_interval_minutes: None,

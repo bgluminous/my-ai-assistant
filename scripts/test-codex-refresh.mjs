@@ -189,6 +189,31 @@ test("one timer cycle syncs once while all managed accounts refresh", async () =
   assert.equal(f.calls.filter(c => c.cmd === "account_refresh").length, 3);
 });
 
+test("main and tray batches run providers concurrently, keep local order and survive one failure", async () => {
+  const kinds = ["cursor", "codex", "claude", "opencode"];
+  const accounts = kinds.flatMap(kind => [1, 2].map(n => ({ id: `${kind}-${n}`, kind, token: "fixture" })));
+  for (const name of ["accounts", "tray_panel"]) {
+    const pending = new Map(accounts.map(account => [account.id, deferred()]));
+    const f = await fixture(name, { accounts, ipc: (cmd, args) => {
+      if (cmd === "account_refresh") return pending.get(args.id).promise;
+    } });
+    if (name === "accounts") await f.api.loadInitial();
+    f.calls.length = 0;
+    const job = name === "accounts" ? f.api.refreshAccounts(accounts.map(account => account.id)) : f.api.refreshAll();
+    await tick();
+    const ids = () => f.calls.filter(call => call.cmd === "account_refresh").map(call => call.args.id);
+    assert.deepEqual(ids(), kinds.map(kind => `${kind}-1`));
+    pending.get("claude-1").reject(new Error("offline"));
+    await tick();
+    assert.equal(ids().at(-1), "claude-2");
+    assert.equal(ids().includes("cursor-2"), false);
+    for (const account of accounts) pending.get(account.id).resolve(account);
+    await job;
+    assert.equal(ids().length, accounts.length);
+    for (const kind of kinds) assert.deepEqual(ids().filter(id => id.startsWith(kind)), [`${kind}-1`, `${kind}-2`]);
+  }
+});
+
 test("automatic account updates skip shared logs until the global task while manual updates retain the linkage", async () => {
   for (const kind of ["cursor", "codex", "claude"]) {
     const original = { id: kind, kind, token: "fixture", lastRefreshAt: 1 };

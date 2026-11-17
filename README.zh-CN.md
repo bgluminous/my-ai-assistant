@@ -79,34 +79,39 @@
 - 支持按间隔定时刷新（5 / 15 / 30 分钟、1 / 6 / 12 / 24 小时），也可手动刷新单个或一组账户。
   各类账户可在编辑窗口选择「跟随全局」、独立间隔或「关闭」；新增及旧账户默认跟随全局。
   独立设置覆盖全局，全局关闭后仍可单独启用账户。设置随账户导入导出和全量备份保留。
-  定时任务只刷新到期账户，按当前账户卡片及组内顺序逐个执行；失败后等待完整间隔再尝试。
+  定时任务只刷新到期账户。各供应商独立排队，组内按显示顺序逐个执行，组间可并行。
+  所有窗口共用后端队列，慢请求不会拖延其他供应商的刷新。失败后等待完整间隔再尝试。
   启动 3 秒后首轮刷新已启用的账户，修改间隔后从保存时刻重新计时。
   手动或其他窗口完成刷新后推迟该账户的下次定时刷新，行内「刷新中」状态跨窗口同步。
   ChatGPT / Claude 共享日志及 GPT 跨设备同步继续使用全局间隔，本机凭据检查使用原有设置。
 - 四个账户分组卡片支持拖拽标题左侧的手柄排序，也可聚焦手柄后使用上下方向键调整。
   顺序在本机保存，并随全量备份导出和恢复；卡片内的账户继续按套餐排序。
-- 可将本机 Cursor / ChatGPT（或 Codex）客户端切换到指定账户并启动；
-  Claude 切号写入本机 Claude Code 凭据（Windows 为 `~/.claude/.credentials.json`，
-  macOS 为 Keychain），Claude Desktop 仅作客户端联动（运行中先关闭、已安装则完成后启动）。
-  客户端路径可手动指定，也可自动搜索常见安装位置。
-  切换成功的结果弹窗 3 秒后自动关闭（按钮上倒计时，可手动关闭）；失败结果保留到手动关闭。
+- 可将本机 Cursor 客户端切换到指定账户并启动。
+  在主窗口或托盘切换 OpenCode / GPT（Codex）/ Claude 账户时，
+  点击「仅 CLI」「仅 Desktop」或「两端一起」即开始切换。按钮按客户端可用情况启用。
+  只有选择 Desktop（含「两端一起」）才执行桌面绑定、关闭和启动流程。
+  运行中的 CLI 会话保留。
+  两端共用登录存储时，另一端下次读取凭据也可能使用新账户，弹窗会说明这一影响。
+- Claude Desktop 首次切换前需在官方客户端登录并绑定到对应账户。完成或取消绑定后恢复原登录，
+  中断时可从账户编辑或切换窗口恢复。登录快照仅保存在本机，不随账户导出或全量备份迁移。
+  各端路径可分别配置，也可自动查找。检测到多个 Claude Desktop 数据目录时需指定当前目录。
 - 可退出本机 Cursor / ChatGPT / Claude Code 的登录（各账户分组标题栏的「退出本机登录」按钮）：
-  运行中的客户端先关闭，再清除本机登录态——Cursor 清除认证库中的登录键，ChatGPT 删除
-  `auth.json` 中的账号凭据（配置了 `OPENAI_API_KEY` 时保留该项），Claude Code 去掉凭据中的
-  账号登录段（其它条目保留）；改动前都会备份。只动本机客户端，托管的账户不受影响，
-  完成后不自动启动客户端。
+  运行中的桌面客户端先关闭，再清除本机登录态。Cursor 清除认证库中的登录键，ChatGPT 删除
+  当前凭据存储中的账号登录信息（保留已配置的 `OPENAI_API_KEY`），Claude Code 去掉凭据中的
+  账号登录段并保留其它条目。改动前备份相关文件，完成后不自动启动客户端。
 - ChatGPT / Claude 账户可保存 `refresh_token`，access token 到期前自动续期。
   ChatGPT 的续期策略与 Codex CLI 一致：access token 距过期不足 5 分钟（或解析不出过期时刻且距
   上次获取超过 8 天）就换新整组凭据，请求返回 401 / 403 时补一次；每次续期都会轮换
   `refresh_token`（它本身不带可读的有效期）。Claude 在 access token 临期或 401 / 403 时续期。
-- ChatGPT 账户保存的是本机 Codex 客户端 `auth.json` 的完整副本（含 `id_token`），续期、切换、
+- ChatGPT、Claude 和 OpenCode 可在账户编辑中关闭「自动续期 Token」。关闭后仍使用现有 Token
+  查询，主动切换、修改凭据和重新授权沿用原流程。该设置随账户导入导出及全量备份保留。
+- ChatGPT 账户保存的是本机 Codex 凭据的完整副本（含 `id_token`），续期、切换、
   从本机导入都整份写入；手动添加或编辑凭据时会立刻用 `refresh_token` 换取完整一组。
-  同步是双向的：程序续期后写回本机 `auth.json`；后台按设置的间隔（默认 5 分钟，可选 1 分钟到
-  1 天）检查本机 `auth.json` 的修改时间，ChatGPT Desktop / Codex CLI 自行续期后，同账号账户的副本
-  会跟着更新（不联网，与定时刷新无关），刷新和切换前也会再取回一次；续期被拒绝时用本机同一账号的
-  凭据重试一次。
+  程序根据 `CODEX_HOME` 中的配置读写文件、系统凭据库或加密存储。后台按设置的间隔
+  （默认 5 分钟，可选 1 分钟到 1 天）检查本机凭据变化。ChatGPT Desktop / Codex CLI 自行续期后，
+  程序会更新同账号副本，无需联网。刷新和切换前也会检查；启用续期时，可用本机同账号凭据重试一次。
   切换账号时，副本完整且 access token 未到续期窗口就直接写入本机，不换票；否则先换票再写入。
-  若 `refresh_token` 已失效，结果弹窗提供「强制写入并启动」，直接把保存的副本写入本机。
+  若 `refresh_token` 已失效，结果弹窗可选择「写入保存的凭据副本」。
 
 ### OpenCode 官方套餐
 
@@ -116,7 +121,8 @@
 - 支持 Go（$10/月）、Go Plus（$40/月）、Go Teams（$20/成员/月）及 Console 按量账户。
   Teams 月费只使用接口返回的成员数；未知人数不估算。额度为当前授权成员的
   5 小时、周、月窗口，余额为工作区共享余额；单项读取失败会标记并保留缓存。
-- 客户端导入和切换仅支持 OpenCode V2。设置中可指定 CLI 可执行文件和数据库路径。
+- 客户端导入和切换仅支持 OpenCode V2。设置中可分别指定 CLI / Desktop 路径和各端数据库。
+  Desktop 可使用内置 CLI，两端共用数据库时只切换一次，独立数据库分别处理。
   切换调用官方凭据激活接口；没有对应登录时打开客户端原生授权。
   本应用与 OpenCode 客户端分别持有 OAuth 会话，本应用续期不会改写客户端凭据。
 - 用量汇总整个工作区的官方模型调用，包含所有成员、设备及服务账户，不拆成员。
@@ -359,7 +365,7 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 
 ## 价格表
 
-- 内置默认表 `src-tauri/resources/pricing.default.json` 共 158 项。
+- 内置默认表 `src-tauri/resources/pricing.default.json` 共 164 项。
   2026-10-23 核价时修正了 DeepSeek Flash，并补充了 23 项，
   包括 Sonnet / Haiku 5.5、GPT-5.1、GPT-4.1 Nano、Chat Latest、Gemini 4 Argon、
   Gemini Flash-Lite、Grok 4.7、GLM、MiniMax 和 Mistral / Codestral。
@@ -367,6 +373,8 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
   字段为 `input`、`output`、`cacheRead`、`cacheWrite`。
   `cacheWrite=0` 表示未收录单独按 token 计的写入费用，
   不代表缓存存储、TTL 等附加费用全部免费。
+- 按用户约定，`codex-auto-review` 和 `default` 的输入、输出、缓存读写单价均为 0。
+  两项按零价计入统计，保留 Token 用量，不再显示为「未定价」。
 - 各厂商的官方定价见
   [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing)、
   [OpenAI](https://developers.openai.com/api/docs/pricing)、
@@ -395,6 +403,11 @@ macOS Apple Silicon 应用移入可写的安装目录后可自动更新；从 DM
 - 2026-11-02 收录 GPT-6.1 Terra 和 GPT-6 Rosalind。每百万 token 的输入、输出、
   缓存读、30 分钟缓存写单价，Terra 依次为 $1、$5、$0.05、$1.25，Fast 档四项翻倍。
   Rosalind 标准档依次为 $15、$75、$1.50、$18.75。两者均按短上下文折算。
+- 2026-11-18 收录 GPT-6.2 Astra / Sol 的标准与 Fast 档，共 4 项。
+  每百万 token 的输入、输出、缓存读、30 分钟缓存写单价，
+  Astra 依次为 $8、$40、$0.40、$10，Sol 为 $2、$10、$0.10、$2.50；
+  Fast 档四项均为标准档的 2 倍。沿用输入不超过 272K 的短上下文价，
+  长上下文加价、12 小时缓存写及 Ultrafast 独立档位尚未纳入折算。
 - 2026-11-16 新增 32 项：Qwen 23 项、Gemini 4 Carbon / Hydrogen 2 项、Meta Muse 7 项。
   Qwen 覆盖 Max / Plus / Flash / Coder 及 Qwen3.8 / 3.6 / 3.5 开源文本型号，
   使用新加坡 International 美元标准价；阶梯型号按输入不超过 256K 收录，

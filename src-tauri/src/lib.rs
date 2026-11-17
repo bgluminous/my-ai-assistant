@@ -3,6 +3,7 @@ mod app_update;
 mod operations;
 mod opencode;
 mod opencode_local;
+mod opencode_clients;
 mod opencode_store;
 mod update_protocol;
 mod audit;
@@ -19,6 +20,9 @@ mod cursor_local;
 mod http;
 mod launch;
 mod local_client;
+mod linked_clients;
+mod claude_desktop;
+mod codex_auth_store;
 mod local_crypto;
 mod main_window;
 mod model_match;
@@ -238,6 +242,11 @@ pub fn run() {
             opencode::opencode_oauth_start,
             opencode::opencode_oauth_poll,
             opencode::opencode_oauth_cancel,
+            linked_clients::local_clients_status,
+            linked_clients::local_clients_switch,
+            claude_desktop::claude_desktop_binding_start,
+            claude_desktop::claude_desktop_binding_finish,
+            claude_desktop::claude_desktop_binding_cancel,
             opencode_local::opencode_client_get,
             opencode_local::opencode_local_accounts,
             opencode_local::opencode_client_set,
@@ -259,6 +268,9 @@ pub fn run() {
             ];
             handler(invoke)
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) { opencode_clients::shutdown(); }
+        });
 }

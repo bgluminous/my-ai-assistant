@@ -24,3 +24,13 @@ fn strip_login_keeps_other_entries() {
     // 解析不了：视为有登录残留、无可保留内容
     assert_eq!(strip_claude_login("not json"), (true, None));
 }
+
+#[test]
+fn credential_switch_preserves_other_auth_entries_and_rejects_invalid_files() {
+    let oauth=serde_json::from_value::<Map<String,Value>>(json!({"accessToken":"new"})).unwrap();
+    let merged=merge_oauth(Some(r#"{"claudeAiOauth":{"accessToken":"old"},"mcp":{"key":"keep"}}"#),&oauth).unwrap();
+    let value:Value=serde_json::from_str(&merged).unwrap();
+    assert_eq!(value["mcp"]["key"],"keep");
+    assert_eq!(value["claudeAiOauth"]["accessToken"],"new");
+    assert!(merge_oauth(Some("not-json"),&oauth).is_err());
+}

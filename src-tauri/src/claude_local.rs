@@ -2,8 +2,7 @@
 //! ~/.claude/.credentials.json，macOS 为 Keychain），实现本机登录导入与切号；
 //! 并提供 Claude Desktop 客户端的探测 / 运行检测 / 关闭 / 启动。
 //!
-//! 切号只写 Claude Code 凭据（Claude Desktop 聊天应用的登录态在其内部加密存储，
-//! 无法安全写入）；客户端关闭 / 启动与 Cursor / Codex 的切号流程保持同一交互。
+//! CLI 凭据与 Desktop 的本机登录快照分别切换，由 linked_clients 统一串行提交。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -13,8 +12,8 @@ use std::time::Duration;
 use tauri::AppHandle;
 
 use crate::local_client::{
-    kill_pids, launch_detached_windows, path_starts_with_ci, wait_exit, ClientStatus, CloseResult,
-    DetectResult, LaunchResult, LogoutResult, SwitchResult,
+    kill_pids, launch_detached_windows, path_starts_with_ci, wait_exit, CloseResult, LaunchResult,
+    LogoutResult, SwitchResult,
 };
 use crate::{accounts, audit, claude_oauth, paths, process, settings};
 
@@ -28,6 +27,10 @@ use crate::{accounts, audit, claude_oauth, paths, process, settings};
 pub struct ClaudeClientConfig {
     #[serde(default)]
     pub exe_path: String,
+    #[serde(default)]
+    pub cli_exe_path: String,
+    #[serde(default)]
+    pub desktop_data_path: String,
 }
 
 fn current() -> ClaudeClientConfig {
@@ -148,20 +151,26 @@ fn keychain_delete() -> bool {
 
 /// 写凭据文件：先写临时文件再 rename 原子替换；Unix 下 0600 权限。
 fn write_credentials_file(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&tmp, "").map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-    }
-    std::fs::write(&tmp, text).map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-    Ok(())
+    crate::codex_auth_store::atomic_write(path,text.as_bytes())
+        .map_err(|_|"claude_creds_write_failed".into())
+}
+
+fn keychain_read_checked() -> Result<Option<String>, String> {
+    if !cfg!(target_os="macos") { return Ok(None); }
+    let output=Command::new("security").args(["find-generic-password","-s",KEYCHAIN_SERVICE,"-w"])
+        .output().map_err(|_|"claude_keychain_unavailable")?;
+    if output.status.success() { return Ok(Some(String::from_utf8_lossy(&output.stdout).trim().into())); }
+    if output.status.code()==Some(44) { return Ok(None); }
+    Err("claude_keychain_unavailable".into())
+}
+
+fn merge_oauth(existing: Option<&str>, oauth: &Map<String,Value>) -> Result<String,String> {
+    let mut value=match existing {
+        Some(text)=>serde_json::from_str::<Value>(text).ok().filter(Value::is_object).ok_or("claude_creds_read_failed")?,
+        None=>json!({}),
+    };
+    value["claudeAiOauth"]=Value::Object(oauth.clone());
+    serde_json::to_string_pretty(&value).map_err(|_|"claude_creds_write_failed".into())
 }
 
 /// 从 credentials JSON 文本解析 claudeAiOauth 段。
@@ -256,38 +265,35 @@ fn write_local_credentials(
     if let Some(sub) = subscription_type.map(str::trim).filter(|s| !s.is_empty()) {
         oauth.insert("subscriptionType".into(), json!(sub));
     }
-    let value = json!({ "claudeAiOauth": Value::Object(oauth) });
-    let text = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("claude_creds_write_failed: {e}"))?;
-
-    let path = credentials_path();
-    if cfg!(target_os = "macos") {
-        let keychain_ok = keychain_write(&text);
-        // 本机若同时存在凭据文件（Keychain 被拒时 Claude Code 会退回文件），保持两处一致
-        let mut file_ok = false;
-        if let Some(p) = &path {
-            if p.exists() || !keychain_ok {
-                if let Some(pp) = p.exists().then_some(p) {
-                    let backup = pp.with_extension("json.bak");
-                    let _ = std::fs::copy(pp, backup);
-                }
-                file_ok = write_credentials_file(p, &text).is_ok();
-            }
+    let path=credentials_path().ok_or("home_dir_unavailable")?;
+    let previous_file=match std::fs::read_to_string(&path) {
+        Ok(text)=>Some(text),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>None,
+        Err(_)=>return Err("claude_creds_read_failed".into()),
+    };
+    let file_text=merge_oauth(previous_file.as_deref(),&oauth)?;
+    if previous_file.is_some() {
+        std::fs::copy(&path,path.with_extension("json.bak")).map_err(|_|"claude_creds_backup_failed")?;
+    }
+    if cfg!(target_os="macos") {
+        let previous=keychain_read_checked()?;
+        let keychain_text=merge_oauth(previous.as_deref(),&oauth)?;
+        if !keychain_write(&keychain_text) {
+            // A known absent entry can use Claude Code's file fallback. Never leave
+            // an existing authoritative Keychain login pointing at another account.
+            if previous.is_some(){return Err("claude_keychain_write_failed".into());}
+            return write_credentials_file(&path,&file_text);
         }
-        if !keychain_ok && !file_ok {
-            return Err("claude_creds_write_failed: keychain_and_file_failed".into());
+        if previous_file.is_some() {
+            if let Err(error)=write_credentials_file(&path,&file_text) {
+                let restored=match previous {Some(text)=>keychain_write(&text),None=>keychain_delete()};
+                if !restored{return Err("claude_keychain_rollback_failed".into());}
+                return Err(error);
+            }
         }
         return Ok(());
     }
-    let Some(path) = path else {
-        return Err("claude_creds_write_failed: home_dir_unavailable".into());
-    };
-    if path.exists() {
-        let backup = path.with_extension("json.bak");
-        std::fs::copy(&path, &backup)
-            .map_err(|e| format!("claude_creds_write_failed: backup_failed: {e}"))?;
-    }
-    write_credentials_file(&path, &text)
+    write_credentials_file(&path,&file_text)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +322,11 @@ fn windows_latest_app_dir(base: &Path) -> Option<PathBuf> {
 fn detect_candidates() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if cfg!(target_os = "windows") {
+        for package in store_packages() {
+            if let Some(root) = package["InstallLocation"].as_str() {
+                for relative in ["app/Claude.exe", "Claude.exe"] { out.push(PathBuf::from(root).join(relative)); }
+            }
+        }
         if let Some(local) = paths::env_nonempty("LOCALAPPDATA").or_else(paths::data_local_dir) {
             let base = local.join("AnthropicClaude");
             out.push(base.join("claude.exe"));
@@ -333,17 +344,16 @@ fn detect_candidates() -> Vec<PathBuf> {
     out
 }
 
-fn resolve_exe_path() -> Result<PathBuf, String> {
+pub(crate) fn resolve_exe_path() -> Result<PathBuf, String> {
     let configured = current().exe_path.trim().to_string();
     if !configured.is_empty() {
         let p = PathBuf::from(&configured);
-        if p.exists() {
-            return Ok(p);
-        }
+        if crate::local_client::valid_desktop_path(&p) { return Ok(p); }
+        return Err("claude_exe_invalid".into());
     }
     detect_candidates()
         .into_iter()
-        .find(|p| p.exists())
+        .find(|p| crate::local_client::valid_desktop_path(p))
         .ok_or_else(|| "claude_exe_not_found".to_string())
 }
 
@@ -352,6 +362,9 @@ fn matches_desktop(p: &process::ProcessInfo) -> bool {
         return false;
     };
     if cfg!(target_os = "windows") {
+        if exe.to_string_lossy().to_ascii_lowercase().replace('/', "\\").contains(r"\resources\") { return false; }
+        if !exe.file_name().is_some_and(|n|n.to_string_lossy().eq_ignore_ascii_case("claude.exe")) { return false; }
+        if resolve_exe_path().ok().is_some_and(|p|crate::local_client::same_path(&p, exe)) { return true; }
         let lower = exe.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
         if lower.contains(r"\anthropicclaude\") {
             return true;
@@ -374,7 +387,7 @@ fn matches_desktop(p: &process::ProcessInfo) -> bool {
     } else if cfg!(target_os = "macos") {
         exe.to_string_lossy()
             .to_ascii_lowercase()
-            .contains("/claude.app/")
+            .contains("/claude.app/") && exe.to_string_lossy().to_ascii_lowercase().contains("/contents/macos/")
     } else {
         false
     }
@@ -388,38 +401,36 @@ fn desktop_pids() -> Vec<u32> {
         .collect()
 }
 
-fn is_desktop_running() -> bool {
+pub(crate) fn is_desktop_running() -> bool {
     !desktop_pids().is_empty()
 }
 
 /// 关闭 Claude Desktop：先优雅退出，约 8 秒超时后强制结束，再等约 3 秒确认。
-fn close_desktop() -> bool {
-    if !is_desktop_running() {
-        return true;
-    }
-    if cfg!(target_os = "windows") {
-        kill_pids(&desktop_pids(), false);
-        if !wait_exit(is_desktop_running, Duration::from_secs(8)) {
-            kill_pids(&desktop_pids(), true);
-            let _ = wait_exit(is_desktop_running, Duration::from_secs(3));
+pub(crate) fn close_desktop() -> bool {
+    let roots=desktop_pids();
+    crate::local_client::close_family(&roots,|| {
+        if cfg!(windows) { kill_pids(&roots,false); }
+        else if cfg!(target_os="macos") {
+            let _=Command::new("osascript").args(["-e",&format!("tell application id \"{CLAUDE_BUNDLE_ID}\" to quit")]).output();
         }
-    } else if cfg!(target_os = "macos") {
-        let _ = Command::new("osascript")
-            .args(["-e", &format!("tell application id \"{CLAUDE_BUNDLE_ID}\" to quit")])
-            .output();
-        if !wait_exit(is_desktop_running, Duration::from_secs(8)) {
-            kill_pids(&desktop_pids(), true);
-            let _ = wait_exit(is_desktop_running, Duration::from_secs(3));
-        }
-    }
-    !is_desktop_running()
+    })
 }
 
-fn launch_desktop() -> bool {
+pub(crate) fn launch_desktop() -> bool {
+    launch_desktop_unchecked() && wait_exit(||!is_desktop_running(),Duration::from_secs(15))
+}
+fn launch_desktop_unchecked() -> bool {
     let Ok(exe) = resolve_exe_path() else {
         return false;
     };
     if cfg!(target_os = "windows") {
+        for package in store_packages() {
+            if package["InstallLocation"].as_str().is_some_and(|p|path_starts_with_ci(&exe, Path::new(p))) {
+                if let (Some(family), Some(id)) = (package["PackageFamilyName"].as_str(), package["AppId"].as_str()) {
+                    return Command::new("explorer.exe").arg(format!("shell:AppsFolder\\{family}!{id}")).spawn().is_ok();
+                }
+            }
+        }
         launch_detached_windows(&exe)
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(&exe).spawn().is_ok()
@@ -436,12 +447,16 @@ fn launch_desktop() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeClientView {
     pub exe_path: String,
+    pub cli_exe_path: String,
+    pub desktop_data_path: String,
     pub path: String,
 }
 
 fn view(cfg: &ClaudeClientConfig) -> ClaudeClientView {
     ClaudeClientView {
         exe_path: cfg.exe_path.clone(),
+        cli_exe_path: cfg.cli_exe_path.clone(),
+        desktop_data_path: cfg.desktop_data_path.clone(),
         path: settings::path_display(),
     }
 }
@@ -454,13 +469,23 @@ pub fn claude_client_get() -> Result<ClaudeClientView, String> {
 }
 
 #[tauri::command]
-pub fn claude_client_set(exe_path: String) -> Result<ClaudeClientView, String> {
+pub fn claude_client_set(exe_path: String, cli_exe_path: Option<String>, desktop_data_path: Option<String>) -> Result<ClaudeClientView, String> {
     let _operation = crate::operations::begin()?;
     let exe_path = exe_path.trim().to_string();
-    if !exe_path.is_empty() && !Path::new(&exe_path).exists() {
+    if !exe_path.is_empty() && !crate::local_client::valid_desktop_path(Path::new(&exe_path)) {
         return Err("claude_exe_invalid".into());
     }
-    let cfg = ClaudeClientConfig { exe_path };
+    let _lease = crate::linked_clients::lease("claude")?;
+    crate::claude_desktop::ensure_idle()?;
+    let mut cfg = current(); cfg.exe_path = exe_path;
+    if let Some(path) = cli_exe_path {
+        crate::local_client::validate_optional_path(&path, false)?;
+        cfg.cli_exe_path = path.trim().into();
+    }
+    if let Some(path) = desktop_data_path {
+        crate::local_client::validate_optional_path(&path, true)?;
+        cfg.desktop_data_path = path.trim().into();
+    }
     settings::mutate(|s| {
         s.claude_client = cfg.clone();
         Ok(())
@@ -470,25 +495,16 @@ pub fn claude_client_set(exe_path: String) -> Result<ClaudeClientView, String> {
 
 /// 探测常见安装位置，不写配置。
 #[tauri::command]
-pub fn claude_client_detect() -> DetectResult {
-    DetectResult {
-        exe_path: resolve_exe_path()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string()),
-    }
+pub fn claude_client_detect() -> Value {
+    let desktop=resolve_exe_path().ok();
+    json!({"exePath":desktop.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "cliExePath":crate::local_client::independent_cli("claude", "", desktop.as_deref()).map(|p|p.to_string_lossy().to_string())})
 }
 
 #[tauri::command]
-pub async fn claude_client_status() -> Result<ClientStatus, String> {
-    let _operation = crate::operations::begin()?;
-    let exe_path = resolve_exe_path()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    Ok(ClientStatus {
-        running: is_desktop_running(),
-        exe_configured: exe_path.is_some(),
-        exe_path,
-    })
+pub async fn claude_client_status() -> Result<Value, String> {
+    let _operation=crate::operations::begin()?;
+    tauri::async_runtime::spawn_blocking(||Ok(linked_status())).await.map_err(|_|"client_status_failed")?
 }
 
 #[tauri::command]
@@ -509,17 +525,16 @@ pub fn claude_client_launch() -> Result<LaunchResult, String> {
 }
 
 /// 切换本机 Claude Code 登录：用账户 refresh_token 换取全新凭据组后写入本机
-/// （macOS Keychain / 其它平台 .credentials.json）。写入前要求 Claude Desktop
-/// 已关闭（关闭由 claude_client_close 单独负责），与 Cursor / Codex 切号一致。
-#[tauri::command]
-pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchResult, String> {
+/// （macOS Keychain / 其它平台 .credentials.json）。Desktop 使用独立登录快照，
+/// CLI 写入不要求 Desktop 关闭；选中 Desktop 时由统一切换入口管理其生命周期。
+pub(crate) async fn switch_credentials(app: AppHandle, id: String) -> Result<SwitchResult, String> {
     let _operation = crate::operations::begin()?;
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("unsupported_platform".into());
     }
 
-    // 与账户刷新共用同一全局队列：切换同样会消费并轮换 refresh_token。
-    let _queued = accounts::refresh_queue().lock().await;
+    // 与 Claude 账户刷新共用队列：切换同样会消费并轮换 refresh_token。
+
 
     let acc = accounts::account_snapshot(&id)?;
     if acc.kind != "claude" {
@@ -569,10 +584,6 @@ pub async fn claude_switch_local(app: AppHandle, id: String) -> Result<SwitchRes
     let refresh_token = new_rt.unwrap_or(rt);
     accounts::persist_tokens(&app, &id, &token, &Some(refresh_token.clone()))?;
 
-    if is_desktop_running() {
-        return Err("claude_running".into());
-    }
-
     write_local_credentials(&token, &refresh_token, expires_at_ms, subscription.as_deref())?;
 
     audit::log(
@@ -599,7 +610,9 @@ pub async fn claude_logout_local() -> Result<LogoutResult, String> {
         return Err("unsupported_platform".into());
     }
     // 与刷新 / 切换共用同一队列，避免与正在进行的切号写入交错
-    let _queued = accounts::refresh_queue().lock().await;
+    let _queued = accounts::refresh_queue("claude")?.lock().await;
+    let _lease = crate::linked_clients::lease("claude")?;
+    crate::claude_desktop::ensure_idle()?;
     if is_desktop_running() {
         return Err("claude_running".into());
     }
@@ -659,3 +672,30 @@ pub async fn claude_logout_local() -> Result<LogoutResult, String> {
 #[cfg(test)]
 #[path = "tests/claude_local.rs"]
 mod tests;
+
+#[tauri::command]
+pub async fn claude_switch_local(app: AppHandle, id: String, close_desktop: Option<bool>) -> Result<Value, String> {
+    crate::linked_clients::local_clients_switch(app, "claude".into(), id, close_desktop.unwrap_or(false), None, None).await
+}
+
+pub(crate) fn desktop_data_path() -> String { current().desktop_data_path }
+
+pub(crate) fn linked_status() -> Value {
+    let cfg = current();
+    let desktop = resolve_exe_path().ok();
+    let cli = crate::local_client::independent_cli("claude", &cfg.cli_exe_path, desktop.as_deref());
+    let mut status = crate::local_client::linked_status(cli, desktop, is_desktop_running());
+    if !cfg.exe_path.is_empty() && status["desktop"]["installed"] != true { status["desktop"]["error"] = json!("claude_exe_invalid"); }
+    if !cfg.cli_exe_path.is_empty() && status["cli"]["installed"] != true { status["cli"]["error"] = json!("client_path_invalid"); }
+    status
+}
+
+pub(crate) fn store_packages() -> Vec<Value> {
+    if !cfg!(windows) { return Vec::new(); }
+    static PACKAGES: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    PACKAGES.get_or_init(|| {
+        let script = r#"$items = @(Get-AppxPackage | Where-Object { $_.Name -match '^(Claude|AnthropicClaude|Anthropic\.Claude)$' } | ForEach-Object { $package = $_; $manifest = Get-AppxPackageManifest -Package $package; [pscustomobject]@{ InstallLocation=$package.InstallLocation; PackageFamilyName=$package.PackageFamilyName; AppId=@($manifest.Package.Applications.Application)[0].Id } }); ConvertTo-Json -InputObject $items -Compress"#;
+        crate::local_client::run_hidden(Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",script]))
+            .ok().filter(|o|o.status.success()).and_then(|o|serde_json::from_slice(&o.stdout).ok()).unwrap_or_default()
+    }).clone()
+}

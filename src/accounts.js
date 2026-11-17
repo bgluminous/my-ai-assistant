@@ -1,5 +1,6 @@
 import { getAccountGroupOrder, initAccountCardOrder } from "./account_order.js";
-import { createAccountRefreshScheduler } from "./account_refresh.js";
+import { createAccountRefreshScheduler, refreshByProvider } from "./account_refresh.js";
+import { switchLocalClients, bindClaudeDesktop, clientError } from "./linked_client_ui.js";
 import { createModal } from "./modal.js";
 import { addOpenCode, editOpenCode, switchOpenCode } from "./opencode_ui.js";
 import {
@@ -47,8 +48,9 @@ const TOKEN_PLACEHOLDERS = {
 
 let accounts = [];
 let intervalMinutes = 0;
-let refreshAllRunning = false;
+let scheduledProviders = new Set();
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
+let switchingKind = null; // 后台刷新只暂停正在切换的供应商，其它队列继续运行。
 let importing = false; // 本机导入 / 文件导入导出进行中（防重入，期间禁用相关按钮）
 const groupRefreshing = new Set(); // 组内整体刷新进行中的组（"cursor" / "codex" / "claude"）
 const refreshingIds = new Set(); // 本窗口发起、进行中的刷新
@@ -64,6 +66,16 @@ function isRefreshing(id) {
 
 let modalKind = "cursor";
 let editingId = null;
+let editingCredentials = null;
+
+function providerRefreshing(kind) {
+  return scheduledProviders.has(kind) || groupRefreshing.has(kind)
+    || accounts.some(account => account.kind === kind && isRefreshing(account.id));
+}
+
+function anyAccountRefreshing() {
+  return scheduledProviders.size > 0 || groupRefreshing.size > 0 || refreshingIds.size > 0 || remoteRefreshingIds.size > 0;
+}
 
 /* ---------- 对外接口(供用量统计等模块联动) ---------- */
 
@@ -73,7 +85,8 @@ const automaticRefreshIds = new Set();
 
 const refreshScheduler = createAccountRefreshScheduler({
   getOrder: displayOrderIds,
-  isBlocked: () => switching || importing || refreshAllRunning || groupRefreshing.size > 0,
+  isBlocked: () => importing,
+  isProviderBlocked: kind => (switching && switchingKind === kind) || groupRefreshing.has(kind),
   isRefreshing,
   refreshAccount: async (id) => {
     automaticRefreshIds.add(id);
@@ -87,8 +100,8 @@ const refreshScheduler = createAccountRefreshScheduler({
     ]);
     if (sync.error) setStatus("warn", `GPT 用量同步失败：${syncError(sync.error)}`);
   },
-  onRunningChange: (running) => {
-    refreshAllRunning = running;
+  onRunningChange: (kinds) => {
+    scheduledProviders = new Set(kinds);
     render();
   },
   onError: (error) => setStatus("warn", `定时刷新失败：${resetError(error)}`),
@@ -591,7 +604,7 @@ function accountRow(account) {
   actionsCell.className = "account-actions";
   const refreshBtn = iconAction("refresh", busy ? "刷新中…" : "刷新");
   refreshBtn.classList.toggle("busy", busy);
-  refreshBtn.disabled = busy || refreshAllRunning || switching;
+  refreshBtn.disabled = busy || providerRefreshing(account.kind) || switching || importing;
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
   const editBtn = iconAction("edit", "编辑");
   editBtn.disabled = busy || switching;
@@ -614,21 +627,19 @@ function accountRow(account) {
     switchBtn.addEventListener("click", () => { void onSwitchAccount(account.id); });
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   } else {
-    // Codex / Claude 切换靠 Refresh Token 换新凭据，未验证或没有 Refresh Token 的账户不可切
+    // Claude Desktop 使用独立登录快照，CLI 凭据条件交给后端逐端报告。
     const isClaude = account.kind === "claude";
     const aliveOk = !!(account.status && account.status.alive === true);
     const hasRt = !!String(account.refreshToken || "").trim();
     const switchBtn = iconAction(
       "switch",
-      !aliveOk
+      isClaude ? "切换本机 Claude CLI / Desktop 账户" : !aliveOk
         ? "请先刷新验证账户后再切换"
         : !hasRt
         ? "该账户没有 Refresh Token，无法切换本机登录"
-        : isClaude
-        ? "切换本机 Claude Code 登录（会关闭正在运行的 Claude Desktop）"
-        : "切换本机 ChatGPT 登录（会关闭正在运行的 ChatGPT）"
+        : "切换本机 GPT / Codex 账户"
     );
-    switchBtn.disabled = busy || switching || !aliveOk || !hasRt;
+    switchBtn.disabled = busy || switching || (!isClaude && (!aliveOk || !hasRt));
     switchBtn.addEventListener("click", () => {
       void (isClaude ? onSwitchClaudeAccount(account.id) : onSwitchCodexAccount(account.id));
     });
@@ -653,17 +664,17 @@ function updateGroupMeta(kind) {
 
 /** 卡片标题栏的退出登录 / 刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
 function updateHeadingActions() {
-  const blocked = switching || importing || refreshAllRunning;
+  const blocked = switching || importing;
   for (const kind of ["cursor", "codex", "claude", "opencode"]) {
-    const running = groupRefreshing.has(kind) || refreshAllRunning;
+    const running = providerRefreshing(kind);
     const refreshBtn = el(`#accounts-refresh-${kind}`);
-    refreshBtn.disabled = blocked || groupRefreshing.has(kind);
+    refreshBtn.disabled = blocked || running;
     refreshBtn.classList.toggle("busy", running);
-    if (kind !== "opencode") el(`#accounts-logout-${kind}`).disabled = blocked;
-    el(`#accounts-import-${kind}`).disabled = blocked;
+    if (kind !== "opencode") el(`#accounts-logout-${kind}`).disabled = blocked || running;
+    el(`#accounts-import-${kind}`).disabled = blocked || anyAccountRefreshing();
     const hasRows = accounts.some((a) => a.kind === kind);
-    el(`#accounts-export-${kind}`).disabled = blocked || !hasRows;
-    el(`#accounts-add-${kind}`).disabled = blocked;
+    el(`#accounts-export-${kind}`).disabled = blocked || anyAccountRefreshing() || !hasRows;
+    el(`#accounts-add-${kind}`).disabled = blocked || running;
   }
 }
 
@@ -792,6 +803,7 @@ async function refreshOne(id) {
   refreshingIds.add(id);
   rowErrors.delete(id);
   updateRow(id);
+  updateHeadingActions();
   try {
     const updated = await invoke("account_refresh", { id });
     // codex 可能轮换 token / refreshToken，必须整体替换该账户
@@ -808,23 +820,26 @@ async function refreshOne(id) {
     refreshingIds.delete(id);
     refreshScheduler.completed(id);
     updateRow(id);
+    updateHeadingActions();
     notifyChange();
   }
 }
 
-/** 排队刷新一批账户（每次一个，逐个执行），返回失败个数。 */
+/** 供应商之间并行、组内顺序刷新，返回失败个数。后端负责跨窗口排队。 */
 async function refreshIds(ids) {
-  for (const id of ids) await refreshOne(id);
+  const wanted = new Set(ids);
+  const ordered = displayOrderIds().filter(id => wanted.has(id));
+  await refreshByProvider(ordered.map(id => accounts.find(account => account.id === id)), refreshOne);
   return ids.filter((id) => rowErrors.has(id)).length;
 }
 
 /**
- * 供其他模块（用量统计页「刷新」）触发的账户状态刷新：逐个排队执行。
+ * 供其他模块（用量统计页「刷新」）触发的账户状态刷新：供应商并行，组内排队。
  * 重入安全：切换 / 导入流程中直接跳过，正在刷新中的账户由 refreshOne 自行去重。
  */
 export async function refreshAccounts(ids) {
   if (switching || importing) return;
-  // 同样按界面显示顺序（先分组再组内顺序）刷新，混合类型的一批（如备份导入）不在类型间来回跳
+  // 同供应商内按界面显示顺序刷新，混合类型的一批（如备份导入）可以并行。
   const wanted = new Set(ids || []);
   const ordered = displayOrderIds().filter((id) => wanted.has(id));
   if (ordered.length) await refreshIds(ordered);
@@ -832,28 +847,28 @@ export async function refreshAccounts(ids) {
 
 /** 刷新单组（卡片标题栏的刷新按钮）：组内账户排队逐个刷新。 */
 async function refreshGroup(kind) {
-  if (groupRefreshing.has(kind) || refreshAllRunning || switching || importing) return;
+  if (providerRefreshing(kind) || switching || importing) return;
   const ids = sortedAccounts(kind).map((a) => a.id);
   if (!ids.length) return;
   groupRefreshing.add(kind);
   clearStatus();
   updateHeadingActions();
-  const failed = await refreshIds(ids);
-  groupRefreshing.delete(kind);
-  if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
-  updateGroupMeta(kind);
-  updateHeadingActions();
+  try {
+    const failed = await refreshIds(ids);
+    if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
+  } finally {
+    groupRefreshing.delete(kind);
+    updateGroupMeta(kind);
+    updateHeadingActions();
+  }
 }
-
-/** 账户类型在页面上的分组顺序（Cursor → ChatGPT → Claude），刷新全部时按此顺序逐组进行。 */
-
 
 /** 全部账户按界面显示顺序排列的 id：先按类型分组、组内按套餐排序，与 render 的顺序一致。 */
 function displayOrderIds() {
   return getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
 }
 
-// 只有主窗口创建调度器；各账户到期时逐个刷新，共享日志与 GPT 同步单独使用全局间隔。
+// 只有主窗口创建调度器；到期账户按供应商分队列，共享日志与 GPT 同步单独使用全局间隔。
 function rebuildTimer() {
   refreshScheduler.update(accounts, intervalMinutes);
 }
@@ -1465,6 +1480,7 @@ async function onSwitchAccount(id) {
   const acc = accounts.find((a) => a.id === id);
   if (!acc || !(acc.status && acc.status.alive === true)) return; // 未验证不切
   switching = true;
+  switchingKind = "cursor";
   render();
   switchModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
   try {
@@ -1526,200 +1542,17 @@ function codexSwitchModeText(result) {
 
 // ChatGPT 切换：检测客户端 ->（必要时确认并关闭）-> 写入 auth.json（副本可用直接写，否则先换票）-> 启动，
 // 确认、分步进度与结果全程在切换弹窗内展示。
-async function onSwitchCodexAccount(id) {
+async function onSwitchLinkedAccount(id) {
   if (switching) return;
-  const acc = accounts.find((a) => a.id === id);
-  const hasRt = !!(acc && String(acc.refreshToken || "").trim());
-  if (!acc || !(acc.status && acc.status.alive === true) || !hasRt) return;
-  switching = true;
-  render();
-  switchModal.openBusy("切换本机 ChatGPT 登录", "正在检测本地 ChatGPT…");
-  try {
-    const st = await invoke("codex_client_status");
-    if (!st.exeConfigured) {
-      switchModal.finish(false, "未找到 ChatGPT，请点右上角「设置」配置路径后重试。");
-      return;
-    }
-    const running = !!st.running;
-    const ok = await switchModal.toConfirm(
-      running
-        ? {
-            body: "检测到 ChatGPT 正在运行。切换需要先关闭它，未保存的内容可能会丢失。确定继续？",
-            confirmText: "关闭并切换",
-            danger: true,
-          }
-        : {
-            body: "将把该账户写入本机 ChatGPT 登录并启动 ChatGPT。确定继续？",
-            confirmText: "切换",
-          }
-    );
-    if (!ok) {
-      switchModal.close();
-      return;
-    }
-    // 副本完整且未到续期窗口时直接写入，否则先换票再写入；步骤文案不预设哪一种
-    switchModal.toSteps(running ? ["关闭 ChatGPT", "写入登录凭证", "启动 ChatGPT"] : ["写入登录凭证", "启动 ChatGPT"]);
-    if (running) {
-      switchModal.stepStart();
-      const c = await invoke("codex_client_close");
-      if (!c.closed) {
-        switchModal.stepFail();
-        switchModal.finish(false, "未能完全关闭 ChatGPT，请手动关闭后重试。");
-        return;
-      }
-      switchModal.stepDone();
-    }
-    switchModal.stepStart();
-    const sw = await invoke("codex_switch_local", { id });
-    // 体现本次是向 OpenAI 换了新凭据，还是直接写入了账户保存的 auth.json 副本
-    const how = codexSwitchModeText(sw);
-    switchModal.stepDone(how);
-    const view = await invoke("accounts_list");
-    applyView(view);
-    render();
-    switchModal.stepStart();
-    const l = await invoke("codex_client_launch");
-    switchModal.stepDone();
-    const note = how ? `（${how}）` : "";
-    switchModal.finish(
-      true,
-      l.launched
-        ? `已切换账户并启动 ChatGPT${note}。`
-        : `已切换账户${note}，但自动启动失败，请手动启动 ChatGPT。`
-    );
-  } catch (error) {
-    switchModal.stepFail();
-    // Refresh Token 已失效换不到新凭据：提供兜底——直接把账户里保存的 auth.json 副本写入本机并启动
-    const alt = resetError(error).startsWith("codex_refresh_denied")
-      ? { label: "强制写入并启动", onClick: () => void forceWriteCodex(id) }
-      : null;
-    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`, alt);
-  } finally {
-    switching = false;
-    render();
-  }
+  const account = accounts.find(a => a.id === id);
+  if (!account) return;
+  switching = true; switchingKind = account.kind; render();
+  try { await switchLocalClients(account, async () => {
+    const view = await invoke("accounts_list"); applyView(view); render();
+  }); } finally { switching = false; render(); }
 }
-
-/**
- * 「强制写入并启动」：不向 OpenAI 换新凭据，把账户里保存的完整 auth.json 副本直接覆盖到本机，
- * 再启动 ChatGPT。步骤与正常切换一致（运行中先关闭），但写入的是旧凭据组——若该组的
- * refresh_token 已在服务端失效，客户端启动后仍可能要求重新登录。
- */
-async function forceWriteCodex(id) {
-  if (switching) return;
-  switching = true;
-  render();
-  try {
-    const st = await invoke("codex_client_status");
-    const running = !!st.running;
-    switchModal.toSteps(running ? ["关闭 ChatGPT", "写入保存的登录副本", "启动 ChatGPT"] : ["写入保存的登录副本", "启动 ChatGPT"]);
-    if (running) {
-      switchModal.stepStart();
-      const c = await invoke("codex_client_close");
-      if (!c.closed) {
-        switchModal.stepFail();
-        switchModal.finish(false, "未能完全关闭 ChatGPT，请手动关闭后重试。");
-        return;
-      }
-      switchModal.stepDone();
-    }
-    switchModal.stepStart();
-    await invoke("codex_force_write_local", { id });
-    switchModal.stepDone();
-    switchModal.stepStart();
-    const l = await invoke("codex_client_launch");
-    switchModal.stepDone();
-    switchModal.finish(
-      true,
-      l.launched
-        ? "已写入保存的登录副本并启动 ChatGPT（未换新凭据）。"
-        : "已写入保存的登录副本，但自动启动失败，请手动启动 ChatGPT。"
-    );
-  } catch (error) {
-    switchModal.stepFail();
-    switchModal.finish(false, `强制写入失败：${mapSwitchError(error)}`);
-  } finally {
-    switching = false;
-    render();
-  }
-}
-
-// Claude 切换：写入的是 Claude Code 凭据（CLI）；Claude Desktop 仅作为客户端联动
-// （运行中先关闭、已安装则完成后启动），未安装 Desktop 也可完成切号。
-async function onSwitchClaudeAccount(id) {
-  if (switching) return;
-  const acc = accounts.find((a) => a.id === id);
-  const hasRt = !!(acc && String(acc.refreshToken || "").trim());
-  if (!acc || !(acc.status && acc.status.alive === true) || !hasRt) return;
-  switching = true;
-  render();
-  switchModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
-  try {
-    const st = await invoke("claude_client_status");
-    const running = !!st.running;
-    const hasDesktop = !!st.exeConfigured;
-    const ok = await switchModal.toConfirm(
-      running
-        ? {
-            body: "检测到 Claude Desktop 正在运行。切换需要先关闭它，未保存的内容可能会丢失。确定继续？",
-            confirmText: "关闭并切换",
-            danger: true,
-          }
-        : hasDesktop
-        ? {
-            body: "将把该账户写入本机 Claude Code 登录并启动 Claude Desktop。确定继续？",
-            confirmText: "切换",
-          }
-        : {
-            body: "将把该账户写入本机 Claude Code 登录（未检测到 Claude Desktop，跳过启动）。确定继续？",
-            confirmText: "切换",
-          }
-    );
-    if (!ok) {
-      switchModal.close();
-      return;
-    }
-    const steps = [];
-    if (running) steps.push("关闭 Claude Desktop");
-    steps.push("换取登录凭证并写入");
-    if (hasDesktop) steps.push("启动 Claude Desktop");
-    switchModal.toSteps(steps);
-    if (running) {
-      switchModal.stepStart();
-      const c = await invoke("claude_client_close");
-      if (!c.closed) {
-        switchModal.stepFail();
-        switchModal.finish(false, "未能完全关闭 Claude Desktop，请手动关闭后重试。");
-        return;
-      }
-      switchModal.stepDone();
-    }
-    switchModal.stepStart();
-    await invoke("claude_switch_local", { id });
-    switchModal.stepDone();
-    // 切换会轮换 refresh_token，同步最新账户数据
-    const view = await invoke("accounts_list");
-    applyView(view);
-    render();
-    if (hasDesktop) {
-      switchModal.stepStart();
-      const l = await invoke("claude_client_launch");
-      switchModal.stepDone();
-      switchModal.finish(
-        true,
-        l.launched ? "已切换本机 Claude Code 登录并启动 Claude Desktop。" : "已切换本机 Claude Code 登录，但自动启动失败，请手动启动 Claude Desktop。"
-      );
-    } else {
-      switchModal.finish(true, "已切换本机 Claude Code 登录。");
-    }
-  } catch (error) {
-    switchModal.stepFail();
-    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`);
-  } finally {
-    switching = false;
-    render();
-  }
-}
+async function onSwitchCodexAccount(id) { return onSwitchLinkedAccount(id); }
+async function onSwitchClaudeAccount(id) { return onSwitchLinkedAccount(id); }
 
 /* ---------- 退出本机登录（清除本机 Cursor / ChatGPT / Claude Code 登录态） ---------- */
 
@@ -1757,9 +1590,10 @@ const LOGOUT_TARGETS = {
  * 完成后不再启动客户端（启动即进入登录页，是否启动由用户自行决定）。
  */
 async function onLogoutLocal(kind) {
-  if (switching || importing || refreshAllRunning) return;
+  if (switching || importing || providerRefreshing(kind)) return;
   const t = LOGOUT_TARGETS[kind] || LOGOUT_TARGETS.cursor;
   switching = true;
+  switchingKind = kind;
   render();
   switchModal.openBusy(`退出本机 ${t.login} 登录`, `正在检测本地 ${t.client}…`);
   try {
@@ -1812,7 +1646,7 @@ async function onLogoutLocal(kind) {
 // 读取本机已登录的指定类型凭据并加入托管列表（Cursor 读认证库，ChatGPT 读 auth.json，
 // Claude 读 .credentials.json / macOS Keychain）；后端保证同一账号不重复导入，导入后逐个后台验证。
 async function onImportLocal(kind) {
-  if (importing || switching || refreshAllRunning) return;
+  if (importing || switching || anyAccountRefreshing()) return;
   const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
@@ -1851,7 +1685,7 @@ async function onImportLocal(kind) {
 /* ---------- JSON 文件导入 / 导出 ---------- */
 
 async function onExport(kind) {
-  if (importing || switching || refreshAllRunning) return;
+  if (importing || switching || anyAccountRefreshing()) return;
   const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
@@ -1876,7 +1710,7 @@ async function onExport(kind) {
 }
 
 async function onImportFile(kind) {
-  if (importing || switching || refreshAllRunning) return;
+  if (importing || switching || anyAccountRefreshing()) return;
   const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
@@ -1921,7 +1755,7 @@ async function onImportFile(kind) {
 
 let accountModal;
 function getAccountModal() {
-  return accountModal ||= createModal(el("#account-modal"), { onClose: () => { editingId = null; } });
+  return accountModal ||= createModal(el("#account-modal"), { onClose: () => { editingId = null; editingCredentials = null; } });
 }
 
 function setModalKind(kind) {
@@ -1932,6 +1766,8 @@ function setModalKind(kind) {
   el("#account-token").placeholder = TOKEN_PLACEHOLDERS[modalKind];
   el("#account-refresh-field").hidden = modalKind === "cursor";
   el("#account-api-field").hidden = modalKind !== "cursor" || editingId == null;
+  el("#account-auto-refresh-field").hidden = modalKind === "cursor" || editingId == null;
+  el("#account-desktop-binding-field").hidden = modalKind !== "claude" || editingId == null;
   el("#account-refresh-token").placeholder =
     modalKind === "claude"
       ? "~/.claude/.credentials.json 里的 refreshToken，填写后 Token 过期可自动续期"
@@ -1948,6 +1784,8 @@ function openModal(account, presetKind) {
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
+  editingCredentials = account ? { token: (account.token || "").trim(), refreshToken: (account.refreshToken || "").trim() } : null;
+  el("#account-auto-refresh-token").checked = account?.autoRefreshToken !== false;
   el("#account-ignore-api-models").checked = !!(account && account.ignoreApiModels);
   el("#account-interval-field").hidden = !account;
   el("#account-refresh-interval").value = account?.refreshIntervalMinutes == null ? "" : String(account.refreshIntervalMinutes);
@@ -1962,7 +1800,36 @@ function openModal(account, presetKind) {
   clearBtn.disabled = false;
   clearModalStatus();
   getAccountModal().open();
+  if (modalKind === "claude" && editingId) void loadDesktopBinding(editingId);
   el("#account-note").focus();
+}
+
+async function loadDesktopBinding(id) {
+  const session = getAccountModal().session;
+  const label = el("#account-desktop-binding-status");
+  const button = el("#account-desktop-bind");
+  label.textContent = "正在检测…"; button.disabled = true;
+  try {
+    const status = await invoke("local_clients_status", { kind: "claude", id });
+    if (!getAccountModal().isCurrent(session) || editingId !== id) return;
+    const binding = status.desktop?.binding;
+    label.textContent = status.desktop?.error ? clientError(status.desktop.error)
+      : !status.desktop?.installed ? "未检测到 Claude Desktop"
+      : binding?.state === "bound" ? "已绑定此账户的桌面登录"
+      : binding?.state === "pending" ? "有未完成的绑定，可恢复原登录" : "尚未绑定 Desktop 登录";
+    button.textContent = binding?.state === "bound" ? "重新绑定" : binding?.state === "pending" ? "恢复原登录" : "绑定 Desktop 登录";
+    button.disabled = !status.desktop?.installed || !!status.desktop?.error;
+    button.onclick = async () => {
+      if (button.disabled || getAccountModal().busy || editingId !== id) return;
+      const operation = getAccountModal().beginSave();
+      button.disabled = true;
+      try {
+        if (binding?.state === "pending") await invoke("claude_desktop_binding_cancel", { id: binding.operationId });
+        else await bindClaudeDesktop(id);
+      } catch (error) { if (operation.current()) label.textContent = clientError(error); }
+      finally { operation.finish(); if (operation.current()) void loadDesktopBinding(id); }
+    };
+  } catch (error) { if (getAccountModal().isCurrent(session)) label.textContent = clientError(error); }
 }
 
 function closeModal() {
@@ -2016,6 +1883,8 @@ async function onSave() {
   const ignoreApiModels = modalKind === "cursor" && el("#account-ignore-api-models").checked;
   const interval = el("#account-refresh-interval").value;
   const refreshIntervalMinutes = interval === "" ? null : Number(interval);
+  const autoRefreshToken = modalKind === "cursor" ? null : el("#account-auto-refresh-token").checked;
+  const updateCredentials = !editingCredentials || token !== editingCredentials.token || (refreshToken || "") !== editingCredentials.refreshToken;
   const isEdit = editingId != null;
   const id = editingId;
   const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
@@ -2025,7 +1894,7 @@ async function onSave() {
   setModalStatus("", "保存中…");
   try {
     const view = isEdit
-      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes })
+      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes, autoRefreshToken, updateCredentials })
       : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
     applyView(view);
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
@@ -2193,6 +2062,7 @@ export function initAccounts() {
       if (!refreshingIds.has(id)) refreshScheduler.completed(id);
     }
     if (accounts.some((a) => a.id === id)) updateRow(id);
+    updateHeadingActions();
   }).catch(() => {
     /* 非 Tauri 环境无事件桥 */
   });

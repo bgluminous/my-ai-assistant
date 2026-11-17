@@ -215,6 +215,9 @@ pub async fn credential(
     let _guard = lock.lock().await;
     let snapshot = accounts::account_snapshot(id)?;
     let old = account_credential(&snapshot)?;
+    if !snapshot.auto_refresh_token {
+        return Ok(old);
+    }
     let due = old.expires_at <= Utc::now().timestamp_millis() + 300_000;
     if !due && rejected_access != Some(old.access.as_str()) {
         return Ok(old);
@@ -266,6 +269,10 @@ pub async fn account_get(app: &AppHandle, id: &str, path: &str) -> Result<Value,
     match get(&auth, path).await {
         Err(e) if e == "opencode_http_401" => {
             let renewed = credential(app, id, Some(&auth.access)).await?;
+            // 关闭续期且凭据没有被主动授权更新时，原样返回鉴权失败，不重发同一个 Token。
+            if renewed.access == auth.access {
+                return Err(e);
+            }
             get(&renewed, path).await
         }
         result => result,

@@ -1676,6 +1676,9 @@ input.price-input {
 .account-interval-field { margin-top: 14px; }
 .account-interval-field > label { margin: 0 0 7px; }
 .account-interval-field > p { margin: 8px 0 0; }
+.account-auto-refresh-field { gap: 8px; margin: 16px 0; }
+.account-auto-refresh-field > .toggle,
+.account-auto-refresh-field > p { margin: 0; }
 .opencode-edit-workspace { margin: 0; overflow-wrap: anywhere; }
 /* 编辑账户：与上方字段留出 16px，开关与说明间隔 8px，左右沿用表单内边距。 */
 #account-modal textarea { display: block; }
@@ -1909,7 +1912,7 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .opencode-dialog .modal-head { display: flex; align-items: center; justify-content: space-between; }
 .opencode-dialog .modal-body, .opencode-dialog .modal-head, .opencode-dialog .modal-foot { padding: 18px; }
 .opencode-dialog .opencode-content { display: grid; gap: 12px; }
-.opencode-dialog input { width: 100%; min-width: 0; }
+.opencode-dialog input:not([type="checkbox"]) { width: 100%; min-width: 0; }
 .opencode-dialog .modal-foot { display: flex; justify-content: flex-end; gap: 10px; }
 .modal-close-hint {
   position: fixed;
@@ -1966,3 +1969,11 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .account-cards-dragging, .account-cards-dragging * { cursor: grabbing !important; user-select: none; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+.client-result-lines { white-space: pre-line; overflow-wrap: anywhere; }
+
+.client-endpoint-result { margin: 0; padding: 10px 12px; border-left: 3px solid currentColor; background: var(--surface); border-radius: 6px; overflow-wrap: anywhere; }
+.client-endpoint-result[data-result="success"] { color: var(--ok); }
+.client-endpoint-result[data-result="failed"] { color: var(--bad); }
+.opencode-dialog .client-switch-target { flex: 1 1 0; padding-inline: 8px; }
+.client-target-hint { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }

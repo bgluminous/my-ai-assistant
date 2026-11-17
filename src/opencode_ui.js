@@ -1,54 +1,7 @@
 import { el, invoke, resetError, copyText } from "./shared.js";
-import { createModal } from "./modal.js";
-
+import { dialog } from "./client_dialog.js";
+import { switchLocalClients } from "./linked_client_ui.js";
 let dialogSequence = 0;
-function dialog(title) {
-  const root = document.createElement("dialog");
-  root.className = "opencode-dialog";
-  root.innerHTML = '<div class="modal-head"><h3></h3><button type="button" class="icon-btn" aria-label="关闭">×</button></div><div class="modal-body"><div class="opencode-content"></div><p class="status" role="status" hidden></p></div><div class="modal-foot"><button type="button" class="secondary">取消</button></div>';
-  const heading = root.querySelector("h3");
-  heading.id = "opencode-dialog-title-" + (++dialogSequence);
-  heading.textContent = title;
-  root.setAttribute("aria-labelledby", heading.id);
-  const content = root.querySelector(".opencode-content");
-  const status = root.querySelector(".status");
-  const foot = root.querySelector(".modal-foot");
-  const cancel = foot.querySelector("button");
-  let closed = false, busy = false, operation = null;
-  let onCancel = async () => {};
-  const modal = createModal(root, {
-    isBusy: () => busy,
-    onRequestClose: requestClose,
-    onClose() { closed = true; root.remove(); void onCancel().catch(() => {}); },
-  });
-  function setStatus(kind, text) {
-    status.className = "status" + (kind ? " " + kind : "");
-    status.textContent = text;
-    status.hidden = !text;
-  }
-  function close() {
-    modal.close();
-  }
-  async function requestClose() {
-    busy = true; cancel.disabled = true;
-    try { await onCancel(); close(); }
-    catch (error) { setStatus("bad", resetError(error)); }
-    finally { busy = false; cancel.disabled = false; }
-  }
-  root.querySelector(".icon-btn").setAttribute("data-close", "");
-  cancel.setAttribute("data-close", "");
-  document.body.append(root); modal.open();
-  return { root, content, setStatus, foot, cancel, close,
-    get closed() { return closed; },
-    busy(value) {
-      if (value && !busy) operation = modal.beginSave();
-      if (!value) { operation?.finish(); operation = null; }
-      busy = value;
-      modal.reset();
-    },
-    onCancel(fn) { onCancel = fn; },
-  };
-}
 
 /** 独立授权与客户端原生授权共用显示；各自取消命令互不串用。 */
 async function authorize({ title, begin, poll, cancel, onComplete }) {
@@ -113,6 +66,7 @@ async function authorize({ title, begin, poll, cancel, onComplete }) {
 
 /** 添加先选择来源；本机只列出身份，选定工作区后才执行导入。 */
 export function addOpenCode(onComplete) {
+  dialogSequence++;
   const view = dialog("添加 OpenCode 账户");
   const noteLabel = document.createElement("label");
   const note = document.createElement("input");
@@ -198,16 +152,11 @@ export function authorizeOpenCode(workspaceId, onComplete, note = null) {
 }
 
 export function switchOpenCode(id, onComplete) {
-  return authorize({
-    title: "切换 OpenCode 客户端",
-    begin: () => invoke("opencode_switch_local", { id }),
-    poll: id => invoke("opencode_client_oauth_poll", { id, cancel: false }),
-    cancel: id => invoke("opencode_client_oauth_poll", { id, cancel: true }),
-    onComplete,
-  });
+  return switchLocalClients({ id, kind: "opencode" }, onComplete);
 }
 
 export function editOpenCode(account, onComplete) {
+  dialogSequence++;
   const view = dialog("编辑 OpenCode 账户");
   const fields = document.createElement("div");
   fields.className = "opencode-edit-fields";
@@ -231,7 +180,13 @@ export function editOpenCode(account, onComplete) {
   const intervalField = document.createElement("div");
   intervalField.className = "account-interval-field";
   intervalField.append(intervalLabel, interval, intervalHint);
-  fields.append(label, note, intervalField);
+  const renewal = el("#account-auto-refresh-field").cloneNode(true);
+  renewal.removeAttribute("id");
+  renewal.hidden = false;
+  const autoRefresh = renewal.querySelector("input");
+  autoRefresh.id = "opencode-auto-refresh-token-" + dialogSequence;
+  autoRefresh.checked = account.autoRefreshToken !== false;
+  fields.append(label, note, intervalField, renewal);
   const workspace = document.createElement("p");
   workspace.className = "muted small opencode-edit-workspace"; workspace.textContent = "工作区：" + account.token;
   const auth = document.createElement("button");
@@ -246,6 +201,7 @@ export function editOpenCode(account, onComplete) {
     try {
       await invoke("accounts_update", { id: account.id, note: note.value.trim(), token: account.token,
         refreshToken: null, ignoreApiModels: false,
+        autoRefreshToken: autoRefresh.checked, updateCredentials: false,
         refreshIntervalMinutes: interval.value === "" ? null : Number(interval.value) });
       view.close();
       if (onComplete) await onComplete();

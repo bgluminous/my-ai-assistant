@@ -893,22 +893,28 @@
               </section>
               <section class="settings-group" aria-labelledby="settings-codex-title">
                 <h4 id="settings-codex-title">ChatGPT</h4>
-                <label for="codex-exe-path">客户端路径</label>
+                <label for="codex-exe-path">Desktop 路径</label>
                 <div class="row settings-path-row">
                   <input id="codex-exe-path" class="grow" type="text" spellcheck="false" placeholder="ChatGPT.exe / ChatGPT.app / Codex.app 完整路径" />
                   <button id="codex-detect" class="secondary compact" type="button">自动搜索</button>
                 </div>
                 <p class="muted small">自动检测 Microsoft Store 与常见安装位置。</p>
+                <label for="codex-cli-exe-path">CLI 路径（选填）</label>
+                <input id="codex-cli-exe-path" type="text" spellcheck="false" placeholder="Codex CLI 完整路径，留空自动探测" />
                 <p id="codex-path-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-claude-title">
                 <h4 id="settings-claude-title">Claude Desktop</h4>
-                <label for="claude-exe-path">客户端路径</label>
+                <label for="claude-exe-path">Desktop 路径</label>
                 <div class="row settings-path-row">
                   <input id="claude-exe-path" class="grow" type="text" spellcheck="false" placeholder="claude.exe / Claude.app 完整路径" />
                   <button id="claude-detect" class="secondary compact" type="button">自动搜索</button>
                 </div>
-                <p class="muted small">切换账户时写入 Claude Code 凭据，完成后启动 Claude Desktop。</p>
+                <label for="claude-cli-exe-path">CLI 路径（选填）</label>
+                <input id="claude-cli-exe-path" type="text" spellcheck="false" placeholder="Claude Code 完整路径，留空自动探测" />
+                <label for="claude-desktop-data-path">Desktop 数据目录（选填）</label>
+                <input id="claude-desktop-data-path" type="text" spellcheck="false" placeholder="留空自动识别；检测到多个目录时指定" />
+                <p class="muted small">两端已安装时一起切换；Desktop 需在账户编辑中首次绑定登录。</p>
                 <p id="claude-path-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-opencode-title">
@@ -918,7 +924,11 @@
                   <input id="opencode-exe-path" class="grow" type="text" spellcheck="false" placeholder="OpenCode V2 CLI 完整路径，留空自动探测" />
                   <button id="opencode-detect" class="secondary compact" type="button">自动搜索</button>
                 </div>
-                <label for="opencode-db-path">数据库路径（选填）</label>
+                <label for="opencode-desktop-exe-path">Desktop 路径（选填）</label>
+                <input id="opencode-desktop-exe-path" type="text" spellcheck="false" placeholder="OpenCode.exe / OpenCode.app，留空自动探测" />
+                <label for="opencode-desktop-db-path">Desktop 数据库（选填）</label>
+                <input id="opencode-desktop-db-path" type="text" spellcheck="false" placeholder="留空使用 Desktop 内置 CLI 的数据库" />
+                <label for="opencode-db-path">CLI 数据库（选填）</label>
                 <input id="opencode-db-path" type="text" spellcheck="false" placeholder="留空沿用 OpenCode CLI 的数据库路径" />
                 <p class="muted small">用于关联和切换本机登录；套餐和用量使用本应用的独立授权。</p>
                 <p id="opencode-path-status" class="status" hidden></p>
@@ -1058,6 +1068,22 @@
               <option value="1440">24 小时</option>
             </select>
             <p class="muted small">独立间隔覆盖全局，仅控制此账户的定时刷新；ChatGPT / Claude 共享日志仍使用全局间隔。</p>
+          </div>
+
+          <div id="account-auto-refresh-field" class="toggle-group account-auto-refresh-field" hidden>
+            <label class="toggle">
+              <input id="account-auto-refresh-token" type="checkbox" role="switch" />
+              <span class="toggle-track" aria-hidden="true"></span>
+              <span class="toggle-text">自动续期 Token</span>
+            </label>
+            <p class="muted small">关闭后，自动和手动查询仅使用现有 Token；主动切换账户、修改凭据或重新授权仍可能续期。</p>
+          </div>
+
+          <div id="account-desktop-binding-field" class="account-interval-field" hidden>
+            <label>Desktop 登录</label>
+            <p id="account-desktop-binding-status" class="muted small" role="status"></p>
+            <button id="account-desktop-bind" class="secondary compact" type="button">绑定 Desktop 登录</button>
+            <p class="muted small">首次绑定后可与 CLI 一起切换。桌面登录快照仅保存在本机。</p>
           </div>
 
           <label for="account-token">Token</label>

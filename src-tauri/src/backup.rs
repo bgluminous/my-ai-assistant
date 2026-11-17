@@ -379,6 +379,7 @@ fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -
             codex_auth,
             opencode_auth,
             refresh_interval_minutes: acc.refresh_interval_minutes,
+            auto_refresh_token: acc.auto_refresh_token,
             last_refresh_at: acc.last_refresh_at,
             status: acc.status,
         };
@@ -463,6 +464,8 @@ pub async fn backup_import_apply(
     let import_settings = || settings::mutate(|s| Ok(merge_settings(s, incoming, has_sync_config)));
     let SettingsImport { imported_ids, added, skipped_exists, skipped_invalid, live_identities } =
         crate::opencode_local::with_client_config_update(|| {
+        let _claude_lease = crate::linked_clients::lease("claude")?;
+        crate::claude_desktop::ensure_idle()?;
             if has_sync_config {
                 crate::codex_sync::update_configuration(import_settings)
             } else {

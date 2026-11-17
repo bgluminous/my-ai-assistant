@@ -69,6 +69,31 @@ fn plain_models_still_resolve() {
 }
 
 #[test]
+fn gpt_6_2_models_keep_versions_and_fast_tiers() {
+    let t = table();
+    for (raw, expected) in [
+        ("gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-2-astra-high", "gpt-6.2-astra"),
+        (" cursor-GPT-6_2-astra-thinking-max ", "gpt-6.2-astra"),
+        ("gpt-6.2-sol", "gpt-6.2-sol"),
+        ("cursor-gpt-6-2-sol-xhigh", "gpt-6.2-sol"),
+        ("gpt-6.2-astra-high-fast", "gpt-6.2-astra-fast"),
+        ("cursor-gpt-6_2-astra-thinking-xhigh-fast", "gpt-6.2-astra-fast"),
+        ("gpt-6.2-sol-fast", "gpt-6.2-sol-fast"),
+        ("gpt-6-2-sol-high-fast", "gpt-6.2-sol-fast"),
+    ] {
+        assert_eq!(resolve(&t, raw).unwrap().0, expected, "{raw}");
+        assert_eq!(display_key(&t, raw), expected, "{raw}");
+        assert_eq!(resolve(&t, &display_key(&t, raw)).unwrap().0, expected);
+    }
+    // 日期快照仍按对应 6.2 型号计价，未知的小版本不能回退到裸 gpt-6。
+    assert_eq!(resolve(&t, "gpt-6.2-astra-2026-11-17").unwrap().0, "gpt-6.2-astra");
+    for raw in ["gpt-6.2", "gpt-6-2", "gpt-6.2-terra", "gpt-6.3-astra-high"] {
+        assert!(resolve(&t, raw).is_none(), "{raw} 不应套用其它型号价格");
+    }
+}
+
+#[test]
 fn deepseek_flash_versions_share_prices_but_keep_names() {
     let mut t = table();
     // 即使直接传入含冲突条目的旧表，计价也必须优先使用基础项。

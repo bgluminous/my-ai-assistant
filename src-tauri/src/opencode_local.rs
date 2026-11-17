@@ -4,13 +4,14 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
     io::Read,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
+#[cfg(test)]
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,79 +20,78 @@ pub struct OpenCodeClientConfig {
     pub exe_path: String,
     #[serde(default)]
     pub db_path: String,
+    #[serde(default)]
+    pub desktop_exe_path: String,
+    #[serde(default)]
+    pub desktop_db_path: String,
 }
 
-fn config() -> OpenCodeClientConfig {
+pub(crate) fn config() -> OpenCodeClientConfig {
     settings::read(|s| s.opencode_client.clone()).unwrap_or_default()
 }
 
-fn detect() -> Option<PathBuf> {
+pub(crate) fn standalone_cli() -> Result<Option<PathBuf>, String> {
+    let cfg = config();
+    let desktop=desktop_executable().ok().flatten();
+    let known_desktops=desktop_candidates();
+    let bundled=desktop.as_ref().and_then(|app|bundled_cli(app));
+    for path in crate::local_client::cli_candidates("opencode", &cfg.exe_path) {
+        if desktop.as_ref().is_some_and(|app|crate::local_client::same_path(app,&path))
+            || known_desktops.iter().any(|app|crate::local_client::same_path(app,&path)) {
+            if !cfg.exe_path.is_empty() {return Err("opencode_gui_is_not_cli".into());}
+            continue;
+        }
+        if cfg.exe_path.is_empty() && bundled.as_ref().is_some_and(|exe|crate::local_client::same_path(exe,&path)) {continue;}
+        if cfg!(windows) && !path.extension().is_some_and(|s|s.eq_ignore_ascii_case("exe")) {continue;}
+        return Ok(Some(path));
+    }
+    if !cfg.exe_path.is_empty() {return Err("opencode_exe_invalid".into());}
+    Ok(None)
+}
+pub(crate) fn desktop_executable() -> Result<Option<PathBuf>, String> {
+    let cfg = config();
+    if !cfg.desktop_exe_path.is_empty() {
+        let path = PathBuf::from(cfg.desktop_exe_path);
+        if !crate::local_client::valid_desktop_path(&path) { return Err("opencode_desktop_exe_invalid".into()); }
+        return Ok(Some(path));
+    }
+    Ok(desktop_candidates().into_iter().find(|p|crate::local_client::valid_desktop_path(p)))
+}
+fn desktop_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(home) = paths::home_dir() {
-        candidates.push(home.join(".opencode/bin").join(if cfg!(windows) {
-            "opencode.exe"
-        } else {
-            "opencode"
-        }));
-    }
-    if cfg!(target_os = "macos") {
-        candidates.extend(
-            [
-                "/opt/homebrew/bin/opencode",
-                "/usr/local/bin/opencode",
-                "/Applications/OpenCode.app/Contents/Resources/opencode",
-            ]
-            .map(PathBuf::from),
-        );
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join(if cfg!(windows) {
-                "opencode.exe"
-            } else {
-                "opencode"
-            }));
+    if cfg!(windows) {
+        if let Some(local) = paths::env_nonempty("LOCALAPPDATA") {
+            for relative in ["Programs/ai.opencode.desktop/OpenCode.exe", "Programs/OpenCode/OpenCode.exe", "OpenCode/OpenCode.exe"] {
+                candidates.push(local.join(relative));
+            }
         }
+    } else if cfg!(target_os="macos") {
+        candidates.push(PathBuf::from("/Applications/OpenCode.app"));
+        if let Some(home)=paths::home_dir(){candidates.push(home.join("Applications/OpenCode.app"));}
     }
-    if let Some(dir) = paths::env_nonempty("LOCALAPPDATA") {
-        for relative in [
-            "Programs/OpenCode/resources/opencode.exe",
-            "OpenCode/opencode.exe",
-            "Microsoft/WinGet/Links/opencode.exe",
-        ] {
-            candidates.push(dir.join(relative));
-        }
-    }
-    candidates.into_iter().find(|p| p.is_file())
+    candidates
 }
-
-fn executable() -> Result<PathBuf, String> {
-    let configured = config().exe_path;
-    let path = if configured.trim().is_empty() {
-        detect().ok_or("opencode_exe_not_found")?
-    } else {
-        PathBuf::from(configured.trim())
-    };
-    if !path.is_file() {
-        return Err("opencode_exe_invalid".into());
-    }
-    if cfg!(windows)
-        && !path
-            .extension()
-            .is_some_and(|s| s.eq_ignore_ascii_case("exe"))
-    {
-        return Err("opencode_exe_invalid".into());
-    }
-    Ok(path)
+pub(crate) fn bundled_cli(app: &std::path::Path) -> Option<PathBuf> {
+    let base = if app.extension().is_some_and(|s|s.eq_ignore_ascii_case("app")) {app.join("Contents/Resources")}
+        else {app.parent()?.join("resources")};
+    ["opencode-cli.exe", "opencode-cli", "opencode.exe", "opencode"].iter().map(|name|base.join(name)).find(|p|p.is_file())
 }
+fn detect() -> Option<PathBuf> {
+    standalone_cli().ok().flatten().or_else(||desktop_executable().ok().flatten().and_then(|app|bundled_cli(&app)))
+}
+fn executable() -> Result<PathBuf, String> { detect().ok_or_else(||"opencode_exe_not_found".into()) }
 
 /// 有界命令执行。并行排空输出，避免凭据列表填满管道；输出/错误不进入日志或错误文案。
 fn run(args: &[&str]) -> Result<String, String> {
+    #[cfg(test)] if let Some(result) = tests::run_fixture(args) { return result; }
+    run_executable(&executable()?, &config().db_path, args)
+}
+pub(crate) fn run_executable(exe: &std::path::Path, db: &str, args: &[&str]) -> Result<String, String> {
     #[cfg(test)]
     if let Some(result) = tests::run_fixture(args) {
         return result;
     }
-    let mut command = Command::new(executable()?);
+    let mut command = Command::new(exe);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -100,10 +100,7 @@ fn run(args: &[&str]) -> Result<String, String> {
     if let Some(home) = paths::home_dir() {
         command.current_dir(home);
     }
-    let cfg = config();
-    if !cfg.db_path.trim().is_empty() {
-        command.env("OPENCODE_DB", cfg.db_path.trim());
-    }
+    if !db.trim().is_empty() { command.env("OPENCODE_DB", db.trim()); }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -163,18 +160,6 @@ fn require_v2() -> Result<(), String> {
     Ok(())
 }
 
-fn api(method: &str, path: &str, data: Option<Value>) -> Result<Value, String> {
-    let body = data.map(|d| d.to_string());
-    let mut args = vec!["api", method, path];
-    if let Some(body) = body.as_deref() {
-        args.extend(["--data", body]);
-    }
-    let text = run(&args)?;
-    if text.trim().is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_str(text.trim()).map_err(|_| "opencode_cli_invalid_response".into())
-}
 
 fn database() -> Result<PathBuf, String> {
     let cfg = config();
@@ -237,7 +222,35 @@ pub fn identity(id: &str, value: &Value) -> Option<LocalIdentity> {
 }
 
 pub fn read_identities() -> Result<Vec<LocalIdentity>, String> {
-    let path = database()?;
+    #[cfg(test)]
+    if tests::run_fixture(&["--version"]).is_some() {
+        return read_identity_databases(&[database()?]);
+    }
+    let cfg=config();
+    let mut databases=Vec::new();
+    if let Some(cli)=standalone_cli()? {
+        databases.push(database_for(&cli,&cfg.db_path)?);
+    } else if !cfg.db_path.trim().is_empty() {
+        databases.push(PathBuf::from(cfg.db_path.trim()));
+    }
+    if let Some(app)=desktop_executable()? {
+        let cli=bundled_cli(&app).ok_or("opencode_desktop_cli_not_found")?;
+        let db=database_for(&cli,&cfg.desktop_db_path)?;
+        if !databases.iter().any(|p|crate::local_client::same_path(p,&db)) {databases.push(db);}
+    }
+    if databases.is_empty() {databases.push(database()?);}
+    read_identity_databases(&databases)
+}
+fn read_identity_databases(paths: &[PathBuf]) -> Result<Vec<LocalIdentity>, String> {
+    let mut found=Vec::new();
+    for path in paths {
+        for identity in read_identities_at(path)? {
+            if !found.iter().any(|i: &LocalIdentity|i.workspace_id==identity.workspace_id) {found.push(identity);}
+        }
+    }
+    Ok(found)
+}
+fn read_identities_at(path: &std::path::Path) -> Result<Vec<LocalIdentity>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -285,30 +298,26 @@ pub fn opencode_client_get() -> Result<Value, String> {
 }
 #[tauri::command]
 pub fn opencode_client_detect() -> Value {
-    json!({"exePath":detect().map(|p|p.to_string_lossy().to_string())})
+    json!({"exePath":standalone_cli().ok().flatten().map(|p|p.to_string_lossy().to_string()),
+        "desktopExePath":desktop_executable().ok().flatten().map(|p|p.to_string_lossy().to_string())})
 }
 
 /// 所有客户端路径写入共用此入口；检查与持久化都在原生操作锁内，避免授权启动时换路径。
 /// 待完成的授权（包括取消/回滚失败）必须先清理，备份也不能越过此检查。
 pub(crate) fn with_client_config_update<T>(update: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _guard = native_lock().try_lock().map_err(|_| "opencode_client_auth_pending")?;
-    if !attempts()
-        .lock()
-        .map_err(|_| "state_lock_poisoned")?
-        .is_empty()
-    {
-        return Err("opencode_client_auth_pending".into());
-    }
+    let _lease = crate::linked_clients::lease("opencode")?;
+    crate::opencode_clients::ensure_idle()?;
     update()
 }
 
 #[tauri::command]
-pub fn opencode_client_set(exe_path: String, db_path: Option<String>) -> Result<Value, String> {
+pub fn opencode_client_set(exe_path: String, db_path: Option<String>, desktop_exe_path: Option<String>, desktop_db_path: Option<String>) -> Result<Value, String> {
     let _operation = crate::operations::begin()?;
-    with_client_config_update(|| set_client_config(exe_path, db_path))
+    with_client_config_update(|| set_client_config(exe_path, db_path, desktop_exe_path, desktop_db_path))
 }
 
-fn set_client_config(exe_path: String, db_path: Option<String>) -> Result<Value, String> {
+fn set_client_config(exe_path: String, db_path: Option<String>, desktop_exe_path: Option<String>, desktop_db_path: Option<String>) -> Result<Value, String> {
     let exe_path = exe_path.trim().to_string();
     if !exe_path.is_empty()
         && (!std::path::Path::new(&exe_path).is_file()
@@ -323,8 +332,20 @@ fn set_client_config(exe_path: String, db_path: Option<String>) -> Result<Value,
     }) {
         return Err("opencode_database_unavailable".into());
     }
+    if let Some(path) = &desktop_exe_path {
+        if !path.trim().is_empty() && !crate::local_client::valid_desktop_path(std::path::Path::new(path.trim())) {
+            return Err("opencode_desktop_exe_invalid".into());
+        }
+    }
+    if let Some(path) = &desktop_db_path {
+        if !path.trim().is_empty() && (!std::path::Path::new(path.trim()).is_absolute() || !std::path::Path::new(path.trim()).is_file()) {
+            return Err("opencode_database_unavailable".into());
+        }
+    }
     settings::mutate(|s| {
         s.opencode_client.exe_path = exe_path;
+        if let Some(path) = desktop_exe_path { s.opencode_client.desktop_exe_path = path.trim().into(); }
+        if let Some(path) = desktop_db_path { s.opencode_client.desktop_db_path = path.trim().into(); }
         if let Some(path) = db_path {
             s.opencode_client.db_path = path.trim().into();
         }
@@ -333,142 +354,66 @@ fn set_client_config(exe_path: String, db_path: Option<String>) -> Result<Value,
     opencode_client_get()
 }
 
-fn credentials() -> Result<Vec<LocalIdentity>, String> {
-    let body = api("get", "/api/credential", None)?;
-    let rows = body.as_array().ok_or("opencode_cli_invalid_response")?;
-    Ok(rows
-        .iter()
-        .filter(|v| opencode::text(v, "integrationID") == "opencode")
-        .filter_map(|v| identity(opencode::text(v, "id"), &v["value"]))
-        .collect())
-}
-
-fn activate(id: &str) -> Result<(), String> {
-    if !opencode::valid_workspace(id) {
-        return Err("opencode_cli_invalid_response".into());
-    }
-    api("post", &format!("/api/credential/{id}/activate"), None)?;
-    // SQLite active 字段由官方 API 写入，回读仅用于确认，不直接修改该库。
-    let db = Connection::open_with_flags(database()?, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| "opencode_database_unavailable")?;
-    let active: Option<String> = db.query_row(
-        "SELECT id FROM credential WHERE integration_id='opencode' AND active=1 ORDER BY time_created DESC LIMIT 1",
-        [], |row|row.get(0)).ok();
-    if active.as_deref() != Some(id) {
-        return Err("opencode_switch_not_confirmed".into());
-    }
-    Ok(())
-}
-
-#[derive(Clone)]
-struct NativeAttempt {
-    workspace: String,
-    previous: Option<String>,
-    deadline: i64,
-}
-fn attempts() -> &'static Mutex<HashMap<String, NativeAttempt>> {
-    static ATTEMPTS: OnceLock<Mutex<HashMap<String, NativeAttempt>>> = OnceLock::new();
-    ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
 fn native_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    LOCK.get_or_init(||tokio::sync::Mutex::new(()))
 }
-fn active_id() -> Result<Option<String>, String> {
-    use rusqlite::OptionalExtension;
-    let db = Connection::open_with_flags(database()?, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| "opencode_database_unavailable")?;
-    db.query_row("SELECT id FROM credential WHERE integration_id='opencode' AND active=1 ORDER BY time_created DESC LIMIT 1",[],|r|r.get(0)).optional().map_err(|_|"opencode_database_unavailable".into())
+pub(crate) fn database_for(exe: &std::path::Path, configured: &str) -> Result<PathBuf, String> {
+    let version=run_executable(exe,configured,&["--version"])?;
+    let version=version.trim().strip_prefix("opencode ").unwrap_or(version.trim()).trim_start_matches('v');
+    if version.split('.').next()!=Some("2"){return Err("opencode_v2_required".into());}
+    let path=if configured.trim().is_empty(){run_executable(exe,"",&["debug","paths","db"])?}else{configured.trim().into()};
+    let path=PathBuf::from(path.trim());
+    if !path.is_absolute(){return Err("opencode_database_unavailable".into());}
+    Ok(path)
+}
+pub(crate) fn desktop_running(app: &std::path::Path) -> bool { !desktop_pids(app).is_empty() }
+fn desktop_pids(app: &std::path::Path) -> Vec<u32> {
+    crate::process::list_processes().into_iter().filter(|p|p.exe.as_ref().is_some_and(|exe|
+        if app.is_dir(){crate::local_client::path_starts_with_ci(exe,app) && exe.to_string_lossy().to_ascii_lowercase().contains("/contents/macos/")}else{crate::local_client::same_path(exe,app)})).map(|p|p.pid).collect()
+}
+pub(crate) fn close_desktop(app: &std::path::Path) -> bool {
+    let roots=desktop_pids(app);
+    crate::local_client::close_family(&roots,||crate::local_client::kill_pids(&roots,false))
 }
 
-#[tauri::command]
-pub async fn opencode_switch_local(id: String) -> Result<Value, String> {
-    let _operation = crate::operations::begin()?;
-    let _guard = native_lock().lock().await;
-    let account = accounts::account_snapshot(&id)?;
-    if account.kind != "opencode" {
-        return Err("not_opencode_account".into());
+pub(crate) fn launch_desktop(app: &std::path::Path) -> bool {
+    #[cfg(test)] if let Some(result)=tests::launch_fixture() { return result; }
+    let launched=if cfg!(windows){crate::local_client::launch_detached_windows(app)}
+        else if cfg!(target_os="macos"){Command::new("open").arg(app).spawn().is_ok()}else{false};
+    launched && crate::local_client::wait_exit(||!desktop_running(app),Duration::from_secs(15))
+}
+pub(crate) fn linked_status() -> Result<Value,String> {
+    let cli_result=standalone_cli();let desktop_result=desktop_executable();
+    let cli=cli_result.as_ref().ok().cloned().flatten();let desktop=desktop_result.as_ref().ok().cloned().flatten();
+    let running=desktop.as_ref().is_some_and(|p|desktop_running(p));
+    let mut result=crate::local_client::linked_status(cli,desktop.clone(),running);
+    for (endpoint,error) in [("cli",cli_result.err()),("desktop",desktop_result.err())] {
+        if let Some(error)=error {result[endpoint]["switchable"]=json!(false);result[endpoint]["error"]=json!(error);}
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        require_v2()?;
-        if !attempts().lock().map_err(|_| "state_lock_poisoned")?.is_empty() { return Err("opencode_client_auth_pending".into()); }
-        if let Some(c) = credentials()?.into_iter().find(|c| c.workspace_id == account.token) {
-            activate(&c.credential_id)?;
-            return Ok(json!({"state":"complete"}));
-        }
-        let previous = active_id()?;
-        let result = api("post","/api/integration/opencode/connect/oauth",Some(json!({"methodID":"device"})))?;
-        let attempt = opencode::text(&result,"attemptID");
-        let url = opencode::authorization_url(opencode::text(&result,"url"))?;
-        if !opencode::valid_workspace(attempt) { return Err("opencode_cli_invalid_response".into()); }
-        attempts().lock().map_err(|_| "state_lock_poisoned")?.insert(attempt.into(),NativeAttempt{workspace:account.token,previous,deadline:result.pointer("/time/expires").and_then(Value::as_i64).unwrap_or_else(||chrono::Utc::now().timestamp_millis()+15*60_000)});
-        let opened = opencode::open_browser(&url);
-        Ok(json!({"state":"pending","id":attempt,"url":url,"instructions":result["instructions"],"opened":opened}))
-    }).await.map_err(|_| "opencode_cli_failed")?
+    if let Some(app)=desktop {
+        if bundled_cli(&app).is_none(){result["desktop"]["switchable"]=json!(false);result["desktop"]["error"]=json!("opencode_desktop_cli_not_found");}
+    }
+    Ok(result)
 }
-
+pub(crate) async fn switch_linked(id:String,close_desktop:bool,target:Option<crate::local_client::SwitchTarget>)->Result<Value,String>{
+    let _guard=native_lock().lock().await;
+    crate::opencode_clients::start(id,close_desktop,target).await
+}
 #[tauri::command]
-pub async fn opencode_client_oauth_poll(id: String, cancel: bool) -> Result<Value, String> {
-    let _operation = crate::operations::begin()?;
-    let _guard = native_lock().lock().await;
-    tauri::async_runtime::spawn_blocking(move || {
-        let pending = attempts()
-            .lock()
-            .map_err(|_| "state_lock_poisoned")?
-            .get(&id)
-            .cloned();
-        let Some(pending) = pending else {
-            return if cancel {
-                Ok(json!({"state":"cancelled"}))
-            } else {
-                Err("opencode_oauth_expired".into())
-            };
-        };
-        let expired = chrono::Utc::now().timestamp_millis() >= pending.deadline;
-        let path = format!("/api/integration/opencode/connect/oauth/{id}");
-        let result = api(
-            if cancel || expired { "delete" } else { "get" },
-            &path,
-            None,
-        )?;
-        let state = opencode::text(&result, "status");
-        if !cancel && !expired && state == "pending" {
-            return Ok(json!({"state":"pending"}));
-        }
-        let completion = if !cancel && !expired && state == "complete" {
-            credentials().and_then(|all| {
-                let login = all
-                    .iter()
-                    .find(|c| c.workspace_id == pending.workspace)
-                    .ok_or("opencode_workspace_mismatch")?;
-                activate(&login.credential_id)
-            })
-        } else {
-            Err(if expired {
-                "opencode_oauth_expired"
-            } else {
-                "opencode_client_auth_failed"
-            }
-            .into())
-        };
-        if completion.is_err() {
-            // 恢复成功前保留 attempt，关闭时可以重试；不能提前丢弃回滚所需的原登录。
-            if let Some(previous) = pending.previous {
-                activate(&previous)?;
-            }
-        }
-        attempts()
-            .lock()
-            .map_err(|_| "state_lock_poisoned")?
-            .remove(&id);
-        if cancel {
-            Ok(json!({"state":"cancelled"}))
-        } else {
-            completion.map(|_| json!({"state":"complete"}))
-        }
-    })
-    .await
-    .map_err(|_| "opencode_cli_failed")?
+pub async fn opencode_switch_local(id:String)->Result<Value,String>{
+    let _operation=crate::operations::begin()?;
+    let _lease=crate::linked_clients::lease("opencode")?;
+    let _queue=accounts::refresh_queue("opencode")?.lock().await;
+    switch_linked(id,false,None).await
+}
+#[tauri::command]
+pub async fn opencode_client_oauth_poll(id:String,cancel:bool)->Result<Value,String>{
+    let _operation=crate::operations::begin()?;
+    let _lease=crate::linked_clients::lease("opencode")?;
+    let _queue=accounts::refresh_queue("opencode")?.lock().await;
+    let _guard=native_lock().lock().await;
+    crate::opencode_clients::poll(id,cancel).await
 }
 
 #[cfg(test)]

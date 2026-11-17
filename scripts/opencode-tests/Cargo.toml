@@ -20,4 +20,6 @@ getrandom = "0.2"
 base64 = "0.22"
 aes-gcm = "0.10"
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "macros", "test-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "native-tls", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "native-tls", "socks", "blocking"] }
+
+tempfile = "3"

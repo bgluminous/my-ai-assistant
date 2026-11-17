@@ -10,7 +10,7 @@ fn opencode_failure_backup_restore_includes_paths_and_remains_idempotent() {
         "opencodeClient":{"exePath":"restored-cli","dbPath":"restored-db"},
         "accounts":[
             {"id":"backup-existing","kind":"opencode","token":"wrk_existing","note":"backup"},
-            {"id":"backup-new","kind":"opencode","token":"wrk_new","note":"new","refreshIntervalMinutes":5}
+            {"id":"backup-new","kind":"opencode","token":"wrk_new","note":"new","refreshIntervalMinutes":5,"autoRefreshToken":false}
         ]
     })).unwrap();
     // Use the actual export representation and import normalization before merging.
@@ -25,12 +25,15 @@ fn opencode_failure_backup_restore_includes_paths_and_remains_idempotent() {
     assert_eq!(current.accounts[0].note, "local");
     assert_eq!(current.accounts[0].refresh_interval_minutes, Some(15));
     assert_eq!(current.accounts[1].refresh_interval_minutes, Some(5));
+    assert!(current.accounts[0].auto_refresh_token);
+    assert!(!current.accounts[1].auto_refresh_token);
 
     let restored = settings::sanitize_loaded(serde_json::from_value(exported).unwrap());
     let retry = merge_settings(&mut current, restored, false);
     assert!(retry.imported_ids.is_empty());
     assert_eq!(retry.skipped_exists, 2);
     assert_eq!(current.accounts.len(), 2);
+    assert!(!current.accounts[1].auto_refresh_token);
 
     let old: Settings = serde_json::from_value(json!({})).unwrap();
     merge_settings(&mut current, old, false);

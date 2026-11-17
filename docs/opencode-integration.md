@@ -115,8 +115,8 @@ serviceAccountId，不把成员切片拼成工作区总量。汇总可能存在�
 | --- | --- |
 | 版本与路径 | `opencode --version`、`opencode debug paths db` |
 | 本机身份导入 | 只读 V2 credential 表的工作区身份，不导入原生 OAuth 会话 |
-| 查询与激活 | `opencode api get /api/credential`、`post /api/credential/{id}/activate` |
-| 原生授权 | `post /api/integration/opencode/connect/oauth`，methodID=device |
+| 查询与激活 | `GET /api/credential`、`POST /api/credential/{id}/activate` |
+| 原生授权 | `POST /api/integration/opencode/connect/oauth`，methodID=device |
 | 轮询与取消 | 同一路径加 attemptID，分别使用 get / delete |
 
 添加弹窗先选择本机导入或新增 OAuth 授权，两种方式都可填写备注。
@@ -129,7 +129,16 @@ serviceAccountId，不把成员切片拼成工作区总量。汇总可能存在�
 原生授权完成后核对工作区，选择错误且原来有登录时恢复原登录。
 本应用的续期仅修改自己的加密副本，从不将其令牌写入 OpenCode 数据库。
 
-配置支持 CLI 绝对路径和已有数据库的绝对路径，留空使用自动检测。
+配置分别支持 CLI、Desktop 及两端已有数据库的绝对路径，留空使用自动检测。
+Desktop 单独安装时使用应用包内置 CLI；Windows 支持 `ai.opencode.desktop` 安装目录。
+点击「仅 CLI」「仅 Desktop」或「两端一起」即开始切换，后端只处理对应的客户端。
+只有选中 Desktop 才关闭和启动桌面应用，未选端的路径错误不会阻止所选端切换。
+两端都选时，同一数据库只激活一次，不同本地数据库分别执行并汇总结果。
+两端若共用数据库，单端切换也可能影响另一端后续读取的登录；切换弹窗会说明。
+写入通过指定数据库的短期原生服务执行，避免默认后台服务连接到另一份数据库。
+服务仅监听回环地址，使用随机密码，授权等待期间保留，结束或退出应用时清理。
+不直接修改凭据数据库，也不扩展到 WSL、SSH 或远程服务。
+原生 API 的 `data` 返回包装在后端统一解析，激活后回读目标库确认工作区。
 CLI 调用使用参数数组、有界输出和超时，不执行拼接的 shell 命令。
 原生接口返回的完整凭据只在后端内存中过滤，不进入前端、审计日志或归档。
 

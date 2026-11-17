@@ -59,11 +59,15 @@ fn gpt_6_usage_keeps_family_cache_and_fast_prices() {
         ("cursor-gpt-6-luna-max", "gpt-6-luna", 0.0185),
         ("gpt-6-1-sol-xhigh", "gpt-6.1-sol", 0.36),
         ("gpt-6-1-terra-xhigh", "gpt-6.1-terra", 0.18),
+        ("gpt-6.2-astra-high", "gpt-6.2-astra", 1.44),
+        ("cursor-gpt-6-2-sol-thinking-xhigh", "gpt-6.2-sol", 0.36),
         ("gpt-6-rosalind", "gpt-6-rosalind", 2.775),
         ("gpt-6-sol-high-fast", "gpt-6-sol-fast", 0.74),
         ("gpt-6-luna-max-fast", "gpt-6-luna-fast", 0.037),
         ("gpt-6_1-sol-high-fast", "gpt-6.1-sol-fast", 0.72),
         ("cursor-gpt-6_1-terra-high-fast", "gpt-6.1-terra-fast", 0.36),
+        ("cursor-gpt-6_2-astra-xhigh-fast", "gpt-6.2-astra-fast", 2.88),
+        ("gpt-6.2-sol-high-fast", "gpt-6.2-sol-fast", 0.72),
     ] {
         let usage = TokenRow {
             output: 10_000.0,

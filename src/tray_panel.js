@@ -1,4 +1,6 @@
 import { getAccountGroupOrder } from "./account_order.js";
+import { refreshByProvider } from "./account_refresh.js";
+import { switchLocalClients } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
 import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
@@ -69,6 +71,7 @@ let deletedRevision = 0;
 let codexViewRevision = 0;
 let deletedListSeq = 0;
 let refreshing = false;
+const batchRefreshingProviders = new Set();
 let switching = false;
 let overviewLoading = false;
 const refreshingIds = new Set(); // 本面板发起、进行中的单账户刷新
@@ -417,14 +420,14 @@ function accountRow(account) {
   const actions = document.createElement("div");
   actions.className = "tray-actions";
   const refreshBusy = isRefreshing(account.id);
-  const rowBusy = refreshing || switching || refreshBusy;
+  const rowBusy = batchRefreshingProviders.has(account.kind) || switching || refreshBusy;
 
   const refreshBtn = iconAction("refresh", refreshBusy ? "刷新中…" : "刷新");
   refreshBtn.classList.toggle("busy", refreshBusy);
   refreshBtn.disabled = rowBusy;
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
 
-  // 仅已验证有效的账户可切换（Codex / Claude 还需 Refresh Token 换新凭据）；确认在弹窗内进行
+  // Claude Desktop 的独立登录由后端校验；CLI 失败不阻止已绑定的 Desktop。
   const aliveOk = alive === true;
   const switchBtn = iconAction("switch", "切换");
   if (account.kind === "opencode") {
@@ -432,14 +435,13 @@ function accountRow(account) {
     switchBtn.title = "切换 OpenCode V2 客户端";
   } else if (account.kind === "codex" || account.kind === "claude") {
     const hasRt = !!String(account.refreshToken || "").trim();
-    switchBtn.disabled = rowBusy || !aliveOk || !hasRt;
-    switchBtn.title = !aliveOk
+    const isClaude = account.kind === "claude";
+    switchBtn.disabled = rowBusy || (!isClaude && (!aliveOk || !hasRt));
+    switchBtn.title = isClaude ? "切换本机 Claude CLI / Desktop 账户" : !aliveOk
       ? "请先刷新验证该账户"
       : !hasRt
       ? "该账户没有 Refresh Token，无法切换"
-      : account.kind === "claude"
-      ? "切换本机 Claude Code 登录（会关闭正在运行的 Claude Desktop）"
-      : "切换本机 ChatGPT 登录（会关闭正在运行的 ChatGPT）";
+      : "切换本机 GPT / Codex 账户";
     switchBtn.setAttribute("aria-label", switchBtn.title);
   } else {
     switchBtn.disabled = rowBusy || !aliveOk;
@@ -524,8 +526,8 @@ async function load({ viewing = true } = {}) {
 }
 
 async function refreshOne(id) {
-  if (refreshing || switching || isRefreshing(id)) return false;
-  if (!accounts.some((a) => a.id === id)) return false;
+  const account = accounts.find(a => a.id === id);
+  if (!account || switching || batchRefreshingProviders.has(account.kind) || isRefreshing(id)) return false;
   refreshingIds.add(id);
   render();
   try {
@@ -550,22 +552,23 @@ async function refreshAll() {
   render();
   void syncCodexUsage("manual");
   const overview = trayTab === "overview" ? loadOverview({ force: true, synchronize: false }) : Promise.resolve();
-  // 排队逐个刷新（每次一个）；id 先快照，刷新期间列表可能被广播更新。
-  // 顺序与主窗口一致：按类型分组（Cursor → ChatGPT → Claude）、组内按套餐排序，不在类型间来回跳
-  const ids = getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
-  let failed = 0;
+  // 供应商之间并行，组内顺序与主窗口一致；只快照身份，后端出队后读取最新凭据。
+  const batch = getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map(({ id, kind }) => ({ id, kind })));
   try {
-    for (let i = 0; i < ids.length; i += 1) {
-      setStatus("", `正在刷新账户 ${i + 1}/${ids.length}…`);
-      try {
-        await invoke("account_refresh", { id: ids[i] });
-      } catch {
-        failed += 1;
-      }
-    }
+    setStatus("", `正在刷新账户 0/${batch.length}…`);
+    const failures = await refreshByProvider(batch, async id => {
+      if (!accounts.some(account => account.id === id) || isRefreshing(id)) return;
+      refreshingIds.add(id);
+      render();
+      try { await invoke("account_refresh", { id }); }
+      finally { refreshingIds.delete(id); render(); }
+    }, (completed, total) => setStatus("", `正在刷新账户 ${completed}/${total}…`), (kind, active) => {
+      if (active) batchRefreshingProviders.add(kind); else batchRefreshingProviders.delete(kind);
+      render();
+    });
     await overview;
     await load({ viewing: false });
-    if (failed > 0) setStatus("bad", `刷新完成，${failed} 个账户失败。`);
+    if (failures.length > 0) setStatus("bad", `刷新完成，${failures.length} 个账户失败。`);
     else setStatus("ok", "已刷新账户与用量。");
   } finally {
     refreshing = false;
@@ -1737,89 +1740,8 @@ async function doSwitch(id) {
   render();
   const account = accounts.find((a) => a.id === id);
   try {
-    if (account && account.kind === "codex") {
-      trayModal.openBusy("切换本机 ChatGPT 登录", "正在检测本地 ChatGPT…");
-      const st = await invoke("codex_client_status");
-      if (!st.exeConfigured) {
-        trayModal.finish(false, "未找到 ChatGPT，请到主窗口设置。");
-        return;
-      }
-      const agreed = await trayModal.toConfirm(st.running
-        ? { body: "ChatGPT 正在运行，切换将先关闭它，未保存内容可能丢失。确定继续？", confirmText: "关闭并切换", danger: true }
-        : { body: "将把该账户写入本机 ChatGPT 登录并启动 ChatGPT。确定继续？", confirmText: "切换" });
-      if (!agreed) {
-        trayModal.close();
-        return;
-      }
-      trayModal.toSteps(st.running
-        ? ["关闭 ChatGPT", "写入登录凭证", "启动 ChatGPT"]
-        : ["写入登录凭证", "启动 ChatGPT"]);
-      if (st.running) {
-        trayModal.stepStart();
-        const c = await invoke("codex_client_close");
-        if (!c.closed) {
-          trayModal.stepFail();
-          trayModal.finish(false, "未能完全关闭 ChatGPT，请手动关闭后重试。");
-          return;
-        }
-        trayModal.stepDone();
-      }
-      trayModal.stepStart();
-      const sw = await invoke("codex_switch_local", { id });
-      // 体现本次是换了新凭据还是直接写入保存的副本
-      const how = typeof (sw && sw.exchanged) === "boolean"
-        ? (sw.exchanged ? "已换取新凭据" : "直接写入保存的副本，未换票")
-        : "";
-      trayModal.stepDone(how);
-      await load();
-      trayModal.stepStart();
-      const l = await invoke("codex_client_launch");
-      trayModal.stepDone();
-      const note = how ? `（${how}）` : "";
-      trayModal.finish(true, l.launched ? `已切换账户并启动 ChatGPT${note}。` : `已切换${note}，请手动启动 ChatGPT。`);
-      return;
-    }
-    if (account && account.kind === "claude") {
-      // 写入的是 Claude Code 凭据；Claude Desktop 仅联动关闭 / 启动，未安装也可切
-      trayModal.openBusy("切换本机 Claude Code 登录", "正在检测本地 Claude Desktop…");
-      const st = await invoke("claude_client_status");
-      const hasDesktop = !!st.exeConfigured;
-      const agreed = await trayModal.toConfirm(st.running
-        ? { body: "Claude Desktop 正在运行，切换将先关闭它，未保存内容可能丢失。确定继续？", confirmText: "关闭并切换", danger: true }
-        : hasDesktop
-        ? { body: "将把该账户写入本机 Claude Code 登录并启动 Claude Desktop。确定继续？", confirmText: "切换" }
-        : { body: "将把该账户写入本机 Claude Code 登录（未检测到 Claude Desktop，跳过启动）。确定继续？", confirmText: "切换" });
-      if (!agreed) {
-        trayModal.close();
-        return;
-      }
-      const steps = [];
-      if (st.running) steps.push("关闭 Claude Desktop");
-      steps.push("换取登录凭证并写入");
-      if (hasDesktop) steps.push("启动 Claude Desktop");
-      trayModal.toSteps(steps);
-      if (st.running) {
-        trayModal.stepStart();
-        const c = await invoke("claude_client_close");
-        if (!c.closed) {
-          trayModal.stepFail();
-          trayModal.finish(false, "未能完全关闭 Claude Desktop，请手动关闭后重试。");
-          return;
-        }
-        trayModal.stepDone();
-      }
-      trayModal.stepStart();
-      await invoke("claude_switch_local", { id });
-      trayModal.stepDone();
-      await load();
-      if (hasDesktop) {
-        trayModal.stepStart();
-        const l = await invoke("claude_client_launch");
-        trayModal.stepDone();
-        trayModal.finish(true, l.launched ? "已切换账户并启动 Claude Desktop。" : "已切换，请手动启动 Claude Desktop。");
-      } else {
-        trayModal.finish(true, "已切换本机 Claude Code 登录。");
-      }
+    if (account && ["codex", "claude"].includes(account.kind)) {
+      await switchLocalClients(account, load);
       return;
     }
     trayModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");

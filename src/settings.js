@@ -388,7 +388,7 @@ function onBackupPasswordOk() {
 //（它们走一键探测，Cursor 走下面的逐个扫描）
 const CLIENT_PATHS = [
   { input: "#opencode-exe-path", get: "opencode_client_get", set: "opencode_client_set", invalid: "opencode_exe_invalid",
-    status: statusBox("#opencode-path-status"), name: "OpenCode V2 CLI", detectBtn: "#opencode-detect", detect: "opencode_client_detect", dbInput: "#opencode-db-path" },
+    status: statusBox("#opencode-path-status"), name: "OpenCode V2 CLI", detectBtn: "#opencode-detect", detect: "opencode_client_detect", dbInput: "#opencode-db-path", extraPaths: { desktopExePath: "#opencode-desktop-exe-path", desktopDbPath: "#opencode-desktop-db-path" } },
   {
     input: "#cursor-exe-path",
     get: "cursor_client_get",
@@ -398,6 +398,7 @@ const CLIENT_PATHS = [
   },
   {
     input: "#codex-exe-path",
+    extraPaths: { cliExePath: "#codex-cli-exe-path" },
     get: "codex_client_get",
     set: "codex_client_set",
     invalid: "codex_exe_invalid",
@@ -408,6 +409,7 @@ const CLIENT_PATHS = [
   },
   {
     input: "#claude-exe-path",
+    extraPaths: { cliExePath: "#claude-cli-exe-path", desktopDataPath: "#claude-desktop-data-path" },
     get: "claude_client_get",
     set: "claude_client_set",
     invalid: "claude_exe_invalid",
@@ -425,6 +427,7 @@ async function loadClientPaths() {
       const v = await invoke(c.get);
       el(c.input).value = (v && v.exePath) || "";
       if (c.dbInput) el(c.dbInput).value = v?.dbPath || "";
+      for (const [key, input] of Object.entries(c.extraPaths || {})) el(input).value = v?.[key] || "";
     } catch {
       // 浏览器直开等非 Tauri 环境静默
     }
@@ -438,9 +441,13 @@ async function onDetect(c) {
   c.status.set("", `正在搜索本机 ${c.name}…`);
   try {
     const r = await invoke(c.detect);
-    if (r && r.exePath) {
-      el(c.input).value = r.exePath;
-      c.status.set("ok", `已填入：${r.exePath}。点「完成」保存。`);
+    const found = [];
+    if (r?.exePath) { el(c.input).value = r.exePath; found.push(r.exePath); }
+    for (const [key, input] of Object.entries(c.extraPaths || {})) {
+      if (r?.[key]) { el(input).value = r[key]; found.push(r[key]); }
+    }
+    if (found.length) {
+      c.status.set("ok", `已找到 ${found.length} 个客户端路径。点「完成」保存。`);
     } else {
       c.status.set("warn", `未找到 ${c.name}，请手动填写完整路径。`);
     }
@@ -542,7 +549,8 @@ async function onDone() {
     if (scanning) void onScanCancel();
     for (const c of CLIENT_PATHS) {
       try {
-        await invoke(c.set, { exePath: el(c.input).value.trim(), ...(c.dbInput ? { dbPath: el(c.dbInput).value.trim() } : {}) });
+        await invoke(c.set, { exePath: el(c.input).value.trim(), ...(c.dbInput ? { dbPath: el(c.dbInput).value.trim() } : {}),
+          ...Object.fromEntries(Object.entries(c.extraPaths || {}).map(([key, input]) => [key, el(input).value.trim()])) });
         if (!operation.current()) return;
       } catch (error) {
         if (!operation.current()) return;

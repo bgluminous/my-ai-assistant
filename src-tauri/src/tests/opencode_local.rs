@@ -7,73 +7,14 @@ pub(crate) fn native_fixture_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 #[tokio::test]
-async fn client_config_writes_guard_native_start_pending_cancel_retry_and_persistence() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+async fn client_configuration_holds_the_native_guard_during_persistence() {
     let _fixture = native_fixture_lock().lock().await;
-    let mut writes = 0;
-    // 授权尚未登记 attempt，但原生操作已开始时也必须拒绝换路径。
-    let starting = native_lock().lock().await;
-    assert_eq!(with_client_config_update(|| { writes += 1; Ok(()) }).unwrap_err(), "opencode_client_auth_pending");
-    assert_eq!(opencode_client_set("invalid-fixture-path".into(), None).unwrap_err(), "opencode_client_auth_pending");
-    assert_eq!(writes, 0);
-    drop(starting);
-
-    with_client_config_update(|| {
-        assert!(native_lock().try_lock().is_err(), "persistence must hold the native lock");
-        writes += 1;
-        Ok(())
-    }).unwrap();
-    assert_eq!(writes, 1);
+    let guard=native_lock().lock().await;
+    assert!(with_client_config_update(||Ok(())).is_err());
+    drop(guard);
+    with_client_config_update(|| { assert!(native_lock().try_lock().is_err()); Ok(()) }).unwrap();
+    assert!(with_client_config_update(||Err::<(),_>("failed".into())).is_err());
     assert!(native_lock().try_lock().is_ok());
-    assert!(with_client_config_update(|| Err::<(), _>("fixture-write-failed".into())).is_err());
-    assert!(native_lock().try_lock().is_ok(), "a failed write must release the guard");
-
-    struct Cleanup;
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            set_runner(None);
-            attempts().lock().unwrap().remove("attempt_path_guard");
-        }
-    }
-    let _cleanup = Cleanup;
-    attempts().lock().unwrap().insert("attempt_path_guard".into(), NativeAttempt {
-        workspace: "wrk_guard".into(), previous: None,
-        deadline: chrono::Utc::now().timestamp_millis() + 60_000,
-    });
-    let cancels = std::sync::Arc::new(AtomicUsize::new(0));
-    let calls = cancels.clone();
-    set_runner(Some(std::sync::Arc::new(move |args| {
-        assert!(args.contains(&"delete"));
-        assert!(args.contains(&"/api/integration/opencode/connect/oauth/attempt_path_guard"));
-        if calls.fetch_add(1, Ordering::SeqCst) == 0 { return Err("opencode_cli_failed".into()); }
-        Ok(json!({"status":"cancelled"}).to_string())
-    })));
-    let mut paths = OpenCodeClientConfig { exe_path: "original-cli".into(), db_path: "original-db".into() };
-    // 与备份共用的写入边界：待完成和取消失败时都不能执行任何设置/账户合并。
-    for cancel_failed in [false, true] {
-        if cancel_failed {
-            assert_eq!(opencode_client_oauth_poll("attempt_path_guard".into(), true).await.unwrap_err(), "opencode_cli_failed");
-        }
-        assert_eq!(with_client_config_update(|| {
-            writes += 1;
-            paths.exe_path = "backup-cli".into();
-            paths.db_path = "backup-db".into();
-            Ok(())
-        }).unwrap_err(), "opencode_client_auth_pending");
-        assert_eq!(opencode_client_set("invalid-fixture-path".into(), None).unwrap_err(), "opencode_client_auth_pending");
-        assert_eq!(writes, 1);
-        assert_eq!(paths.exe_path, "original-cli");
-        assert_eq!(paths.db_path, "original-db");
-        assert!(attempts().lock().unwrap().contains_key("attempt_path_guard"));
-    }
-    assert_eq!(opencode_client_oauth_poll("attempt_path_guard".into(), true).await.unwrap()["state"], "cancelled");
-    assert_eq!(cancels.load(Ordering::SeqCst), 2);
-    with_client_config_update(|| {
-        paths.exe_path = "backup-cli".into(); paths.db_path = "backup-db".into();
-        Ok(())
-    }).unwrap();
-    assert_eq!(paths.exe_path, "backup-cli");
-    assert_eq!(paths.db_path, "backup-db");
 }
 #[test]
 fn import_exposes_only_identity_and_rejects_foreign_or_key_credentials() {
@@ -99,6 +40,25 @@ fn old_settings_default_to_auto_detection() {
     let c: OpenCodeClientConfig = serde_json::from_str("{}").unwrap();
     assert!(c.exe_path.is_empty());
     assert!(c.db_path.is_empty());
+    assert!(c.desktop_exe_path.is_empty());
+    assert!(c.desktop_db_path.is_empty());
+}
+
+#[test]
+fn independent_databases_import_distinct_workspaces_without_duplicate_logins() {
+    let root=tempfile::tempdir().unwrap();
+    let files=[root.path().join("cli.db"),root.path().join("desktop.db")];
+    for (index,path) in files.iter().enumerate() {
+        let db=Connection::open(path).unwrap();
+        db.execute_batch("CREATE TABLE credential(id TEXT, integration_id TEXT, value TEXT, active INTEGER, time_updated INTEGER)").unwrap();
+        for workspace in ["wrk_shared",if index==0 {"wrk_cli"} else {"wrk_desktop"}] {
+            let value=json!({"type":"oauth","metadata":{"server":opencode::SERVER,"orgID":workspace}}).to_string();
+            db.execute("INSERT INTO credential VALUES(?1,'opencode',?2,1,1)",rusqlite::params![workspace,value]).unwrap();
+        }
+    }
+    let identities=read_identity_databases(&files).unwrap();
+    assert_eq!(identities.len(),3);
+    assert!(identities.iter().any(|i|i.workspace_id=="wrk_desktop"));
 }
 
 pub(crate) type Runner = std::sync::Arc<dyn Fn(&[&str]) -> Result<String, String> + Send + Sync>;
@@ -113,3 +73,10 @@ pub(crate) fn run_fixture(args: &[&str]) -> Option<Result<String, String>> {
     let f = runner().lock().unwrap().clone()?;
     Some(f(args))
 }
+
+fn launch_result() -> &'static Mutex<Option<bool>> {
+    static RESULT: OnceLock<Mutex<Option<bool>>>=OnceLock::new();
+    RESULT.get_or_init(||Mutex::new(None))
+}
+pub(crate) fn set_launch_fixture(value: Option<bool>) { *launch_result().lock().unwrap()=value; }
+pub(crate) fn launch_fixture() -> Option<bool> { *launch_result().lock().unwrap() }

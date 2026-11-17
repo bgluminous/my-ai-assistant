@@ -8,6 +8,7 @@ import { parseHTML } from "linkedom";
 
 const orderSource = await readFile(new URL("../src/account_order.js", import.meta.url), "utf8");
 const oauthSource = await readFile(new URL("../src/opencode_ui.js", import.meta.url), "utf8");
+const linkedSource = await readFile(new URL("../src/linked_client_ui.js", import.meta.url), "utf8");
 const accountSource = await readFile(new URL("../src/accounts.js", import.meta.url), "utf8")
   + "\nexport { accountRow, rowErrors, openModal, onSave, applyView, switchModal, closeModal };";
 const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
@@ -61,7 +62,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {} } =
   const calls = [];
   window.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
   const modules = new Map();
-  for (const name of ["shared", "modal", "account_format", "account_order", "account_refresh", "opencode_ui"]) {
+  for (const name of ["shared", "modal", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
     modules.set(`./${name}.js`, new vm.SourceTextModule(
       await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8"), { context }));
   }
@@ -181,8 +182,9 @@ test("failed OpenCode cancellation retries the same attempt and ignores an in-fl
   for (const native of [false, true]) {
     const poll = deferred(); let cancels = 0, completed = 0;
     const f = await fixture(oauthSource, { invoke: (cmd, args) => {
-      if (cmd === (native ? "opencode_switch_local" : "opencode_oauth_start")) {
-        return { id: "attempt_retry", url: "https://example.invalid/device", interval: 3 };
+      if (cmd === "local_clients_status") return { cli: { installed: true }, desktop: { installed: false } };
+      if (cmd === (native ? "local_clients_switch" : "opencode_oauth_start")) {
+        return { state: "pending", id: "attempt_retry", url: "https://example.invalid/device", interval: 3 };
       }
       const cancel = native ? cmd === "opencode_client_oauth_poll" && args.cancel : cmd === "opencode_oauth_cancel";
       if (cancel) {
@@ -192,8 +194,10 @@ test("failed OpenCode cancellation retries the same attempt and ignores an in-fl
       }
       return poll.promise;
     } });
-    if (native) await f.api.switchOpenCode("account", () => completed++);
-    else await f.api.authorizeOpenCode(null, () => completed++);
+    if (native) {
+      void f.api.switchOpenCode("account", () => completed++);
+      await tick(); await f.button("仅 CLI").onclick();
+    } else await f.api.authorizeOpenCode(null, () => completed++);
     const root = f.document.querySelector("dialog"), cancel = root.querySelector(".modal-foot button");
     const polling = [...f.timers.values()][0]();
     f.event(cancel, "click"); await tick();
@@ -207,6 +211,31 @@ test("failed OpenCode cancellation retries the same attempt and ignores an in-fl
     assert.equal(completed, 0);
     assert.equal(f.timers.size, 0);
   }
+});
+
+test("native OpenCode authorization retries a failed poll and settles an expired attempt", async () => {
+  let polls = 0;
+  const f = await fixture(linkedSource, { invoke: (cmd, args) => {
+    if (cmd === "local_clients_status") return { cli: { installed: true }, desktop: { installed: false } };
+    if (cmd === "local_clients_switch") return { state: "pending", id: "retry", url: "https://example.invalid/device" };
+    assert.equal(cmd, "opencode_client_oauth_poll");
+    assert.equal(args.id, "retry");
+    assert.equal(args.cancel, false);
+    throw ++polls === 1 ? "opencode_cli_failed" : "opencode_oauth_expired";
+  } });
+  const switching = f.api.switchLocalClients({ id: "test", kind: "opencode" });
+  await tick();
+  await f.button("仅 CLI").onclick();
+  f.advance(3000);
+  await tick();
+  assert.equal(polls, 1);
+  assert.equal(f.timers.size, 1);
+  f.advance(3000);
+  await tick();
+  assert.equal(polls, 2);
+  assert.equal(f.timers.size, 0);
+  assert.match(f.document.querySelector("dialog .status").textContent, /授权已取消或超时/);
+  assert.equal(await switching, false);
 });
 
 test("backup partial restore reports applied data, retains preference updates, and allows retry", async () => {
@@ -268,7 +297,10 @@ test("editing OpenCode notes retries a failed save without losing the draft", as
     if (++attempts === 1) throw new Error("write failed");
     return {};
   } });
-  f.api.editOpenCode({ id: "a", token: "wrk_a", note: "old", opencodeAuthorized: true, refreshIntervalMinutes: 15 }, () => completed++);
+  f.api.editOpenCode({ id: "a", token: "wrk_a", note: "old", opencodeAuthorized: true, refreshIntervalMinutes: 15, autoRefreshToken: false }, () => completed++);
+  const renewal = f.document.querySelector('dialog input[role="switch"]');
+  assert.equal(renewal.checked, false);
+  renewal.checked = true;
   assert.equal(f.document.querySelector("dialog select").value, "15");
   f.document.querySelector("dialog select").value = "5";
   assert.equal(f.document.querySelector("dialog .status").hidden, true);
@@ -283,6 +315,9 @@ test("editing OpenCode notes retries a failed save without losing the draft", as
   await f.button("保存").onclick();
   assert.equal(f.calls[1].args.note, "new"); assert.equal(completed, 1);
   assert.equal(f.calls[1].args.refreshIntervalMinutes, 5);
+  assert.equal(renewal.checked, true);
+  assert.equal(f.calls[1].args.autoRefreshToken, true);
+  assert.equal(f.calls[1].args.updateCredentials, false);
 });
 
 test("saving an automatic OpenCode note keeps the email fallback automatic", async () => {
@@ -320,6 +355,44 @@ test("account editors save inherited, disabled and custom refresh intervals with
     f.api.openModal(null, kind);
     assert.equal(f.document.querySelector("#account-interval-field").hidden, true);
   }
+});
+
+test("renewal editors preserve failed drafts and never resubmit credentials changed in the background", async () => {
+  for (const kind of ["codex", "claude"]) {
+    let current = { id: kind, kind, note: "fixture", token: "old-access", refreshToken: "old-refresh" };
+    let fail = true;
+    const f = await fixture(accountSource, { invoke: async (cmd, args) => {
+      assert.equal(cmd, "accounts_update");
+      if (fail) throw new Error("disk full");
+      current = { ...current, autoRefreshToken: args.autoRefreshToken };
+      return { accounts: [current], intervalMinutes: 0 };
+    } });
+    f.api.applyView({ accounts: [current], intervalMinutes: 0 });
+    f.api.openModal(current);
+    const toggle = f.document.querySelector("#account-auto-refresh-token");
+    assert.equal(f.document.querySelector("#account-auto-refresh-field").hidden, false);
+    assert.equal(toggle.checked, true);
+    toggle.checked = false;
+    current = { ...current, token: "renewed-access", refreshToken: "renewed-refresh" };
+    f.api.applyView({ accounts: [current], intervalMinutes: 0 });
+    await f.api.onSave();
+    assert.equal(toggle.checked, false);
+    assert.equal(f.document.querySelector("#account-modal").hidden, false);
+    assert.equal(f.calls.at(-1).args.updateCredentials, false);
+    fail = false; await f.api.onSave();
+    assert.equal(f.calls.at(-1).args.autoRefreshToken, false);
+    f.api.openModal(current);
+    assert.equal(toggle.checked, false);
+    assert.equal(f.document.querySelector("#account-token").value, "renewed-access");
+    f.document.querySelector("#account-refresh-token").value = "manual-refresh";
+    await f.api.onSave();
+    assert.equal(f.calls.at(-1).args.updateCredentials, true);
+    f.api.openModal(null, kind);
+    assert.equal(f.document.querySelector("#account-auto-refresh-field").hidden, true);
+  }
+  const f = await fixture(accountSource);
+  f.api.openModal({ id: "cursor", kind: "cursor", token: "fixture" });
+  assert.equal(f.document.querySelector("#account-auto-refresh-field").hidden, true);
 });
 
 test("all account kinds show failures only in the tooltip and keep their cached row content", async () => {
@@ -604,3 +677,248 @@ for (const name of ["pricing", "proxy", "settings"]) {
     assert.equal(root.hidden, true);
   });
 }
+
+
+test("each installed endpoint has a direct switch button and opening the dialog does not switch", async () => {
+  for (const [cli, desktop] of [[true, false], [false, true], [true, true]]) {
+    const f = await fixture(linkedSource, { invoke: (cmd, args) => {
+      if (cmd === "local_clients_status") return { cli: { installed: cli }, desktop: { installed: desktop, running: desktop } };
+      if (cmd === "local_clients_switch") {
+        assert.equal(args.closeDesktop, desktop);
+        assert.equal(args.target, cli && desktop ? "both" : cli ? "cli" : "desktop");
+        return { state: "complete", switched: true, clients: [cli && { target: "cli", status: "success" }, desktop && { target: "desktop", status: "success" }].filter(Boolean) };
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    } });
+    const task = f.api.switchLocalClients({ id: "fixture", kind: "codex" });
+    await tick();
+    const root = f.document.querySelector("dialog");
+    const buttons = [...root.querySelectorAll(".modal-foot button")].filter(button => !button.hidden);
+    assert.deepEqual(buttons.map(button => button.textContent), ["仅 CLI", "仅 Desktop", "两端一起"]);
+    assert.deepEqual(buttons.map(button => button.disabled), [!cli, !desktop, !(cli && desktop)]);
+    assert.equal(root.querySelector('input[type="radio"]'), null);
+    assert.equal(f.calls.some(call => call.cmd === "local_clients_switch"), false);
+    if (cli) assert.match(root.textContent, /运行中的 CLI 会话保留/);
+    if (desktop) assert.match(root.textContent, /关闭并重启.*保存工作/);
+    f.event(f.button(cli && desktop ? "两端一起" : cli ? "仅 CLI" : "仅 Desktop"), "click");
+    assert.equal(await task, true);
+    assert.equal(f.calls.filter(c => c.cmd === "local_clients_switch").length, 1);
+    assert.equal(f.calls.some(c => /_client_(close|launch)$/.test(c.cmd)), false);
+    assert.equal(root.querySelector(".status").classList.contains("ok"), true);
+  }
+});
+
+test("a Desktop failure remains partial and duplicate switch clicks share one operation", async () => {
+  let completed = 0;
+  const f = await fixture(linkedSource, { invoke: cmd => cmd === "local_clients_status"
+    ? { cli: { installed: true }, desktop: { installed: true } }
+    : { state: "complete", switched: false, clients: [{ target: "cli", status: "success" }, { target: "desktop", status: "failed", error: "client_launch_failed" }] } });
+  const task = f.api.switchLocalClients({ id: "fixture", kind: "codex" }, () => completed++);
+  assert.equal(f.api.switchLocalClients({ id: "fixture", kind: "codex" }), task);
+  assert.equal(f.document.querySelectorAll("dialog").length, 1);
+  await tick(); await f.button("两端一起").onclick();
+  assert.equal(await task, false); assert.equal(completed, 1);
+  const status = f.document.querySelector("dialog .status");
+  assert.equal(status.classList.contains("bad"), true);
+  assert.match(f.document.querySelector(".opencode-content").textContent, /CLI：切换成功/);
+  assert.match(f.document.querySelector(".opencode-content").textContent, /Desktop：.*启动失败/);
+  assert.equal(f.document.querySelectorAll('.client-endpoint-result[data-result="success"]').length, 1);
+});
+
+test("cancelling first Desktop binding never switches the CLI", async () => {
+  const f = await fixture(linkedSource, { invoke: cmd => {
+    if (cmd === "local_clients_status") return { cli: { installed: true }, desktop: { installed: true, binding: { state: "unbound" } } };
+    if (cmd === "claude_desktop_binding_start") return { state: "pending", id: "binding" };
+    if (cmd === "claude_desktop_binding_cancel") return { state: "cancelled" };
+    throw new Error(`unexpected command: ${cmd}`);
+  } });
+  void f.api.switchLocalClients({ id: "fixture", kind: "claude" }); await tick();
+  const switching = f.button("两端一起").onclick(); await tick();
+  await f.button("开始绑定").onclick();
+  const binding = [...f.document.querySelectorAll("dialog")].at(-1);
+  f.event(binding.querySelector(".modal-foot button"), "click"); await tick(); await switching;
+  assert.equal(f.calls.some(c => c.cmd === "local_clients_switch"), false);
+  assert.equal(f.calls.filter(c => c.cmd === "claude_desktop_binding_cancel").length, 1);
+  assert.equal(f.document.querySelectorAll("dialog").length, 1);
+});
+
+test("successful Desktop binding restores its session before linked switching", async () => {
+  const order = [];
+  const f = await fixture(linkedSource, { invoke: cmd => {
+    order.push(cmd);
+    if (cmd === "local_clients_status") return { cli: { installed: true }, desktop: { installed: true, binding: { state: "unbound" } } };
+    if (cmd === "claude_desktop_binding_start") return { state: "pending", id: "binding" };
+    if (cmd === "claude_desktop_binding_finish") return { state: "complete" };
+    if (cmd === "local_clients_switch") return { state: "complete", switched: true, clients: [{ target: "cli", status: "success" }, { target: "desktop", status: "success" }] };
+    throw new Error(`unexpected command: ${cmd}`);
+  } });
+  const task = f.api.switchLocalClients({ id: "fixture", kind: "claude" }); await tick();
+  const switching = f.button("两端一起").onclick(); await tick();
+  await f.button("开始绑定").onclick(); await f.button("完成绑定").onclick(); await switching;
+  assert.equal(await task, true);
+  assert.ok(order.indexOf("claude_desktop_binding_finish") < order.indexOf("local_clients_switch"));
+  assert.equal(order.includes("claude_desktop_binding_cancel"), false);
+});
+
+test("a recovered Desktop binding is rechecked before offering a switch", async () => {
+  let recovered = false;
+  const f = await fixture(linkedSource, { invoke: cmd => {
+    if (cmd === "local_clients_status") return { cli: { installed: false }, desktop: { installed: true,
+      binding: recovered ? { state: "bound" } : { state: "pending", operationId: "interrupted", recoveryRequired: true } } };
+    if (cmd === "claude_desktop_binding_cancel") { recovered = true; return { state: "cancelled" }; }
+    throw new Error(`unexpected command: ${cmd}`);
+  } });
+  void f.api.switchLocalClients({ id: "fixture", kind: "claude" }); await tick();
+  assert.equal(f.button("两端一起").disabled, true);
+  await f.button("恢复原登录").onclick();
+  assert.equal(recovered, true); assert.equal(f.button("仅 Desktop").disabled, false);
+  assert.equal(f.calls.some(c => c.cmd === "local_clients_switch"), false);
+});
+
+test("a rejected Desktop identity can be rebound after original login recovery", async () => {
+  const f=await fixture(linkedSource,{invoke:cmd=>{
+    if(cmd==="claude_desktop_binding_start") return {state:"pending",id:"binding-one"};
+    if(cmd==="claude_desktop_binding_finish") throw "claude_desktop_account_mismatch";
+    if(cmd==="local_clients_status") return {desktop:{installed:true,binding:{state:"unbound"}}};
+    throw new Error(`unexpected command: ${cmd}`);
+  }});
+  void f.api.bindClaudeDesktop("fixture");
+  await f.button("开始绑定").onclick(); await f.button("完成绑定").onclick();
+  assert.match(f.document.querySelector("dialog .status").textContent,/账户.*不符/);
+  await f.button("重新绑定").onclick();
+  assert.equal(f.calls.filter(c=>c.cmd==="claude_desktop_binding_start").length,2);
+});
+
+test("Codex force write remains available after failure and uses the shared switch IPC", async () => {
+  let forced=0;
+  const completed = [];
+  const f=await fixture(linkedSource,{invoke:(cmd,args)=>{
+    if(cmd==="local_clients_status") return {cli:{installed:true},desktop:{installed:false}};
+    if(cmd==="local_clients_switch") {
+      assert.equal(args.target,"cli"); assert.equal(args.closeDesktop,false);
+      if(!args.force) return {state:"complete",switched:false,clients:[{target:"cli",status:"failed",error:"codex_refresh_denied:reused"}]};
+      if(++forced===1) throw "credential_write_failed";
+      return {state:"complete",switched:true,clients:[{target:"cli",status:"success"}]};
+    }
+    throw new Error(`unexpected command: ${cmd}`);
+  }});
+  const account = { id: "fixture", kind: "codex" };
+  const done = f.api.switchLocalClients(account, result => completed.push(result.switched));
+  await tick();
+  await f.button("仅 CLI").onclick();
+  assert.equal(f.api.switchLocalClients(account), done);
+  assert.deepEqual(completed, []);
+  await f.button("写入保存的凭据副本").onclick();
+  assert.match(f.document.querySelector("dialog .status").textContent,/credential_write_failed/);
+  await f.button("写入保存的凭据副本").onclick();
+  assert.equal(await done, true);
+  assert.deepEqual(completed, [true]);
+  assert.equal(forced,2);
+  assert.equal(f.document.querySelector(".client-force-write"),null);
+  assert.equal(f.calls.some(c=>/_client_(close|launch)$/.test(c.cmd)),false);
+});
+
+test("Claude Desktop switching stays reachable without a CLI refresh token", async () => {
+  const f=await fixture(accountSource);
+  const row=f.api.accountRow({id:"desktop-only",kind:"claude",token:"fixture",refreshToken:null,status:{alive:false,accountUuid:"fixture-uuid"}});
+  const button=row.querySelector('button[title="切换本机 Claude CLI / Desktop 账户"]');
+  assert.ok(button);
+  assert.equal(button.disabled,false);
+});
+
+test("a Codex retry uses the clicked Desktop target after a renewal error", async () => {
+  const f = await fixture(linkedSource, { invoke: (cmd, args) => {
+    if (cmd === "local_clients_status") return { cli: { installed: true }, desktop: { installed: true } };
+    if (!args.force) throw "codex_refresh_denied:reused";
+    return { state: "complete", switched: true, clients: [{ target: "desktop", status: "success" }] };
+  } });
+  const done = f.api.switchLocalClients({ id: "fixture", kind: "codex" });
+  await tick();
+  await f.button("仅 Desktop").onclick();
+  assert.equal(f.button("两端一起").hidden, true);
+  await f.button("两端一起").onclick();
+  await f.button("写入保存的凭据副本").onclick();
+  assert.equal(await done, true);
+  const writes = f.calls.filter(call => call.cmd === "local_clients_switch").map(call => call.args);
+  assert.deepEqual(writes.map(args => [args.target, args.closeDesktop, args.force]), [
+    ["desktop", true, null], ["desktop", true, true],
+  ]);
+});
+
+test("one button click submits exactly its own endpoints for every provider", async () => {
+  for (const kind of ["opencode", "codex", "claude"]) {
+    for (const [target, label] of Object.entries({ cli: "仅 CLI", desktop: "仅 Desktop", both: "两端一起" })) {
+      const clients = (target === "both" ? ["cli", "desktop"] : [target]).map(target => ({ target, status: "success" }));
+      const f = await fixture(linkedSource, { invoke: cmd => cmd === "local_clients_status"
+        ? { cli: { installed: true }, desktop: { installed: true, running: true, binding: { state: "bound" } } }
+        : { state: "complete", switched: true, clients } });
+      const done = f.api.switchLocalClients({ id: "fixture", kind });
+      await tick();
+      assert.ok(!f.button(label).disabled);
+      f.event(f.button(label), "click");
+      assert.equal(await done, true);
+      const writes = f.calls.filter(call => call.cmd === "local_clients_switch");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].args.target, target);
+      assert.equal(writes[0].args.closeDesktop, target !== "cli");
+      assert.equal(f.document.querySelectorAll("dialog .client-endpoint-result").length, clients.length);
+    }
+  }
+});
+
+test("CLI selection bypasses unbound, pending and broken Claude Desktop sessions", async () => {
+  for(const desktop of [
+    {installed:true,binding:{state:"unbound"}},
+    {installed:true,binding:{state:"pending",operationId:"other-window"}},
+    {installed:true,switchable:false,error:"claude_desktop_path_ambiguous"},
+  ]) {
+    const f=await fixture(linkedSource,{invoke:(cmd,args)=>{
+      if(cmd==="local_clients_status") return {cli:{installed:true},desktop};
+      assert.equal(cmd,"local_clients_switch");assert.equal(args.target,"cli");assert.equal(args.closeDesktop,false);
+      return {state:"complete",switched:true,clients:[{target:"cli",status:"success"}]};
+    }});
+    const task=f.api.switchLocalClients({id:"fixture",kind:"claude"});await tick();
+    await f.button("仅 CLI").onclick(); assert.equal(await task,true);
+    assert.equal(f.calls.some(c=>c.cmd.startsWith("claude_desktop_binding_")),false);
+  }
+});
+
+test("Desktop selection remains available when the CLI path is broken", async () => {
+  const f=await fixture(linkedSource,{invoke:(cmd,args)=>{
+    if(cmd==="local_clients_status") return {cli:{installed:false,error:"client_path_invalid"},desktop:{installed:true}};
+    assert.equal(cmd,"local_clients_switch");assert.equal(args.target,"desktop");
+    return {state:"complete",switched:true,clients:[{target:"desktop",status:"success"}]};
+  }});
+  const task=f.api.switchLocalClients({id:"fixture",kind:"opencode"});await tick();
+  assert.equal(f.button("两端一起").disabled,true);
+  await f.button("仅 Desktop").onclick();assert.equal(await task,true);
+});
+
+test("double clicks and clicks on another target cannot start a second switch", async () => {
+  const pending=deferred();
+  const f=await fixture(linkedSource,{invoke:(cmd,args)=>cmd==="local_clients_status"
+    ? {cli:{installed:true},desktop:{installed:true}}
+    : (assert.equal(args.target,"cli"),pending.promise)});
+  const task=f.api.switchLocalClients({id:"fixture",kind:"opencode"});await tick();
+  const saving=f.button("仅 CLI").onclick();
+  for (const label of ["仅 CLI", "仅 Desktop", "两端一起"]) {
+    assert.equal(f.button(label).disabled, true);
+    await f.button(label).onclick();
+  }
+  assert.equal(f.calls.filter(call => call.cmd === "local_clients_switch").length, 1);
+  pending.resolve({state:"complete",switched:true,clients:[{target:"cli",status:"success"}]});await saving;await task;
+});
+
+test("unavailable endpoints stay disabled and Escape dismisses without switching", async () => {
+  const absent=await fixture(linkedSource,{invoke:()=>({cli:{installed:false},desktop:{installed:false}})});
+  const done = absent.api.switchLocalClients({id:"fixture",kind:"opencode"});await tick();
+  for (const label of ["仅 CLI", "仅 Desktop", "两端一起"]) {
+    assert.equal(absent.button(label).disabled, true);
+    await absent.button(label).onclick();
+  }
+  absent.event(absent.document.querySelector("dialog"), "keydown", { key: "Escape" });
+  assert.equal(await done, false);
+  await tick();
+  assert.equal(absent.document.querySelector("dialog"), null);
+  assert.equal(absent.calls.some(c=>c.cmd==="local_clients_switch"),false);
+});

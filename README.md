@@ -85,8 +85,10 @@ Account management, usage overview, and the tray account panel (shown with sampl
   account or a group. Each account's edit dialog offers "Follow global", a custom interval, or
   "Off"; new and existing accounts default to following the global setting. Per-account settings
   override the global interval and can stay enabled when global refresh is off. These settings are
-  preserved in account exports and full backups. Scheduled refreshes process only due accounts, one
-  at a time in the current card and account order; failures wait a full interval before retrying.
+  preserved in account exports and full backups. Each provider has its own refresh queue: Cursor,
+  ChatGPT, Claude, and OpenCode can run in parallel, while accounts within each provider run one
+  at a time in display order. All windows share the same backend queues. A slow provider does not
+  delay another provider's next scheduled refresh; failures wait a full interval before retrying.
   The initial refresh runs 3 seconds after startup for enabled accounts. Changing an interval
   restarts its timer from the save time. A completed manual refresh or a refresh from another window
   postpones that account's next scheduled refresh. Inline refresh indicators stay synchronized
@@ -95,34 +97,59 @@ Account management, usage overview, and the tray account panel (shown with sampl
 - Reorder the four account group cards by dragging the handle to the left of each title, or focus
   the handle and use the up / down arrow keys. The order is saved locally and included in full
   backups. Accounts within each card remain sorted by plan.
-- Switch the local Cursor / ChatGPT (or Codex) client to a chosen account and launch it. Claude
-  switching writes Claude Code credentials locally: `~/.claude/.credentials.json` on Windows, or
-  Keychain on macOS. Claude Desktop is only coordinated as a client: it is closed if running and
-  launched afterward if installed. Client paths can be set manually or found in common locations.
-  Successful switch dialogs close after 3 seconds, with a button countdown and manual dismissal;
-  failure dialogs remain open until dismissed.
+- Switch the local Cursor client to a selected account and launch it.
+- In the main window or tray, click CLI only, Desktop only, or both to start switching an
+  OpenCode, GPT / Codex, or Claude account. Buttons are enabled for the available clients.
+  A button that includes Desktop closes and relaunches the app, and opens login binding if
+  Claude Desktop needs it. Results list the clients you switched.
+  Running CLI sessions are kept; new sessions use
+  the selected login, while existing sessions follow the client's own credential reload behavior.
+  Shared login storage can also affect the other endpoint when it next reads credentials; the
+  dialog explains this for GPT / Codex and OpenCode.
+  A failed endpoint restores its previous login. Endpoints sharing one credential store roll back
+  together; independent stores keep their individual results.
+- Claude Desktop requires a one-time login binding from the account editor. The official app opens
+  for sign-in when necessary; the account UUID must match before saving. Completing or cancelling
+  binding restores the previous Desktop login. A binding started while switching continues into
+  the switch afterward. Interrupted operations retain a recovery record and can be restored from
+  the editor or switch dialog. Snapshot writes preserve Desktop settings and local chat history.
+  Desktop snapshots are bound to this machine, user and profile directory and are excluded from
+  account exports and full backups. Restored accounts reuse only matching snapshots already here.
+- Configure CLI and Desktop paths separately or use automatic detection. Claude Desktop supports
+  ordinary and Store installations; ambiguous data directories require an explicit selection.
+  These operations target local Windows / macOS clients, not WSL, SSH or remote services.
 - Sign out of local Cursor / ChatGPT / Claude Code clients using "Sign out locally" in each group
-  header. Running clients are closed before local login data is cleared. Cursor login keys are
-  removed from its authentication database; ChatGPT account credentials are removed from
-  `auth.json`, preserving `OPENAI_API_KEY` if configured; Claude Code's account login section is
-  removed while other entries remain. Files are backed up before changes. Managed accounts are
-  unaffected, and clients are not restarted automatically.
+  header. Running Desktop clients are closed before local login data is cleared. Cursor login keys
+  are removed from its authentication database; ChatGPT account credentials are removed from
+  its configured authentication store, preserving `OPENAI_API_KEY` if configured; Claude Code's
+  account login section is removed while other entries remain. Files are backed up before
+  changes. Managed accounts are unaffected, and clients are not restarted automatically.
 - ChatGPT / Claude accounts can retain a `refresh_token` and renew before the access token expires.
   ChatGPT follows the Codex CLI policy: refresh the entire credential set when less than 5 minutes
   remain, or when expiry cannot be parsed and more than 8 days have passed since acquisition. A 401
   / 403 response triggers one additional attempt. Each renewal rotates the `refresh_token`, which
   has no readable expiration date. Claude renews near expiry or after a 401 / 403 response.
-- ChatGPT accounts store a complete copy of the local Codex client's `auth.json`, including
+- ChatGPT, Claude, and OpenCode account editors offer "Automatic Token renewal", enabled by default.
+  Turning it off keeps scheduled and manual status / usage queries active with the current Token,
+  but prevents automatic credential exchanges, including retries after authentication failures.
+  Active account switching, explicit credential edits, and reauthorization still use their normal
+  flows. ChatGPT can still adopt credentials already renewed by the local client. The setting is
+  preserved in account exports and full backups. A renewal sent before the setting was disabled
+  still saves its result so that rotated credentials are not lost. Saving only account settings
+  preserves the latest credentials even if they changed while the editor was open.
+- ChatGPT accounts store a complete copy of the local Codex credentials, including
   `id_token`. Renewal, switching, and local import all write the complete copy. Adding or editing
   credentials manually immediately exchanges the `refresh_token` for a full set. Synchronization is
-  bidirectional: credentials renewed by the app are written back to local `auth.json`. A background
-  check watches its modification time at the configured interval (5 minutes by default; configurable
+  bidirectional: credentials renewed by the app are written back to the configured Codex store
+  (`file`, `keyring`, or `auto`, under `CODEX_HOME`). System keyring and encrypted native secret
+  storage use the same adapter for import, switching, logout and synchronization. A background
+  check compares credential revisions at the configured interval (5 minutes by default; configurable
   from 1 minute to 1 day). When ChatGPT Desktop / Codex CLI renews credentials, saved copies for the
   same account are updated without network access, independently of scheduled refresh. Local
   credentials are checked again before refresh or switching; if renewal is rejected, the app retries
   once using local credentials for the same account. Switching writes the saved copy directly when
   it is complete and outside the renewal window; otherwise, it renews first. If the `refresh_token`
-  is invalid, the result dialog offers "Force write and launch" to write the saved copy directly.
+  is invalid, the result dialog offers "Write saved credentials" to write the saved copy directly.
 
 ### OpenCode Official Plans
 
@@ -137,7 +164,10 @@ Account management, usage overview, and the tray account panel (shown with sampl
   windows. The balance is shared across the workspace. Individual read failures are flagged and
   retain cached values.
 - Client import and switching support OpenCode V2 only. Settings allow custom CLI executable and
-  database paths. Switching uses the official credential activation API; if no matching login
+  database paths for each installed endpoint. Desktop can use its bundled CLI without a separate
+  CLI installation. Shared databases are activated once; distinct local databases are handled
+  separately through short-lived, owned native servers with explicit database paths.
+  Switching uses the official credential activation API; if no matching login
   exists, it opens the client's native authorization flow. This app and the OpenCode client hold
   separate OAuth sessions, so renewing this app's session does not overwrite client credentials.
 - Usage aggregates official model calls across the entire workspace, including all members, devices,
@@ -453,7 +483,7 @@ settings backups.
 
 ## Pricing Table
 
-- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 158 entries. The
+- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 164 entries. The
   2026-10-23 price review corrected DeepSeek Flash and added 23 entries, including Sonnet / Haiku
   5.5, GPT-5.1, GPT-4.1 Nano, Chat Latest, Gemini 4 Argon, Gemini Flash-Lite, Grok 4.7, GLM,
   MiniMax, and Mistral / Codestral.
@@ -461,6 +491,9 @@ settings backups.
   Fields are `input`, `output`, `cacheRead`, and `cacheWrite`. `cacheWrite=0` means no separate
   per-token write charge is included; it does not mean that cache storage, TTL, or other additional
   fees are all free.
+- As requested, `codex-auto-review` and `default` have zero input, output, cache read, and cache
+  write prices. They retain their Token usage and are treated as priced entries instead of being
+  marked unpriced.
 - Official pricing references:
   [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
   [OpenAI](https://developers.openai.com/api/docs/pricing),
@@ -492,6 +525,11 @@ settings backups.
 - GPT-6.1 Terra and GPT-6 Rosalind were added on 2026-11-02. Terra's input, output, cache read, and
   30-minute cache write prices per million tokens are $1, $5, $0.05, and $1.25; all four double for
   Fast. Rosalind's standard prices are $15, $75, $1.50, and $18.75. Both use short-context pricing.
+- Added GPT-6.2 Astra / Sol Standard and Fast tiers on 2026-11-18, four entries in total. Input,
+  output, cache read, and 30-minute cache write prices per million tokens are $8, $40, $0.40,
+  and $10 for Astra, and $2, $10, $0.10, and $2.50 for Sol. All four prices double for Fast.
+  These use short-context rates for inputs up to 272K; long-context surcharges, 12-hour cache
+  writes, and the separate Ultrafast tier remain excluded.
 - Added 32 entries on 2026-11-16: 23 Qwen models, Gemini 4 Carbon / Hydrogen, and seven Meta Muse
   models. Qwen covers Max / Plus / Flash / Coder and Qwen3.8 / 3.6 / 3.5 open-weight text models,
   using Singapore International USD list prices. Tiered models use inputs up to 256K, except

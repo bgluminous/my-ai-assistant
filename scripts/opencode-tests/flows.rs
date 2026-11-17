@@ -23,6 +23,7 @@ fn add(id: &str, workspace: &str) -> String {
             token: workspace.into(),
             note: String::new(),
             opencode_auth: Some(blob.clone()),
+            auto_refresh_token: true,
             status: None,
         });
         Ok(())
@@ -147,7 +148,76 @@ async fn independent_sessions_refresh_once_per_account_and_native_activation_use
     assert_eq!(settings::read(|s| s.accounts.len()).unwrap(), count);
     opencode::tests::set_transport(None);
 
+    disabled_renewal_contract().await;
     native_contract().await;
+}
+
+// 与上面的传输夹具顺序执行，不让全局测试传输被不同用例互相替换。
+async fn disabled_renewal_contract() {
+    add("renewal-disabled", "wrk_disabled");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let requests = calls.clone();
+    opencode::tests::set_transport(Some(Arc::new(move |method, path, access| {
+        requests.lock().unwrap().push((method.to_string(), path.to_string()));
+        if method == "POST" {
+            // 请求已经发出才关闭：新凭据仍必须落盘，不能丢失轮换后的 refresh token。
+            settings::mutate(|s| {
+                s.accounts.iter_mut().find(|a| a.id == "renewal-disabled").unwrap().auto_refresh_token = false;
+                Ok(())
+            }).unwrap();
+            return Ok((200, json!({"access_token":"renewed-access","refresh_token":"renewed-refresh",
+                "expires_in":3600,"org_id":"wrk_disabled"})));
+        }
+        if path == "/api/disable-during-read" {
+            settings::mutate(|s| {
+                s.accounts.iter_mut().find(|a| a.id == "renewal-disabled").unwrap().auto_refresh_token = false;
+                Ok(())
+            }).unwrap();
+        }
+        Ok((if path == "/api/ok" || access == "renewed-access" { 200 } else { 401 }, json!({})))
+    })));
+    for remaining in [3_600_000, 1000, -1000] {
+        let mut auth = credential("wrk_disabled");
+        auth.expires_at = chrono::Utc::now().timestamp_millis() + remaining;
+        let blob = auth.seal().unwrap();
+        settings::mutate(|s| {
+            let account = s.accounts.iter_mut().find(|a| a.id == "renewal-disabled").unwrap();
+            account.auto_refresh_token = false;
+            account.opencode_auth = Some(blob.clone());
+            Ok(())
+        }).unwrap();
+        calls.lock().unwrap().clear();
+        opencode::account_get(&AppHandle, "renewal-disabled", "/api/ok").await.unwrap();
+        assert_eq!(opencode::account_get(&AppHandle, "renewal-disabled", "/api/unauthorized").await.unwrap_err(), "opencode_http_401");
+        assert_eq!(*calls.lock().unwrap(), vec![("GET".to_string(), "/api/ok".to_string()),
+            ("GET".to_string(), "/api/unauthorized".to_string())]);
+        assert_eq!(accounts::account_snapshot("renewal-disabled").unwrap().opencode_auth, Some(blob));
+    }
+    let mut fresh = credential("wrk_disabled");
+    fresh.expires_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    settings::mutate(|s| {
+        let account = s.accounts.iter_mut().find(|a| a.id == "renewal-disabled").unwrap();
+        account.auto_refresh_token = true;
+        account.opencode_auth = Some(fresh.seal()?);
+        Ok(())
+    }).unwrap();
+    calls.lock().unwrap().clear();
+    assert_eq!(opencode::account_get(&AppHandle, "renewal-disabled", "/api/disable-during-read").await.unwrap_err(), "opencode_http_401");
+    assert_eq!(calls.lock().unwrap().len(), 1, "setting changed before the 401 retry must be re-read");
+    settings::mutate(|s| {
+        let account = s.accounts.iter_mut().find(|a| a.id == "renewal-disabled").unwrap();
+        account.auto_refresh_token = true;
+        account.opencode_auth = Some(credential("wrk_disabled").seal()?);
+        Ok(())
+    }).unwrap();
+    calls.lock().unwrap().clear();
+    opencode::account_get(&AppHandle, "renewal-disabled", "/api/unauthorized").await.unwrap();
+    assert_eq!(*calls.lock().unwrap(), vec![("POST".to_string(), "/auth/device/token".to_string()),
+        ("GET".to_string(), "/api/unauthorized".to_string())]);
+    let account = accounts::account_snapshot("renewal-disabled").unwrap();
+    assert!(!account.auto_refresh_token);
+    assert_eq!(opencode::account_credential(&account).unwrap().refresh, "renewed-refresh");
+    opencode::tests::set_transport(None);
 }
 
 struct TempDb(std::path::PathBuf);
@@ -251,17 +321,15 @@ async fn native_contract() {
     );
 
     add("new-native", "wrk_native_new");
-    assert_eq!(
-        opencode_local::opencode_switch_local("new-native".into())
-            .await
-            .unwrap()["state"],
-        "pending"
-    );
+    let started = opencode_local::opencode_switch_local("new-native".into()).await.unwrap();
+    assert_eq!(started["state"], "pending");
+    let mut attempt_id = started["id"].as_str().unwrap().to_string();
+    assert!(opencode_local::with_client_config_update(||Ok(())).is_err());
     assert!(opencode_local::opencode_switch_local("refresh-a".into())
         .await
         .is_err());
     assert_eq!(
-        opencode_local::opencode_client_oauth_poll("attempt_fixture".into(), false)
+        opencode_local::opencode_client_oauth_poll(attempt_id.clone(), false)
             .await
             .unwrap()["state"],
         "pending"
@@ -276,9 +344,9 @@ async fn native_contract() {
         .unwrap();
     *state.lock().unwrap() = "complete".into();
     assert_eq!(
-        opencode_local::opencode_client_oauth_poll("attempt_fixture".into(), false)
+        opencode_local::opencode_client_oauth_poll(attempt_id.clone(), false)
             .await
-            .unwrap_err(),
+            .unwrap()["clients"][0]["error"],
         "opencode_workspace_mismatch"
     );
     assert_eq!(
@@ -288,23 +356,21 @@ async fn native_contract() {
         "cred_b"
     );
     *state.lock().unwrap() = "pending".into();
-    opencode_local::opencode_switch_local("new-native".into())
-        .await
-        .unwrap();
+    let started = opencode_local::opencode_switch_local("new-native".into()).await.unwrap();
+    attempt_id = started["id"].as_str().unwrap().to_string();
     assert_eq!(
-        opencode_local::opencode_client_oauth_poll("attempt_fixture".into(), true)
+        opencode_local::opencode_client_oauth_poll(attempt_id.clone(), true)
             .await
             .unwrap()["state"],
         "cancelled"
     );
     assert!(
-        opencode_local::opencode_client_oauth_poll("attempt_fixture".into(), true)
+        opencode_local::opencode_client_oauth_poll(attempt_id.clone(), true)
             .await
             .is_ok()
     );
-    opencode_local::opencode_switch_local("new-native".into())
-        .await
-        .unwrap();
+    let started = opencode_local::opencode_switch_local("new-native".into()).await.unwrap();
+    attempt_id = started["id"].as_str().unwrap().to_string();
     db.execute(
         "INSERT INTO credential VALUES('cred_new','opencode',?1,0,3,3)",
         [native_auth("wrk_native_new")],
@@ -312,7 +378,7 @@ async fn native_contract() {
     .unwrap();
     *state.lock().unwrap() = "complete".into();
     assert_eq!(
-        opencode_local::opencode_client_oauth_poll("attempt_fixture".into(), false)
+        opencode_local::opencode_client_oauth_poll(attempt_id.clone(), false)
             .await
             .unwrap()["state"],
         "complete"

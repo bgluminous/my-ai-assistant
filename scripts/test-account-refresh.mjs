@@ -5,12 +5,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../src/account_refresh.js", import.meta.url), "utf8");
-const { createAccountRefreshScheduler } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { createAccountRefreshScheduler, refreshByProvider } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const minute = 60_000;
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
 
 function fixture(accounts, global = 0) {
   let time = 0, timerId = 0, order = accounts.map(account => account.id), blocked = false;
-  const timers = new Map(), refreshing = new Set(), calls = [], errors = [], running = [];
+  const timers = new Map(), refreshing = new Set(), blockedProviders = new Set(), calls = [], errors = [], running = [];
   const hooks = { account: async () => {}, shared: async () => {} };
   const scheduler = createAccountRefreshScheduler({
     now: () => time,
@@ -18,17 +24,18 @@ function fixture(accounts, global = 0) {
     clearTimer: id => timers.delete(id),
     getOrder: () => order,
     isBlocked: () => blocked,
+    isProviderBlocked: kind => blockedProviders.has(kind),
     isRefreshing: id => refreshing.has(id),
     refreshAccount: async id => { calls.push({ id, at: time }); await hooks.account(id); },
     refreshShared: async () => { calls.push({ id: "shared", at: time }); await hooks.shared(); },
-    onRunningChange: value => running.push(value),
+    onRunningChange: (kinds, shared) => running.push({ kinds, shared }),
     onError: error => errors.push(error),
   });
-  scheduler.update(accounts, global);
+  scheduler.update(accounts.map(account => ({ kind: "cursor", ...account })), global);
   const next = () => [...timers].sort((a, b) => a[1].at - b[1].at)[0];
   return {
-    scheduler, timers, refreshing, calls, errors, running, hooks,
-    update(list, minutes) { order = list.map(account => account.id); scheduler.update(list, minutes); },
+    scheduler, timers, refreshing, blockedProviders, calls, errors, running, hooks,
+    update(list, minutes) { order = list.map(account => account.id); scheduler.update(list.map(account => ({ kind: "cursor", ...account })), minutes); },
     block(value) { blocked = value; },
     elapse(ms) { time += ms; },
     startNext() { const [id, task] = next(); time = task.at; timers.delete(id); return task.callback(); },
@@ -124,5 +131,72 @@ test("queued accounts are rechecked and removing in-flight accounts never resurr
   resolve(); await first;
   assert.deepEqual(f.calls.map(call => call.id), ["a"]);
   assert.equal(f.timers.size, 0);
-  assert.deepEqual(f.running, [true, false]);
+  assert.deepEqual(f.running, [{ kinds: ["cursor"], shared: false }, { kinds: [], shared: false }]);
+});
+
+test("all providers run concurrently and fast providers keep their own deadlines while one is blocked", async () => {
+  const kinds = ["cursor", "codex", "claude", "opencode"];
+  const accounts = kinds.flatMap(kind => [1, 2].map(n => ({ id: `${kind}-${n}`, kind, refreshIntervalMinutes: 5 })));
+  const f = fixture(accounts, 5), slow = deferred();
+  f.hooks.account = id => id === "cursor-1" ? slow.promise : Promise.resolve();
+  const first = f.startNext();
+  await tick();
+  assert.deepEqual(f.calls.slice(0, 5).map(call => call.id), ["shared", ...kinds.map(kind => `${kind}-1`)]);
+  assert.equal(f.calls.some(call => call.id === "cursor-2"), false);
+  for (const kind of kinds.slice(1)) assert.ok(f.calls.some(call => call.id === `${kind}-2`));
+  await f.advance(5 * minute);
+  assert.equal(f.calls.filter(call => call.id === "codex-1").length, 2);
+  assert.equal(f.calls.filter(call => call.id === "shared").length, 2);
+  assert.equal(f.calls.filter(call => call.id === "cursor-1").length, 1);
+  slow.resolve(); await first;
+  assert.equal(f.calls.at(-1).id, "cursor-2");
+  assert.deepEqual(f.running.at(-1), { kinds: [], shared: false });
+});
+
+test("provider blocking and shared work never suspend unrelated queues", async () => {
+  const f = fixture([{ id: "a", kind: "cursor" }, { id: "b", kind: "codex" }], 5);
+  const shared = deferred(); f.hooks.shared = () => shared.promise;
+  f.blockedProviders.add("cursor");
+  const first = f.startNext(); await tick();
+  assert.deepEqual(f.calls.map(call => call.id), ["shared", "b"]);
+  f.blockedProviders.delete("cursor");
+  await f.advance(1000);
+  assert.equal(f.calls.at(-1).id, "a");
+  await f.advance(5 * minute);
+  assert.equal(f.calls.filter(call => call.id === "b").length, 2);
+  shared.resolve(); await first;
+});
+
+test("queued tasks recheck disabled and deleted accounts without resetting unrelated deadlines", async () => {
+  const accounts = ["a", "b", "c"].map(id => ({ id, kind: "cursor", refreshIntervalMinutes: 5 }));
+  const f = fixture(accounts), pending = deferred();
+  f.hooks.account = id => id === "a" ? pending.promise : Promise.resolve();
+  const first = f.startNext();
+  f.update([{ ...accounts[0], note: "changed" }, { ...accounts[1], refreshIntervalMinutes: 0 }], 0);
+  pending.resolve(); await first;
+  assert.deepEqual(f.calls.map(call => call.id), ["a"]);
+  await f.advance(5 * minute);
+  assert.deepEqual(f.calls.map(call => call.id), ["a", "a"]);
+  f.scheduler.dispose();
+  assert.equal(f.timers.size, 0);
+});
+
+test("batch refresh preserves group order, continues after failure and reports completed progress", async () => {
+  const slow = deferred(), calls = [], progress = [], states = [];
+  const batch = [{ id: "a", kind: "cursor" }, { id: "b", kind: "codex" },
+    { id: "c", kind: "cursor" }, { id: "d", kind: "codex" }];
+  const job = refreshByProvider(batch, async id => {
+    calls.push(id);
+    if (id === "a") await slow.promise;
+    if (id === "b") throw new Error("offline");
+  }, (done, total) => progress.push([done, total]), (kind, active) => states.push([kind, active]));
+  await tick();
+  assert.deepEqual(calls, ["a", "b", "d"]);
+  assert.deepEqual(progress, [[1, 4], [2, 4]]);
+  assert.deepEqual(states.at(-1), ["codex", false]);
+  slow.resolve();
+  const failures = await job;
+  assert.deepEqual(calls, ["a", "b", "d", "c"]);
+  assert.deepEqual(failures.map(item => item.id), ["b"]);
+  assert.deepEqual(progress, [[1, 4], [2, 4], [3, 4], [4, 4]]);
 });

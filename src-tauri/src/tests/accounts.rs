@@ -3,6 +3,61 @@
 use super::*;
 
 #[test]
+fn renewal_setting_defaults_on_and_survives_account_export_view_and_backup() {
+    for kind in ["cursor", "codex", "claude", "opencode"] {
+        let mut account: Account = serde_json::from_value(json!({
+            "id":"renewal-fixture", "kind":kind, "token":"fixture"
+        })).unwrap();
+        assert!(account.auto_refresh_token);
+        account.auto_refresh_token = false;
+        let stored = serde_json::to_value(&account).unwrap();
+        assert!(!serde_json::from_value::<Account>(stored.clone()).unwrap().auto_refresh_token);
+        let exported: AccountExportItem = serde_json::from_value(stored).unwrap();
+        assert!(!serde_json::from_value::<AccountExportItem>(serde_json::to_value(exported).unwrap())
+            .unwrap().auto_refresh_token);
+        assert_eq!(serde_json::to_value(account_view(&account)).unwrap()["autoRefreshToken"], false);
+        let mut data = crate::settings::Settings::default();
+        data.accounts.push(account);
+        let restored: crate::settings::Settings = serde_json::from_value(
+            serde_json::to_value(crate::settings::persisted_form(&data)).unwrap()
+        ).unwrap();
+        assert!(!restored.accounts[0].auto_refresh_token);
+    }
+    let legacy: AccountExportItem = serde_json::from_value(json!({"token":"fixture"})).unwrap();
+    assert!(legacy.auto_refresh_token);
+}
+
+#[tokio::test]
+async fn provider_queues_are_shared_fifo_and_independent() {
+    let queue = refresh_queue("cursor").unwrap();
+    let held = queue.lock().await;
+    assert!(refresh_queue("cursor").unwrap().try_lock().is_err());
+    for kind in ["codex", "claude", "opencode"] {
+        assert!(refresh_queue(kind).unwrap().try_lock().is_ok());
+    }
+    assert!(refresh_queue("unknown").is_err());
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let (finished, mut finishes) = tokio::sync::mpsc::unbounded_channel();
+    let mut jobs = Vec::new();
+    for index in 0..2 {
+        let started = started.clone();
+        let finished = finished.clone();
+        jobs.push(tokio::spawn(async move {
+            started.send(index).unwrap();
+            let _guard = refresh_queue("cursor").unwrap().lock().await;
+            finished.send(index).unwrap();
+        }));
+        // 当前线程 runtime：收到开始通知时，任务已在被占用的锁上挂起。
+        assert_eq!(starts.recv().await, Some(index));
+    }
+    assert!(finishes.try_recv().is_err());
+    drop(held);
+    assert_eq!(finishes.recv().await, Some(0));
+    assert_eq!(finishes.recv().await, Some(1));
+    for job in jobs { job.await.unwrap(); }
+}
+
+#[test]
 fn subscription_refresh_keeps_cached_plan_on_failure_but_online_values_win() {
     let prev = json!({ "accountId": "same", "plan": "prolite", "planActiveUntil": "2026-12-01" });
     let mut stale_jwt = json!({ "accountId": "same", "alive": true, "plan": "plus" });
@@ -28,9 +83,15 @@ fn claude_cached_metadata_respects_family_changes_and_legacy_tiers() {
     carry_subscription_profile("claude", &mut failed, Some(&prev), false);
     assert_eq!(failed["plan"], "max");
     assert_eq!(failed["rateLimitTier"], "default_claude_max_20x");
+    assert_eq!(failed["accountUuid"], "same");
     let mut same = json!({ "alive": true, "plan": "claude_max" });
     carry_subscription_profile("claude", &mut same, Some(&prev), false);
     assert_eq!(same["rateLimitTier"], "default_claude_max_20x");
+    assert_eq!(same["accountUuid"], "same");
+    let mut another = json!({ "alive": true, "accountUuid": "another" });
+    carry_subscription_profile("claude", &mut another, Some(&prev), false);
+    assert_eq!(another["accountUuid"], "another");
+    assert!(another.get("plan").is_none());
     for new_plan in ["pro", "team", "future_plan"] {
         let mut fresh = json!({ "alive": true, "plan": new_plan });
         carry_subscription_profile("claude", &mut fresh, Some(&prev), false);
