@@ -34,6 +34,7 @@ async function fixture(name, { sync, ipc, accounts = [], globalMinutes = 0, sync
     style = {}; selectedOptions = [{ textContent: "全部设备" }];
     addEventListener(type, handler) { this.handlers.set(type, handler); }
     querySelectorAll() { return []; } querySelector() { return new Node(); }
+    closest() { return null; } after() {}
     setAttribute() {} getAttribute() { return ""; } removeAttribute() {} focus() {}
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
@@ -102,7 +103,7 @@ async function fixture(name, { sync, ipc, accounts = [], globalMinutes = 0, sync
   if (name === "tray_panel") text = text.replace("/* ---------- 初始化 ---------- */", presentation + "\n/* ---------- 初始化 ---------- */");
   else text += "\n" + presentation;
   const imports = new Map();
-  for (const code of [text, sources.usage_data]) {
+  for (const code of [text, sources.usage_data, sources.account_order]) {
     for (const [, names, path] of code.matchAll(/import\s*\{([^}]+)\}\s*from\s*"([^"]+)"/g)) {
       const exports = imports.get(path) || new Set();
       for (const field of names.split(",").map(s => s.trim()).filter(Boolean)) exports.add(field.split(/\s+as\s+/)[0]);
@@ -125,7 +126,7 @@ async function fixture(name, { sync, ipc, accounts = [], globalMinutes = 0, sync
     }, { context }));
   }
   const order = new vm.SourceTextModule(sources.account_order, { context });
-  await order.link(() => { throw new Error("unexpected import"); }); await order.evaluate();
+  await order.link(path => modules.get(path)); await order.evaluate();
   modules.set("./account_order.js", order);
   const scheduler = new vm.SourceTextModule(sources.account_refresh, { context });
   await scheduler.link(() => { throw new Error("unexpected import"); }); await scheduler.evaluate();
@@ -292,8 +293,8 @@ test("merged statistics render local data before sync and merge both data notice
   assert.equal(f.calls.filter(c => c.cmd === "claude_scan_sessions").length, 1);
 });
 
-test("all Tray account tabs and overview manually sync without accounts and finish loading", async () => {
-  for (const tab of ["cursor", "codex", "claude", "overview"]) {
+test("the Tray accounts tab and overview manually sync without accounts and finish loading", async () => {
+  for (const tab of ["accounts", "overview"]) {
     const remote = deferred();
     const f = await fixture("tray_panel", { sync: () => remote.promise });
     f.api.choose(tab);

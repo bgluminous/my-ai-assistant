@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn account_order_backup_maps_new_and_existing_identities_before_local_only_accounts() {
+    let mut local: Settings = serde_json::from_value(json!({
+        "accounts":[{"id":"local-only","kind":"opencode","token":"wrk_local"},
+            {"id":"local-shared","kind":"opencode","token":"wrk_shared"}],
+        "accountOrder":["local-only","local-shared"]
+    })).unwrap();
+    let backup = json!({"accounts":[
+        {"id":"old-shared","kind":"opencode","token":"wrk_shared"},
+        {"id":"old-new","kind":"opencode","token":"wrk_new"}],
+        "accountOrder":["old-new","old-shared"]});
+    let first = merge_settings(&mut local, serde_json::from_value(backup.clone()).unwrap(), false);
+    let expected = vec![first.imported_ids[0].clone(), "local-shared".into(), "local-only".into()];
+    assert_eq!(local.account_order.as_ref(), Some(&expected));
+    let retry = merge_settings(&mut local, serde_json::from_value(backup).unwrap(), false);
+    assert!(retry.imported_ids.is_empty());
+    assert_eq!(local.account_order.as_ref(), Some(&expected));
+}
+
+#[test]
 fn opencode_failure_backup_restore_includes_paths_and_remains_idempotent() {
     let mut current: Settings = serde_json::from_value(json!({
         "opencodeClient":{"exePath":"old-cli","dbPath":"old-db"},

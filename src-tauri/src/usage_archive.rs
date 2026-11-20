@@ -902,22 +902,10 @@ pub async fn cursor_usage_deleted_set_membership(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawUsageEvent {
-    /// Cursor 接口上报的原始模型名，未做任何归一。
-    pub model: String,
-    /// 聚合展示用的归一名（与用量页明细表同口径）。
-    pub display_model: String,
-    /// 命中的价格表键；None 为未定价。
-    pub priced_as: Option<String>,
-    pub input_tokens: f64,
-    pub output_tokens: f64,
-    pub cache_read_tokens: f64,
-    pub cache_write_tokens: f64,
-    pub total_tokens: f64,
+    #[serde(flatten)]
+    pub usage: pricing::BillUsage,
     /// 官方实扣（美元）。
     pub actual_usd: f64,
-    /// 按当前价格表折算的等价费用（美元）；未定价为 None。
-    pub equivalent_usd: Option<f64>,
-    pub timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -960,23 +948,13 @@ pub async fn cursor_usage_events(
         })
         .map(|e| {
             let row = from_tuple(e);
-            let priced = pricing::price_row(&row, &table);
             RawUsageEvent {
-                display_model: crate::model_match::display_key(&table, &row.model),
-                priced_as: priced.map(|(k, _)| k.to_string()),
-                equivalent_usd: priced.map(|(_, usd)| usd),
-                total_tokens: row.input + row.output + row.cache_read + row.cache_write,
-                input_tokens: row.input,
-                output_tokens: row.output,
-                cache_read_tokens: row.cache_read,
-                cache_write_tokens: row.cache_write,
                 actual_usd: row.actual_cents / 100.0,
-                timestamp_ms: row.timestamp_ms,
-                model: row.model,
+                usage: row.into_bill_usage(&table),
             }
         })
         .collect();
-    events.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms.unwrap_or(i64::MIN)));
+    events.sort_by_key(|e| std::cmp::Reverse(e.usage.timestamp_ms.unwrap_or(i64::MIN)));
     Ok(RawUsageEvents {
         events,
         total: recorded_events(&archive, ignore_api_models).count(),

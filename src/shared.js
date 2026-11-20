@@ -37,6 +37,7 @@ const ACTION_ICONS = {
   // 人像 + 对勾：把该账户设为本机 Cursor 的登录账户
   switch:
     '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/>',
+  export: '<path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/>',
   refresh:
     '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
   edit:
@@ -165,7 +166,7 @@ export function fmtDateMs(ms) {
 }
 
 export function resetError(err) {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = typeof err?.message === "string" ? err.message : String(err);
   const openCodeErrors = {
     opencode_auth_required: "请为该工作区完成 OpenCode 独立授权。",
     opencode_oauth_invalid_response: "OpenCode 授权接口未返回有效的授权地址，请重试。",

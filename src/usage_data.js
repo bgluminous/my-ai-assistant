@@ -352,11 +352,9 @@ export function setDeletedUsageMembership(accountId, membershipType) {
  * 只读列出账户事件库在范围内的原始用量事件（不联网；在用账户与已删除账户保留的数据均可），
  * 每条附带当前价格表下的归一名、命中的价格键与等价费用。
  */
-export function fetchRawEvents(accountId, { start, end } = {}) {
-  return withTimeout(
-    invoke("cursor_usage_events", { accountId, start: start ?? null, end: end ?? null }),
-    "cursor_usage_events"
-  );
+export function fetchRawEvents(accountId, { start, end, kind = "cursor" } = {}) {
+  const command = kind === "opencode" ? "opencode_usage_events" : "cursor_usage_events";
+  return withTimeout(invoke(command, { accountId, start: start ?? null, end: end ?? null }), command);
 }
 
 /** 本窗口内广播：某账户的本地用量数据已清除，用量页据此重载受影响的视图。 */

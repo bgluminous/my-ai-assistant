@@ -82,12 +82,48 @@ CLI 与数据库路径也随全量备份恢复；旧备份缺少路径时回到�
 原生授权正在启动或尚未结束时，手动修改路径和备份导入都会被拒绝；
 请先完成或成功取消授权再重试。备份被拒绝时，不写入任何账户、设置或归档。
 
+### 查看逐笔账单
+
+在用量页选中单个 OpenCode 账户，或在「各来源账单」表中点击账单按钮。
+弹窗按模型筛选，按请求时间倒序展示。CSV 包含全部匹配记录和完整请求 ID。
+「官方记录成本」取自工作区日志，等价费用按当前价格表计算。缺失金额显示「—」，
+导出时留空。输出中的推理与缓存写入中的 1h 分项均已计入所属总数。
+
+桌面命令接受必填的本机 OpenCode 账户 ID，仅访问该账户对应的工作区归档。
+起止为可空的 Unix 毫秒，按闭区间读取，省略端点表示该端不限时间。
+
+```js
+await invoke("opencode_usage_events", { accountId: "acc-demo", start: 1000, end: 2000 })
+```
+
+返回形态如下。时间均为毫秒，`total` 是工作区归档总条数，`events` 只含范围内的记录。
+`syncedAt` 为最近完整同步水位，0 表示尚未完成首次同步。`coverageStart` 和
+`pendingSince` 分别为最早覆盖和待同步的起点，未知或无待同步时对应字段为 null。
+历史缺口按起止时间表示。请求 ID、计价键、官方成本或等价费用缺失时返回 null。
+
+```json
+{
+  "events": [{
+    "timestampMs": 1500, "requestId": "req-demo", "product": "go", "model": "example",
+    "displayModel": "example", "pricedAs": null, "inputTokens": 10, "outputTokens": 20,
+    "cacheReadTokens": 30, "cacheWriteTokens": 40, "totalTokens": 100,
+    "reasoningTokens": 5, "cacheWrite1hTokens": 12, "reportedCostUsd": 0, "equivalentUsd": null
+  }],
+  "total": 1, "syncedAt": 2000, "coverageStart": 1200,
+  "coverageGaps": [{"start": 1000, "end": 1199}], "pendingSince": null
+}
+```
+
+账户不存在、类型不符和起止倒置分别返回 `not_found`、`not_opencode_account`、
+`invalid_range`。打开失败、查询失败或记录损坏会报告归档错误。归档文件尚未建立时，
+返回空记录和零水位，弹窗提示首次同步。查看明细只读取本机现有归档。
+
 ## 成本与官方汇总核对
 
 [官方费用说明](https://opencode.ai/docs/console/api/inference)区分
 billing_source、list_cost、allowance 和 cost；推理响应的 cost 语义不能直接套给管理日志。
 已验证 Go 请求日志仍有正数 cost，归档继续保留该官方记录成本，
-不会把它或余额差值推算为钱包实扣。用量统计仅展示按官方 API 价折算的等价费用，
+不会把它或余额差值推算为钱包实扣。用量汇总和图表展示按官方 API 价折算的等价费用，
 单账户与合并视图均不展示记录成本或实扣统计。
 
 手动重同步后，取最近完整 UTC 日读取以下工作区级接口：

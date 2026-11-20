@@ -126,6 +126,40 @@ pub struct TokenRow {
     pub timestamp_ms: Option<i64>,
 }
 
+/// 明细表与 CSV 共用的逐笔 Token 和计价结果。各供应商单独提供官方金额。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillUsage {
+    pub model: String,
+    pub display_model: String,
+    pub priced_as: Option<String>,
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_read_tokens: f64,
+    pub cache_write_tokens: f64,
+    pub total_tokens: f64,
+    pub equivalent_usd: Option<f64>,
+    pub timestamp_ms: Option<i64>,
+}
+
+impl TokenRow {
+    pub fn into_bill_usage(self, table: &PricingTable) -> BillUsage {
+        let price = price_row(&self, table);
+        BillUsage {
+            display_model: crate::model_match::display_key(table, &self.model),
+            priced_as: price.map(|(key, _)| key.to_owned()),
+            equivalent_usd: price.map(|(_, usd)| usd),
+            total_tokens: self.input + self.output + self.cache_read + self.cache_write,
+            input_tokens: self.input,
+            output_tokens: self.output,
+            cache_read_tokens: self.cache_read,
+            cache_write_tokens: self.cache_write,
+            timestamp_ms: self.timestamp_ms,
+            model: self.model,
+        }
+    }
+}
+
 /// 某日某个模型的合计（供托盘「今日模型」等切片）。
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]

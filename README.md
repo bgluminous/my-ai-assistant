@@ -61,8 +61,13 @@ Account management, usage overview, and the tray account panel (shown with sampl
   extend the timeout. Clicking inside, typing, or pressing another key clears confirmation.
   Close and Cancel dismiss immediately. Closing is disabled while saving, and failed saves preserve
   the entered values. Hints follow the light or dark theme.
-- Manage Cursor, ChatGPT, Claude, and OpenCode accounts separately: add, edit, delete, and refresh.
-  Import or export JSON by account type, or import the current type from a locally signed-in client.
+- Choose "+" to add a Cursor, ChatGPT, Claude, or OpenCode account. Each account has one row
+  with its provider, quota and actions. The toolbar offers Refresh all, Import, Export all,
+  Sign out locally and Add. The add dialog also supports local client import.
+- Export all writes a single file in list order. To export one account, use the export icon on the
+  second line of its Actions column. Both exports include the latest encrypted Auth copy for each
+  included ChatGPT account. Import accepts mixed-account files and older single-provider files.
+  It skips duplicates and appends new accounts in file order.
 - When deleting a Cursor account, "Keep statistics" is enabled by default. The app performs a final
   sync and retains its usage event archive locally, along with display information such as notes,
   email, and plan, but no tokens. The overview continues to include it, marked "Deleted". If the
@@ -78,11 +83,9 @@ Account management, usage overview, and the tray account panel (shown with sampl
   reset records, including status, expiration, and acquisition / usage times when available. Used
   and expired records remain accessible when the remaining count is zero, including in the tray.
   Quota resets always show a specific time: time of day within 24 hours, a date otherwise, or
-  "Reset" once passed. Within each group, paid plans are ordered by expiration (expired first),
-  followed by plans with unknown expiration, then Free. The tray list and "Refresh all" follow the
-  same order.
+  "Reset" once passed.
 - Refresh automatically every 5 / 15 / 30 minutes or 1 / 6 / 12 / 24 hours, or manually refresh one
-  account or a group. Each account's edit dialog offers "Follow global", a custom interval, or
+  account or all accounts. Each editor offers "Follow global", a custom interval, or
   "Off"; new and existing accounts default to following the global setting. Per-account settings
   override the global interval and can stay enabled when global refresh is off. These settings are
   preserved in account exports and full backups. Each provider has its own refresh queue: Cursor,
@@ -94,9 +97,10 @@ Account management, usage overview, and the tray account panel (shown with sampl
   postpones that account's next scheduled refresh. Inline refresh indicators stay synchronized
   across windows. Shared ChatGPT / Claude logs and GPT cross-device sync continue to use the global
   interval; local credential checks retain their own setting.
-- Reorder the four account group cards by dragging the handle to the left of each title, or focus
-  the handle and use the up / down arrow keys. The order is saved locally and included in full
-  backups. Accounts within each card remain sorted by plan.
+- Drag a row by its handle or focus the handle and press an arrow key to move it up or down.
+  The main window and tray share the same order. Upgrades preserve the previous display order,
+  new accounts take the last position, and full backups restore the saved order.
+  The "+" button on the tray's Accounts tab opens the main window's add dialog.
 - Switch the local Cursor client to a selected account and launch it.
 - In the main window or tray, click CLI only, Desktop only, or both to start switching an
   OpenCode, GPT / Codex, or Claude account. Buttons are enabled for the available clients.
@@ -118,9 +122,9 @@ Account management, usage overview, and the tray account panel (shown with sampl
 - Configure CLI and Desktop paths separately or use automatic detection. Claude Desktop supports
   ordinary and Store installations; ambiguous data directories require an explicit selection.
   These operations target local Windows / macOS clients, not WSL, SSH or remote services.
-- Sign out of local Cursor / ChatGPT / Claude Code clients using "Sign out locally" in each group
-  header. Running Desktop clients are closed before local login data is cleared. Cursor login keys
-  are removed from its authentication database; ChatGPT account credentials are removed from
+- Choose "Sign out locally", select Cursor, ChatGPT or Claude, then confirm.
+  The app closes running Desktop clients before clearing local login data. Cursor login keys
+  are removed from its authentication database. ChatGPT account credentials are removed from
   its configured authentication store, preserving `OPENAI_API_KEY` if configured; Claude Code's
   account login section is removed while other entries remain. Files are backed up before
   changes. Managed accounts are unaffected, and clients are not restarted automatically.
@@ -138,9 +142,15 @@ Account management, usage overview, and the tray account panel (shown with sampl
   still saves its result so that rotated credentials are not lost. Saving only account settings
   preserves the latest credentials even if they changed while the editor was open.
 - ChatGPT accounts store a complete copy of the local Codex credentials, including
-  `id_token`. Renewal, switching, and local import all write the complete copy. Adding or editing
-  credentials manually immediately exchanges the `refresh_token` for a full set. Synchronization is
-  bidirectional: credentials renewed by the app are written back to the configured Codex store
+  `id_token`. Renewal, switching, and local import all write the complete copy. Adding an account
+  or editing its tokens directly can exchange the `refresh_token` for a full set.
+- ChatGPT account editing opens in Token mode. Choose "Full Auth" to view, edit or paste that
+  account's `auth.json`. Switching modes carries over your draft. Full Auth requires
+  `tokens.access_token` and preserves optional and custom fields as edited. Save encrypts the copy
+  and records any changes to the note or refresh settings together. Switch accounts to apply the
+  credentials to the local client. If another process updates the saved copy, the editor keeps
+  your draft. Choose "Reload Auth" to replace the credential fields with the latest copy.
+- When the app renews credentials, it writes them back to the configured Codex store
   (`file`, `keyring`, or `auto`, under `CODEX_HOME`). System keyring and encrypted native secret
   storage use the same adapter for import, switching, logout and synchronization. A background
   check compares credential revisions at the configured interval (5 minutes by default; configurable
@@ -153,7 +163,7 @@ Account management, usage overview, and the tray account panel (shown with sampl
 
 ### OpenCode Official Plans
 
-- Click "+" in the OpenCode group to choose "Import from this device" or "New OAuth authorization".
+- Click "+", select OpenCode, then choose "Import from this device" or "New OAuth authorization".
   Both options accept a note. Local import lists workspaces and imports only the selected one after
   confirmation; independent authorization can be completed later in the edit dialog. Existing
   accounts support note changes and reauthorization. Each official workspace has one account and one
@@ -260,13 +270,11 @@ semantics.
   in. ChatGPT distinguishes Pro $100 / $200 / $500; Claude distinguishes Pro, Max 5x / 20x, Ultra,
   and identifiable Team seats. Plans are detected automatically; unknown tier prices are not
   guessed. Device filters change usage only and do not count monthly fees again.
-- **Raw bills**: the single-account toolbar and inline buttons in "Bills by source" open individual
-  usage events for that account and time range. Records include Cursor's raw model name, four token
-  categories, official charges, and the normalized name / matched pricing key / equivalent cost
-  under the current pricing table. Data is read from the local archive without network access.
-  Filter by model name or export CSV with a UTF-8 BOM. Retained data from deleted accounts is also
-  available.
-- **Clear local data**: this action in the raw bill dialog and Cursor's "Edit account" dialog
+- Open **Raw bills** from the single-account toolbar or a row in Bills by source.
+  Cursor shows individual charges, including retained events for deleted accounts. OpenCode shows
+  each workspace request with its ID, product, token counts and reported cost. Both show equivalent
+  cost at current rates and can filter by model and export all matching rows to CSV.
+- **Clear local data** in the Cursor raw bill and account editor
   deletes the account's local event archive and statistics cache while retaining the account and
   token. The next usage refresh fetches the full archive again.
 - **Deleted accounts**: retained statistics appear as separate "Deleted" rows in the overview,
@@ -442,8 +450,8 @@ reverse engineering. Tokens are decrypted at runtime; older plain-text credentia
 automatically on first launch. Do not commit this directory to version control or share
 `settings.json`. Audit logs contain only notes or masked tokens, never complete credentials.
 
-Theme, token display units, and account card order are stored in the WebView's `localStorage`,
-outside `settings.json`; full backups include these interface preferences. The launch-at-login
+Account order is saved in `settings.json`. Theme and token display units are stored in the
+WebView's `localStorage`. Full backups include these preferences. The launch-at-login
 switch is registered with the operating system (Windows Registry / macOS LaunchAgent) and does not
 migrate with backups.
 
@@ -483,7 +491,7 @@ settings backups.
 
 ## Pricing Table
 
-- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 164 entries. The
+- The bundled default table, `src-tauri/resources/pricing.default.json`, contains 165 entries. The
   2026-10-23 price review corrected DeepSeek Flash and added 23 entries, including Sonnet / Haiku
   5.5, GPT-5.1, GPT-4.1 Nano, Chat Latest, Gemini 4 Argon, Gemini Flash-Lite, Grok 4.7, GLM,
   MiniMax, and Mistral / Codestral.
@@ -512,6 +520,9 @@ settings backups.
 - Gemini 4 Carbon / Argon's listed prices apply through 2026-11-30 and double on 2026-12-01.
   Gemini 3.8 Flash's listed prices apply through 2026-12-31 and double on 2027-01-01.
   Prices do not switch automatically by date; the table must be updated when promotions end.
+- Gemini 4 Neon costs $3.00 for input, $15.00 for output (including thinking tokens), and $0.15
+  for implicit cache reads per million tokens. The table records $0 for cache writes.
+  [Google pricing](https://aistudio.google.com/docs/pricing#gemini-4-neon)
 - DeepSeek uses off-peak pricing. `deepseek-v4-flash`, `deepseek-v4.1-flash`, and other numbered
   versions all use the effective `deepseek-flash` prices: $0.15 input, $0.60 output, $0.003 cache
   read, and $0 cache write. Usage statistics retain specific version names, while the pricing table

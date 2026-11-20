@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 use crate::main_window;
@@ -104,8 +104,19 @@ fn on_left_click(app: AppHandle, x: f64, y: f64) {
 
 /// 托盘面板「打开主窗口」：隐藏面板并唤起主窗口。
 #[tauri::command]
-pub fn tray_open_main(app: AppHandle) {
+pub fn tray_open_main(app: AppHandle, add_account: Option<bool>) {
     hide_panel_and_show_main(&app);
+    if add_account == Some(true) && !crate::operations::required() && !crate::operations::paused() {
+        ADD_REQUESTED.store(true, Ordering::Release);
+        let _ = app.emit_to(main_window::LABEL, "tray-add-account", ());
+    }
+}
+
+// 主窗口尚在加载时保留点击，监听就绪后消费一次。
+static ADD_REQUESTED: AtomicBool = AtomicBool::new(false);
+#[tauri::command]
+pub fn tray_take_add_request() -> bool {
+    ADD_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
 /// 创建系统托盘：左键单击弹出账户面板，双击打开主窗口；右键菜单提供「显示主窗口 / 退出」。

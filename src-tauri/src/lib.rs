@@ -1,4 +1,5 @@
 mod accounts;
+mod account_order;
 mod app_update;
 mod operations;
 mod opencode;
@@ -231,11 +232,15 @@ pub fn run() {
             proxy::proxy_set,
             proxy::proxy_test,
             accounts::accounts_list,
+            accounts::accounts_move,
             accounts::accounts_add,
             accounts::accounts_update,
             accounts::accounts_delete,
             accounts::accounts_import_local,
-            accounts::accounts_export,
+            accounts::auth_edit::codex_auth_read,
+            accounts::auth_edit::codex_auth_project,
+            accounts::accounts_export_all,
+            accounts::account_export_one,
             accounts::accounts_import_file,
             accounts::accounts_set_interval,
             accounts::account_refresh,
@@ -254,10 +259,12 @@ pub fn run() {
             opencode_local::opencode_switch_local,
             opencode_local::opencode_client_oauth_poll,
             opencode_store::opencode_usage_fetch,
+            opencode_store::opencode_usage_events,
             audit::audit_list,
             audit::audit_clear,
             usage_archive::usage_snapshot_save,
             tray::tray_open_main,
+            tray::tray_take_add_request,
             launch::autostart_get,
             launch::autostart_set,
             launch::launch_info,

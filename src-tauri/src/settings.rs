@@ -29,6 +29,11 @@ pub struct Settings {
     pub codex_usage_sync: crate::codex_sync::SyncConfig,
     #[serde(default)]
     pub accounts: Vec<Account>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_order: Option<Vec<String>>,
+    /// 当前进程内两窗口共用的排序修订号，备份恢复也会推进。
+    #[serde(skip)]
+    pub account_order_revision: u64,
     #[serde(default)]
     pub interval_minutes: u32,
     #[serde(default)]
@@ -76,13 +81,23 @@ impl Settings {
     pub fn accounts_file(&self) -> AccountsFile {
         AccountsFile {
             accounts: self.accounts.clone(),
+            account_order: self.account_order.clone(),
+            order_revision: self.account_order_revision,
             interval_minutes: self.interval_minutes,
         }
     }
 
     pub fn apply_accounts(&mut self, data: AccountsFile) {
         self.accounts = data.accounts;
+        self.set_account_order(data.account_order);
         self.interval_minutes = data.interval_minutes;
+    }
+
+    pub fn set_account_order(&mut self, order: Option<Vec<String>>) {
+        if self.account_order != order {
+            self.account_order = order;
+            self.account_order_revision += 1;
+        }
     }
 }
 
@@ -114,6 +129,9 @@ pub(crate) fn sanitize_loaded(mut data: Settings) -> Settings {
     data.pricing_remote.table = data.pricing_remote.table.lowercased();
     data.pricing_remote.url = crate::pricing::normalize_update_url(&data.pricing_remote.url);
     crate::accounts::hydrate_accounts(&mut data.accounts);
+    if let Some(order) = &data.account_order {
+        data.account_order = Some(crate::account_order::complete(order, &data.accounts));
+    }
     data
 }
 

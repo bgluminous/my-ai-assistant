@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn raw_bill_is_workspace_scoped_inclusive_and_preserves_unknown_costs() {
+    let mut db = open_path(Path::new(":memory:")).unwrap();
+    let mut first = parse_event(&event("first", 1000), "wrk_a").unwrap().unwrap();
+    first.request_id = Some("request-one".into());
+    first.model = "gpt-5.4".into();
+    first.reported_cost_usd = Some(0.0);
+    let mut last = first.clone();
+    last.id = "last".into();
+    last.time = 2000;
+    last.reported_cost_usd = None;
+    last.model = "unlisted-test-model".into();
+    save_page(&mut db, "wrk_a", &[first.clone(), last]).unwrap();
+    save_page(&mut db, "wrk_b", &[first]).unwrap();
+    assert_eq!(raw_bill(&db, "wrk_a", None, None).unwrap().coverage.synced_at, 0);
+    completed(&mut db, "wrk_a", 1000, 2001).unwrap();
+    db.pragma_update(None, "query_only", true).unwrap();
+    let bill = raw_bill(&db, "wrk_a", Some(1000), Some(2000)).unwrap();
+    assert_eq!(bill.total, 2);
+    assert_eq!(bill.events.len(), 2);
+    let events = serde_json::to_value(&bill.events).unwrap();
+    assert_eq!(events[0]["timestampMs"], 2000);
+    assert!(events[0]["reportedCostUsd"].is_null());
+    assert!(events[0]["equivalentUsd"].is_null());
+    let row = &events[1];
+    assert_eq!(row["requestId"], "request-one");
+    assert_eq!(row["reportedCostUsd"], 0.0);
+    assert!(row["equivalentUsd"].as_f64().unwrap() > 0.0);
+    assert_eq!(row["totalTokens"], 100.0);
+    assert_eq!(row["reasoningTokens"], 15);
+    assert_eq!(row["cacheWrite1hTokens"], 12);
+    assert!(bill.coverage.coverage_gaps.is_empty());
+    let empty = raw_bill(&db, "wrk_a", Some(1001), Some(1999)).unwrap();
+    assert!(empty.events.is_empty() && empty.coverage.coverage_gaps.is_empty());
+    assert!(!raw_bill(&db, "wrk_a", Some(25), Some(100)).unwrap().coverage.coverage_gaps.is_empty());
+    assert_eq!(raw_bill(&db, "wrk_a", Some(999), Some(999)).unwrap().coverage.coverage_gaps,
+        [json!({"start":999, "end":999})]);
+    assert!(raw_bill(&db, "wrk_a", Some(2), Some(1)).is_err());
+}
+
+#[test]
 fn opencode_failure_delete_rolls_back_archive_when_settings_or_sql_write_fails() {
     let mut db = open_path(Path::new(":memory:")).unwrap();
     let row = parse_event(&event("kept", 1000), "wrk_a").unwrap().unwrap();

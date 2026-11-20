@@ -1,4 +1,5 @@
-import { getAccountGroupOrder, initAccountCardOrder } from "./account_order.js";
+import { createCodexAuthEditor } from "./codex_auth_editor.js";
+import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { createAccountRefreshScheduler, refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients, bindClaudeDesktop, clientError } from "./linked_client_ui.js";
 import { createModal } from "./modal.js";
@@ -26,7 +27,6 @@ import {
   parseCreditsUsd,
   resetCreditsBrief,
   cursorIdentity,
-  compareAccounts,
 } from "./account_format.js";
 import { clearCursorLocalData, syncCursorUsageFilters, syncCodexUsage } from "./usage_data.js";
 import { syncError } from "./usage_sync.js";
@@ -47,6 +47,8 @@ const TOKEN_PLACEHOLDERS = {
 };
 
 let accounts = [];
+const accountOrder = trackAccountOrder();
+let rowOrder;
 let intervalMinutes = 0;
 let scheduledProviders = new Set();
 let switching = false; // 切换账户流程进行中（全局互斥，期间禁用相关操作）
@@ -66,7 +68,8 @@ function isRefreshing(id) {
 
 let modalKind = "cursor";
 let editingId = null;
-let editingCredentials = null;
+let editingAccount = null;
+let authEditor = null;
 
 function providerRefreshing(kind) {
   return scheduledProviders.has(kind) || groupRefreshing.has(kind)
@@ -580,7 +583,17 @@ function accountRow(account) {
     ident.append(note);
     token.textContent = maskToken(account.token);
   }
+  const tag = document.createElement("span");
+  tag.className = "tag kind-" + account.kind;
+  tag.textContent = kindLabel(account.kind);
+  const nameLine = document.createElement("div");
+  nameLine.className = "account-name-line";
+  ident.prepend(nameLine);
+  nameLine.append(tag, note);
   accountCell.append(ident, token);
+  const grip = document.createElement("td");
+  grip.className = "account-grip";
+  grip.append(orderHandle(note.textContent));
 
   const stateCell = document.createElement("td");
   fillStateCell(stateCell, account);
@@ -646,99 +659,57 @@ function accountRow(account) {
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   }
 
-  tr.append(accountCell, stateCell, planCell, summaryCell, extraCell, timeCell, actionsCell);
+  const exportButton = iconAction("export", "导出此账户");
+  exportButton.classList.add("account-export");
+  exportButton.disabled = importing || switching;
+  exportButton.addEventListener("click", () => { void onExport(account.id); });
+  actionsCell.append(exportButton);
+
+  tr.append(grip, accountCell, stateCell, planCell, summaryCell, extraCell, timeCell, actionsCell);
   return tr;
 }
 
-/** 组标题旁的统计小字：数量 + 组内最近一次刷新的相对时间，组空时留空。 */
-function updateGroupMeta(kind) {
-  const rows = accounts.filter((a) => a.kind === kind);
-  let ts = 0;
-  for (const account of rows) {
-    const v = Number(account && account.lastRefreshAt);
-    if (Number.isFinite(v) && v > 0) ts = Math.max(ts, v * 1000);
-  }
-  const text = ts ? `共 ${rows.length} 个 · 上次刷新：${relativeFromMs(ts)}` : `共 ${rows.length} 个`;
-  el(`#accounts-count-${kind}`).textContent = rows.length ? text : "";
+function updateAccountCount() {
+  const latest = accounts.reduce((time, account) => Math.max(time, Number(account.lastRefreshAt) || 0), 0);
+  el("#accounts-count").textContent = accounts.length
+    ? "共 " + accounts.length + " 个" + (latest ? " · 上次刷新 " + relativeFromMs(latest * 1000) : "") : "";
 }
 
-/** 卡片标题栏的退出登录 / 刷新 / 导入 / 导出 / 添加按钮：互斥流程中禁用，组刷新进行中时刷新按钮转圈。 */
 function updateHeadingActions() {
   const blocked = switching || importing;
-  for (const kind of ["cursor", "codex", "claude", "opencode"]) {
-    const running = providerRefreshing(kind);
-    const refreshBtn = el(`#accounts-refresh-${kind}`);
-    refreshBtn.disabled = blocked || running;
-    refreshBtn.classList.toggle("busy", running);
-    if (kind !== "opencode") el(`#accounts-logout-${kind}`).disabled = blocked || running;
-    el(`#accounts-import-${kind}`).disabled = blocked || anyAccountRefreshing();
-    const hasRows = accounts.some((a) => a.kind === kind);
-    el(`#accounts-export-${kind}`).disabled = blocked || anyAccountRefreshing() || !hasRows;
-    el(`#accounts-add-${kind}`).disabled = blocked || running;
-  }
-}
-
-/** 组内按套餐排序键排好的账户列表（不改动 accounts 本身的存储顺序）；排序键见 account_format.js。 */
-function sortedAccounts(kind) {
-  return accounts.filter((a) => a.kind === kind).sort(compareAccounts);
-}
-
-function renderGroup(kind, bodyId, emptyId) {
-  const rows = sortedAccounts(kind);
-  el(bodyId).replaceChildren(...rows.map(accountRow));
-  el(emptyId).hidden = rows.length > 0;
-  updateGroupMeta(kind);
+  const refresh = el("#accounts-refresh");
+  refresh.disabled = blocked || anyAccountRefreshing() || !accounts.length;
+  refresh.classList.toggle("busy", anyAccountRefreshing());
+  el("#accounts-import").disabled = blocked || anyAccountRefreshing();
+  el("#accounts-export").disabled = blocked || !accounts.length;
+  el("#accounts-logout").disabled = blocked;
+  el("#accounts-add").disabled = blocked;
 }
 
 function render() {
-  renderGroup("cursor", "#accounts-body-cursor", "#accounts-empty-cursor");
-  renderGroup("codex", "#accounts-body-codex", "#accounts-empty-codex");
-  renderGroup("claude", "#accounts-body-claude", "#accounts-empty-claude");
-  renderGroup("opencode", "#accounts-body-opencode", "#accounts-empty-opencode");
+  if (!rowOrder || rowOrder.canRender()) {
+    el("#accounts-body").replaceChildren(...accountOrder.rows(accounts).map(accountRow));
+  }
+  el("#accounts-table").hidden = !accounts.length;
+  el("#accounts-empty").hidden = !!accounts.length;
+  updateAccountCount();
   updateHeadingActions();
-  // 首批进度条渲染完成后，后续重绘不再重放生长动画
   if (!quotaIntroPlayed && document.querySelector(".quota-bar")) quotaIntroPlayed = true;
 }
 
-/** 账户类型对应的表格 tbody 选择器。 */
-function bodyIdFor(kind) {
-  if (kind === "opencode") return "#accounts-body-opencode";
-  return kind === "codex"
-    ? "#accounts-body-codex"
-    : kind === "claude"
-    ? "#accounts-body-claude"
-    : "#accounts-body-cursor";
-}
-
-/** 只重建单个账户行（如刷新前后），避免整表重绘打断其它行的动画；行不存在时退回全量渲染。 */
 function updateRow(id) {
-  const acc = accounts.find((a) => a.id === id);
-  if (!acc) {
-    render();
-    return;
-  }
-  const bodyId = bodyIdFor(acc.kind);
-  const body = el(bodyId);
-  const old = body.querySelector(`tr[data-id="${CSS.escape(id)}"]`);
-  if (!old) {
-    render();
-    return;
-  }
-  // 刷新后套餐 / 到期时间变了会改变排序位置：位置不再匹配时整组重排，否则只换这一行
-  const expectedIndex = sortedAccounts(acc.kind).findIndex((a) => a.id === id);
-  const currentIndex = [...body.children].indexOf(old);
-  if (expectedIndex !== currentIndex) {
-    renderGroup(acc.kind, bodyId, `#accounts-empty-${acc.kind}`);
-    updateHeadingActions();
-    return;
-  }
-  old.replaceWith(accountRow(acc));
+  if (rowOrder && !rowOrder.canRender()) return;
+  const account = accounts.find(item => item.id === id);
+  const old = el("#accounts-body").querySelector('tr[data-id="' + CSS.escape(id) + '"]');
+  if (!old || !account) { render(); return; }
+  old.replaceWith(accountRow(account));
   if (!quotaIntroPlayed && document.querySelector(".quota-bar")) quotaIntroPlayed = true;
-  updateGroupMeta(acc.kind);
+  updateAccountCount();
   updateHeadingActions();
 }
 
 function applyView(view) {
+  accountOrder.apply(view);
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
   syncCursorUsageFilters(accounts);
   const n = Number(view && view.intervalMinutes);
@@ -783,7 +754,10 @@ function onBackendChanged(view) {
     syncTimer = null;
     const v = syncPendingView;
     syncPendingView = null;
-    if (sameAsCurrent(v)) return;
+    if (sameAsCurrent(v)) {
+      if (accountOrder.apply(v)) render();
+      return;
+    }
     // 其他入口刷新成功（刷新时间变化）的账户，本地残留的行错误已过时，清掉避免矛盾展示
     const prevAt = new Map(accounts.map((a) => [a.id, a.lastRefreshAt]));
     for (const a of Array.isArray(v.accounts) ? v.accounts : []) {
@@ -845,27 +819,26 @@ export async function refreshAccounts(ids) {
   if (ordered.length) await refreshIds(ordered);
 }
 
-/** 刷新单组（卡片标题栏的刷新按钮）：组内账户排队逐个刷新。 */
-async function refreshGroup(kind) {
-  if (providerRefreshing(kind) || switching || importing) return;
-  const ids = sortedAccounts(kind).map((a) => a.id);
-  if (!ids.length) return;
-  groupRefreshing.add(kind);
+/** 跨供应商并行刷新，各供应商队列内按显示顺序执行。 */
+async function refreshAllAccounts() {
+  if (switching || importing || anyAccountRefreshing()) return;
+  const rows = accountOrder.rows(accounts);
+  if (!rows.length) return;
+  const kinds = new Set(rows.map(a => a.kind));
+  for (const item of kinds) groupRefreshing.add(item);
   clearStatus();
-  updateHeadingActions();
+  render();
   try {
-    const failed = await refreshIds(ids);
-    if (failed > 0) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
+    const failed = await refreshIds(rows.map(a => a.id));
+    if (failed) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
   } finally {
-    groupRefreshing.delete(kind);
-    updateGroupMeta(kind);
-    updateHeadingActions();
+    for (const item of kinds) groupRefreshing.delete(item);
+    render();
   }
 }
 
-/** 全部账户按界面显示顺序排列的 id：先按类型分组、组内按套餐排序，与 render 的顺序一致。 */
 function displayOrderIds() {
-  return getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map((a) => a.id));
+  return accountOrder.rows(accounts).map(a => a.id);
 }
 
 // 只有主窗口创建调度器；到期账户按供应商分队列，共享日志与 GPT 同步单独使用全局间隔。
@@ -1548,7 +1521,7 @@ async function onSwitchLinkedAccount(id) {
   if (!account) return;
   switching = true; switchingKind = account.kind; render();
   try { await switchLocalClients(account, async () => {
-    const view = await invoke("accounts_list"); applyView(view); render();
+    const view = await loadAccountList(); applyView(view); render();
   }); } finally { switching = false; render(); }
 }
 async function onSwitchCodexAccount(id) { return onSwitchLinkedAccount(id); }
@@ -1591,7 +1564,8 @@ const LOGOUT_TARGETS = {
  */
 async function onLogoutLocal(kind) {
   if (switching || importing || providerRefreshing(kind)) return;
-  const t = LOGOUT_TARGETS[kind] || LOGOUT_TARGETS.cursor;
+  const t = LOGOUT_TARGETS[kind];
+  if (!t) return;
   switching = true;
   switchingKind = kind;
   render();
@@ -1684,24 +1658,23 @@ async function onImportLocal(kind) {
 
 /* ---------- JSON 文件导入 / 导出 ---------- */
 
-async function onExport(kind) {
-  if (importing || switching || anyAccountRefreshing()) return;
-  const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
-  const label = kindLabel(target);
+async function onExport(id) {
+  if (importing || switching || (id !== null && !id)) return;
   importing = true;
-  setStatus("", `正在导出 ${label} 账户…`);
+  setStatus("", "正在导出账户…");
   render();
   try {
-    const r = await invoke("accounts_export", { kind: target });
+    const r = id === null ? await invoke("accounts_export_all") : await invoke("account_export_one", { id });
     if (r && r.cancelled) {
       clearStatus();
       return;
     }
     const count = Number(r && r.count) || 0;
-    setStatus("ok", `已导出 ${count} 个 ${label} 账户。`);
+    setStatus("ok", `已导出 ${count} 个账户。`);
   } catch (error) {
     const msg = resetError(error);
-    if (msg === "no_accounts") setStatus("warn", `没有可导出的 ${label} 账户。`);
+    if (msg === "no_accounts") setStatus("warn", "没有可导出的账户。");
+    else if (msg === "not_found") setStatus("warn", "此账户已被删除。");
     else setStatus("bad", `导出失败：${msg}`);
   } finally {
     importing = false;
@@ -1709,15 +1682,13 @@ async function onExport(kind) {
   }
 }
 
-async function onImportFile(kind) {
+async function onImportFile() {
   if (importing || switching || anyAccountRefreshing()) return;
-  const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
-  const label = kindLabel(target);
   importing = true;
-  setStatus("", `正在导入 ${label} 账户…`);
+  setStatus("", "正在导入账户…");
   render();
   try {
-    const r = await invoke("accounts_import_file", { kind: target });
+    const r = await invoke("accounts_import_file");
     if (r && r.cancelled) {
       clearStatus();
       return;
@@ -1728,22 +1699,18 @@ async function onImportFile(kind) {
     const skipped = Array.isArray(r.skipped) ? r.skipped : [];
     const exists = skipped.filter((s) => s && s.reason === "exists").length;
     const invalid = skipped.filter((s) => s && s.reason === "invalid").length;
+    const skippedText = [exists && `${exists} 个已存在`, invalid && `${invalid} 个凭据无效`].filter(Boolean).join("、");
     if (imported.length) {
-      const labels = imported.map((item) => item.label).join("、");
-      const tail = exists > 0 ? `；${exists} 个已存在跳过` : "";
-      setStatus("ok", `已导入 ${imported.length} 个账户：${labels}${tail}`);
-      void refreshIds(imported.map((item) => item.id));
-    } else if (exists > 0) {
-      setStatus("", "文件中的账号均已在列表中。");
-    } else if (invalid > 0) {
-      setStatus("warn", `${invalid} 个账户无法解析，已跳过。`);
+      setStatus(invalid ? "warn" : "ok", `已导入 ${imported.length} 个账户。${skippedText ? "已跳过" + skippedText + "。" : ""}`);
+      void refreshIds(imported.map(item => item.id));
+    } else if (skippedText) {
+      setStatus(invalid ? "warn" : "", `已跳过${skippedText}。`);
     } else {
       setStatus("warn", "文件中没有可导入的账户。");
     }
   } catch (error) {
     const msg = resetError(error);
-    if (msg === "kind_mismatch") setStatus("bad", `该文件不是 ${label} 账户，无法导入到当前列表。`);
-    else if (msg === "invalid_format") setStatus("bad", "不是有效的账户导出文件。");
+    if (msg === "invalid_format") setStatus("bad", "不是有效的账户导出文件。");
     else setStatus("bad", `导入失败：${msg}`);
   } finally {
     importing = false;
@@ -1755,7 +1722,13 @@ async function onImportFile(kind) {
 
 let accountModal;
 function getAccountModal() {
-  return accountModal ||= createModal(el("#account-modal"), { onClose: () => { editingId = null; editingCredentials = null; } });
+  return accountModal ||= createModal(el("#account-modal"), { onClose: () => {
+    authEditor?.dispose();
+    authEditor = null;
+    editingId = null;
+    editingAccount = null;
+    el("#account-token").value = el("#account-refresh-token").value = "";
+  } });
 }
 
 function setModalKind(kind) {
@@ -1779,12 +1752,27 @@ function setModalKind(kind) {
 
 function openModal(account, presetKind) {
   if (getAccountModal().busy) return;
+  authEditor?.dispose();
+  authEditor = null;
+  editingAccount = account ? {
+    note: (account.note || "").trim(), token: (account.token || "").trim(), refreshToken: (account.refreshToken || "").trim(),
+    refreshIntervalMinutes: account.refreshIntervalMinutes ?? null, autoRefreshToken: account.autoRefreshToken !== false,
+  } : null;
   editingId = account ? account.id : null;
-  el("#account-modal-title").textContent = account ? "编辑账户" : "添加账户";
+  const codexEdit = account?.kind === "codex";
+  el("#account-modal-title").textContent = codexEdit ? "编辑 ChatGPT 账户" : account ? "编辑账户" : "添加账户";
+  el("#account-modal").classList.toggle("codex-edit", codexEdit);
+  el("#account-modal-description").textContent = codexEdit
+    ? "凭据保存在此账户的加密副本中。切换账户时可应用到本机客户端。"
+    : "Token 仅保存在本地配置文件，用于查询账户状态与用量。";
+  el(codexEdit ? "#account-interval-field" : "#account-api-field").before(el("#account-credential-fields"));
+  el("#account-auth-mode").hidden = !codexEdit;
+  el("#account-kind-label").hidden = el("#account-kind").hidden = codexEdit;
+  el("#account-token-label").textContent = codexEdit ? "Access Token" : "Token";
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
-  editingCredentials = account ? { token: (account.token || "").trim(), refreshToken: (account.refreshToken || "").trim() } : null;
+  if (codexEdit) authEditor = createCodexAuthEditor(account);
   el("#account-auto-refresh-token").checked = account?.autoRefreshToken !== false;
   el("#account-ignore-api-models").checked = !!(account && account.ignoreApiModels);
   el("#account-interval-field").hidden = !account;
@@ -1872,9 +1860,9 @@ async function onClearLocalUsage() {
 }
 
 async function onSave() {
-  if (getAccountModal().busy) return;
+  if (getAccountModal().busy || authEditor?.busy) return;
   const token = el("#account-token").value.trim();
-  if (!token) {
+  if (!token && !authEditor?.full) {
     setModalStatus("bad", modalKind === "claude" ? "请填写 Token，或使用上方 OAuth 授权添加。" : "请填写 Token。");
     return;
   }
@@ -1884,17 +1872,38 @@ async function onSave() {
   const interval = el("#account-refresh-interval").value;
   const refreshIntervalMinutes = interval === "" ? null : Number(interval);
   const autoRefreshToken = modalKind === "cursor" ? null : el("#account-auto-refresh-token").checked;
-  const updateCredentials = !editingCredentials || token !== editingCredentials.token || (refreshToken || "") !== editingCredentials.refreshToken;
+  const updateCredentials = !editingAccount || token !== editingAccount.token || (refreshToken || "") !== editingAccount.refreshToken;
   const isEdit = editingId != null;
   const id = editingId;
   const existingIds = isEdit ? null : new Set(accounts.map((account) => account.id));
   const btn = el("#account-save");
-  const operation = getAccountModal().beginSave([btn, el("#account-oauth-finish"), el("#account-import-local")]);
+  const operation = getAccountModal().beginSave([
+    btn, el("#account-oauth-finish"), el("#account-import-local"),
+    el("#account-mode-token"), el("#account-mode-auth"), el("#account-auth-reload"),
+  ]);
   if (!operation) return;
   setModalStatus("", "保存中…");
   try {
+    let update = { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes, autoRefreshToken, updateCredentials };
+    if (authEditor) {
+      authEditor.clear();
+      const original = editingAccount;
+      const credentials = await authEditor.changes();
+      if (!operation.current()) return;
+      const noteChanged = note !== original.note;
+      const intervalChanged = refreshIntervalMinutes !== original.refreshIntervalMinutes;
+      const renewalChanged = autoRefreshToken !== original.autoRefreshToken;
+      if (!credentials && !noteChanged && !intervalChanged && !renewalChanged) {
+        closeModal();
+        return;
+      }
+      update = { id, updateCredentials: false, updateInterval: intervalChanged, ...credentials };
+      if (noteChanged) update.note = note;
+      if (intervalChanged) update.refreshIntervalMinutes = refreshIntervalMinutes;
+      if (renewalChanged) update.autoRefreshToken = autoRefreshToken;
+    }
     const view = isEdit
-      ? await invoke("accounts_update", { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes, autoRefreshToken, updateCredentials })
+      ? await invoke("accounts_update", update)
       : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
     applyView(view);
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
@@ -1905,6 +1914,7 @@ async function onSave() {
     if (added) void refreshOne(added.id);
   } catch (error) {
     if (!operation.current()) return;
+    if (authEditor?.showError(error)) { clearModalStatus(); return; }
     const msg = resetError(error);
     if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
     else setModalStatus("bad", `保存失败：${msg}`);
@@ -1993,7 +2003,7 @@ function mapLoadError(err) {
 
 async function loadInitial(allowRetry = true) {
   try {
-    const view = await invoke("accounts_list");
+    const view = await loadAccountList();
     applyView(view);
     render();
   } catch (error) {
@@ -2008,19 +2018,56 @@ async function loadInitial(allowRetry = true) {
 }
 
 export function initAccounts() {
-  initAccountCardOrder();
-  for (const kind of ["cursor", "codex", "claude", "opencode"]) {
-    el(`#accounts-add-${kind}`).addEventListener("click", () => {
+  rowOrder = initRowOrder(el("#accounts-body"), {
+    ids: displayOrderIds, render,
+    save: accountOrder.move,
+    onError: () => setStatus("bad", "账户顺序未保存，请重试。"),
+  });
+  const pickerRoot = el("#account-type-modal");
+  const picker = createModal(pickerRoot, { mode: () => "view" });
+  const types = [...pickerRoot.querySelectorAll("[data-kind]")];
+  let pickerMode;
+  const openPicker = (mode = "add") => {
+    if (switching || importing || !pickerRoot.hidden) return;
+    pickerMode = mode;
+    el("#account-type-title").textContent = mode === "logout" ? "退出本机登录" : "选择账户类型";
+    for (const button of types) {
+      button.hidden = mode === "logout" && !LOGOUT_TARGETS[button.dataset.kind];
+      button.disabled = mode === "logout" && providerRefreshing(button.dataset.kind);
+    }
+    picker.open();
+    types.find(button => !button.hidden && !button.disabled)?.focus();
+  };
+  el("#accounts-add").addEventListener("click", () => openPicker());
+  el("#accounts-logout").addEventListener("click", () => openPicker("logout"));
+  for (const button of types) {
+    button.addEventListener("click", () => {
+      if (button.hidden || button.disabled) return;
+      const kind = button.dataset.kind;
+      picker.close();
+      if (pickerMode === "logout") { void onLogoutLocal(kind); return; }
       if (kind === "opencode") addOpenCode(async ids => {
         await loadInitial(false);
         if (ids.length) void refreshIds(ids);
       });
       else openModal(null, kind);
     });
-    if (kind !== "opencode") el(`#accounts-logout-${kind}`).addEventListener("click", () => { void onLogoutLocal(kind); });
-    el(`#accounts-refresh-${kind}`).addEventListener("click", () => { void refreshGroup(kind); });
-    el(`#accounts-import-${kind}`).addEventListener("click", () => { void onImportFile(kind); });
-    el(`#accounts-export-${kind}`).addEventListener("click", () => { void onExport(kind); });
+  }
+  async function consumeTrayAdd() {
+    if (!await invoke("tray_take_add_request")) return;
+    el('[data-panel="accounts-panel"]').click();
+    el("#accounts-add").focus();
+    openPicker();
+  }
+  listen("tray-add-account", () => { void consumeTrayAdd().catch(() => {}); })
+    .then(consumeTrayAdd).catch(() => {});
+  el("#accounts-refresh").addEventListener("click", () => { void refreshAllAccounts(); });
+  el("#accounts-import").addEventListener("click", () => { void onImportFile(); });
+  el("#accounts-export").addEventListener("click", () => { void onExport(null); });
+  for (const [id, mode] of [["account-mode-token", "token"], ["account-mode-auth", "auth"], ["account-auth-reload", "auth"]]) {
+    el("#" + id).addEventListener("click", () => {
+      if (!getAccountModal().busy) void authEditor?.switchMode(mode, id === "account-auth-reload");
+    });
   }
 
   for (const seg of el("#account-kind").querySelectorAll(".seg")) {
@@ -2072,15 +2119,12 @@ export function initAccounts() {
   setInterval(() => {
     if (!accounts.length) return;
     for (const account of accounts) {
-      const cell = el(bodyIdFor(account.kind)).querySelector(
+      const cell = el("#accounts-body").querySelector(
         `tr[data-id="${CSS.escape(account.id)}"] .account-time`
       );
       if (cell) fillTimeCell(cell, account);
     }
-    updateGroupMeta("cursor");
-    updateGroupMeta("codex");
-    updateGroupMeta("claude");
-    updateGroupMeta("opencode");
+    updateAccountCount();
   }, 30_000);
 
   render();

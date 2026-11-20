@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn account_order_migrates_cards_and_preserves_manual_positions_after_refresh() {
+    let mut rows: Vec<Account> = serde_json::from_value(json!([
+        {"id":"free","kind":"cursor","token":"a","status":{"membershipType":"Free"}},
+        {"id":"work","kind":"opencode","token":"wrk_a"},
+        {"id":"later","kind":"cursor","token":"b","status":{"membershipType":"Pro","billingCycleEnd":"2026-12-01"}},
+        {"id":"soon","kind":"cursor","token":"c","status":{"membershipType":"Pro","billingCycleEnd":"2026-11-22T00:00:00Z"}},
+        {"id":"unknown","kind":"cursor","token":"d"}
+    ])).unwrap();
+    let mut order = crate::account_order::legacy(&["opencode".into()], &rows);
+    assert_eq!(order, ["work", "soon", "later", "unknown", "free"]);
+    crate::account_order::move_before(&mut order, "free", Some("work")).unwrap();
+    crate::account_order::move_before(&mut order, "later", None).unwrap();
+    rows[1].status = Some(json!({"plan":"free"}));
+    rows.retain(|a| a.id != "unknown");
+    rows.push(serde_json::from_value(json!({"id":"added","kind":"claude","token":"e"})).unwrap());
+    let saved = crate::account_order::complete(&order, &rows);
+    assert_eq!(saved, ["free", "work", "soon", "later", "added"]);
+    let mut stale = saved.clone();
+    assert!(crate::account_order::move_before(&mut stale, "added", Some("removed")).is_err());
+    assert_eq!(stale, saved);
+    let settings = settings::Settings { accounts: rows, account_order: Some(saved.clone()), ..Default::default() };
+    let restored: settings::Settings = serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+    assert_eq!(view(&restored.accounts_file()).account_order, Some(saved));
+}
+
+#[test]
 fn renewal_setting_defaults_on_and_survives_account_export_view_and_backup() {
     for kind in ["cursor", "codex", "claude", "opencode"] {
         let mut account: Account = serde_json::from_value(json!({
@@ -244,4 +270,225 @@ fn dead_cursor_status_keeps_previous_profile() {
     assert_eq!(first["name"], Value::Null);
     assert_eq!(first["email"], Value::Null);
     assert_eq!(first["membershipType"], Value::Null);
+}
+
+fn auth_fixture(id: &str) -> Value {
+    json!({
+        "tokens": {"access_token": format!("fixture-access-{id}"), "refresh_token": format!("fixture-refresh-{id}"),
+                   "account_id": id, "id_token": format!("fixture-id-{id}")},
+        "last_refresh": "2026-11-18T12:00:00Z", "extension": {"owner": id, "counter": 9_007_199_254_740_993_u64}
+    })
+}
+
+fn fixture_accounts() -> AccountsFile {
+    let mut data: AccountsFile = serde_json::from_value(json!({
+        "accounts":[{"id":"a","kind":"codex","note":"A","token":""},
+                    {"id":"b","kind":"codex","note":"B","token":""},
+                    {"id":"c","kind":"cursor","note":"C","token":"fixture-c"}],
+        "accountOrder":["b","c","a"]
+    }))
+    .unwrap();
+    for a in &mut data.accounts[..2] {
+        let auth = auth_fixture(&a.id);
+        set_codex_auth(a, &auth).unwrap();
+    }
+    data
+}
+
+fn auth_change(revision: &str, value: Value) -> AccountEdit {
+    AccountEdit {
+        note: Some("edited".into()),
+        update_credentials: true,
+        token: String::new(),
+        refresh_token: None,
+        new_codex_auth: Some(value),
+        expected_auth_revision: Some(revision.to_owned()),
+        interval: Some(Some(15)),
+        auto_refresh_token: Some(false),
+        ignore_api_models: None,
+    }
+}
+
+#[test]
+fn full_auth_atomic_edit_preserves_extensions_and_explicit_removals_after_reopen() {
+    let mut data = fixture_accounts();
+    let mut draft = auth_fixture("a");
+    let tokens = draft["tokens"].as_object_mut().unwrap();
+    tokens.remove("refresh_token");
+    tokens.remove("id_token");
+    tokens.insert("access_token".into(), json!("fixture-new-access"));
+    let revision = auth_edit::revision(&data.accounts[0]);
+    let fields = auth_change(&revision, draft.clone())
+        .apply(&mut data, "a", None)
+        .unwrap();
+    assert_eq!(
+        fields,
+        [
+            "Auth 凭据",
+            "Token",
+            "Refresh Token",
+            "备注",
+            "同步间隔",
+            "自动续期 Token"
+        ]
+    );
+    let a = &data.accounts[0];
+    assert_eq!(a.token, "fixture-new-access");
+    assert!(a.refresh_token.is_none());
+    assert_eq!(a.refresh_interval_minutes, Some(15));
+    assert!(!a.auto_refresh_token);
+    assert_eq!(a.note, "edited");
+    assert_eq!(
+        auth_edit::saved_value(&data.accounts[1]).unwrap(),
+        auth_fixture("b")
+    );
+    assert_ne!(auth_edit::revision(a), revision);
+    let public = serde_json::to_value(account_view(a)).unwrap();
+    assert!(public.get("codexAuth").is_none());
+    assert!(!public.to_string().contains("extension"));
+    let persisted = settings::persisted_form(&settings::Settings {
+        accounts: data.accounts,
+        ..Default::default()
+    });
+    let encoded = serde_json::to_string(&persisted).unwrap();
+    assert!(!encoded.contains("fixture-new-access"));
+    let mut reopened: settings::Settings = serde_json::from_str(&encoded).unwrap();
+    hydrate_accounts(&mut reopened.accounts);
+    assert_eq!(
+        auth_edit::saved_value(&reopened.accounts[0]).unwrap(),
+        draft
+    );
+    assert!(reopened.accounts[0].refresh_token.is_none());
+}
+
+#[test]
+fn auth_conflicts_duplicates_and_invalid_access_do_not_commit_other_edits() {
+    let mut data = fixture_accounts();
+    let stale = auth_edit::revision(&data.accounts[0]);
+    let mut renewed = auth_fixture("a");
+    renewed["tokens"]["id_token"] = json!("fixture-renewed-id");
+    set_codex_auth(&mut data.accounts[0], &renewed).unwrap();
+    let current = auth_edit::revision(&data.accounts[0]);
+    for (rev, auth, error) in [
+        (&stale, auth_fixture("a"), "codex_auth_conflict"),
+        (&current, auth_fixture("b"), "duplicate_account"),
+        (
+            &current,
+            json!({"tokens":{"access_token":"  "}}),
+            "codex_auth_access_token",
+        ),
+    ] {
+        assert_eq!(
+            auth_change(rev, auth)
+                .apply(&mut data, "a", None)
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(data.accounts[0].note, "A");
+        assert_eq!(auth_edit::saved_value(&data.accounts[0]).unwrap(), renewed);
+    }
+    let metadata = AccountEdit {
+        update_credentials: false,
+        new_codex_auth: None,
+        ..auth_change(&stale, Value::Null)
+    };
+    metadata.apply(&mut data, "a", None).unwrap();
+    assert_eq!(data.accounts[0].note, "edited");
+    assert_eq!(auth_edit::revision(&data.accounts[0]), current);
+}
+
+#[test]
+fn account_files_export_selected_ids_and_roundtrip_latest_auth_in_display_order() {
+    let mut data = fixture_accounts();
+    let mut edited = auth_fixture("b");
+    edited["custom"] = json!(["one", {"extra":true}]);
+    let revision = auth_edit::revision(&data.accounts[1]);
+    auth_change(&revision, edited.clone())
+        .apply(&mut data, "b", None)
+        .unwrap();
+    assert_eq!(
+        export_accounts(&data, Some("removed")).unwrap_err(),
+        "not_found"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (id, names) in [
+        (None, vec!["edited", "C", "A"]),
+        (Some("b"), vec!["edited"]),
+    ] {
+        let file = export_accounts(&data, id).unwrap();
+        assert_eq!(file.version, 2);
+        assert!(file.kind.is_none());
+        let path = dir.path().join("accounts.json");
+        crate::codex_auth_store::atomic_write(&path, &serde_json::to_vec(&file).unwrap()).unwrap();
+        let encoded = std::fs::read_to_string(path).unwrap();
+        assert!(!encoded.contains("fixture-access-b"));
+        if id.is_some() {
+            assert!(!encoded.contains(data.accounts[0].codex_auth.as_ref().unwrap()));
+        }
+        let mut target = AccountsFile::default();
+        let (rows, skipped) =
+            merge_account_file(&mut target, parse_account_file(&encoded).unwrap()).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+            names
+        );
+        assert_ne!(target.accounts[0].id, "b");
+        assert_eq!(auth_edit::saved_value(&target.accounts[0]).unwrap(), edited);
+        if id.is_none() {
+            assert_eq!(target.accounts[1].kind, "cursor");
+            assert_eq!(
+                auth_edit::saved_value(&target.accounts[2]).unwrap(),
+                auth_fixture("a")
+            );
+        }
+        let (reimported, duplicates) =
+            merge_account_file(&mut target, parse_account_file(&encoded).unwrap()).unwrap();
+        assert!(reimported.is_empty());
+        assert_eq!(duplicates.len(), target.accounts.len());
+        assert!(duplicates.iter().all(|r| r.reason == "exists"));
+    }
+}
+
+#[test]
+fn legacy_and_mixed_import_append_in_file_order_and_trust_encrypted_auth_identity() {
+    let mut data = fixture_accounts();
+    let old = json!({"format":EXPORT_FORMAT,"version":1,"kind":"codex","exportedAt":0,"accounts":[
+        {"note":"B again","token":"stale-flat-b","codexAuth":data.accounts[1].codex_auth},
+        {"note":"Partial","token":"fixture-partial"}
+    ]});
+    let (rows, skipped) = merge_account_file(
+        &mut data,
+        parse_account_file(&format!("\u{feff}{old}")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(skipped[0].reason, "exists");
+    assert_eq!(rows.len(), 1);
+    let partial = data.accounts.last().unwrap();
+    assert_eq!(
+        auth_edit::saved_value(partial).unwrap()["tokens"]["access_token"],
+        "fixture-partial"
+    );
+    let mut file = serde_json::to_value(export_accounts(&data, None).unwrap()).unwrap();
+    let new_auth = auth_fixture("new");
+    file["accounts"] = json!([
+        {"kind":"claude","note":"First","token":"fixture-claude"},
+        {"kind":"codex","note":"Invalid","token":"wrong-fallback","codexAuth":"broken"},
+        {"kind":"codex","note":"Second","token":"fixture-access-a","codexAuth":local_crypto::seal(&new_auth.to_string()).unwrap()}
+    ]);
+    let (added, skipped) =
+        merge_account_file(&mut data, parse_account_file(&file.to_string()).unwrap()).unwrap();
+    assert_eq!(skipped[0].reason, "invalid");
+    assert_eq!(
+        added.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+        ["First", "Second"]
+    );
+    let order =
+        crate::account_order::complete(data.account_order.as_ref().unwrap(), &data.accounts);
+    assert_eq!(&order[..3], ["b", "c", "a"]);
+    assert_eq!(
+        &order[3..],
+        [rows[0].id.clone(), added[0].id.clone(), added[1].id.clone()]
+    );
+    assert_eq!(data.accounts.last().unwrap().token, "fixture-access-new");
 }

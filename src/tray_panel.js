@@ -1,9 +1,9 @@
-import { getAccountGroupOrder } from "./account_order.js";
+import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity, compareAccounts } from "./account_format.js";
+import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
 import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
@@ -41,12 +41,11 @@ import {
   forgetUsageCacheFromEvent,
 } from "./usage_data.js";
 
-// 托盘面板：托盘图标单击弹出的简易面板，分四个 tab：
-// 总览（所选日的 token 用量合计，按天前后滑动）/ Cursor / ChatGPT / Claude（账户列表，
-// 查看状态额度、单账户刷新 / 一键切换、全部刷新），增删改等完整功能在主窗口。
-// 窗口失焦即隐藏（Rust 侧处理），每次获得焦点时重载数据。
-
+// 打开面板时重读本机缓存；总览和账户列表共享刷新与切换状态。
 let accounts = [];
+const accountOrder = trackAccountOrder();
+let lastInterval = null;
+let rowOrder;
 let updateRevision = -1;
 function updateNotice(view) {
   if (!view || view.revision < updateRevision) return;
@@ -58,6 +57,7 @@ function updateNotice(view) {
   notice.title = ui.text;
   for (const node of document.querySelectorAll(".tray-tabs, #tray-list, #tray-overview, #tray-modal")) node.inert = view.forceUpdate || ui.paused;
   el("#tray-refresh").disabled = view.forceUpdate || ui.paused;
+  el("#tray-add").disabled = view.forceUpdate || ui.paused;
 }
 el("#tray-update-notice").addEventListener("click", () => { void invoke("tray_open_main"); });
 void listen("app-update-state", (event) => updateNotice(event.payload))
@@ -199,7 +199,11 @@ const TAB_KEY = "trayTab";
 function readTab() {
   try {
     const v = localStorage.getItem(TAB_KEY);
-    return v === "cursor" || v === "codex" || v === "claude" || v === "opencode" || v === "overview" ? v : "overview";
+    if (["cursor", "codex", "claude", "opencode"].includes(v)) {
+      localStorage.setItem(TAB_KEY, "accounts");
+      return "accounts";
+    }
+    return v === "accounts" ? v : "overview";
   } catch {
     return "overview";
   }
@@ -212,6 +216,7 @@ function applyTab() {
   for (const btn of document.querySelectorAll(".tray-tab")) {
     btn.classList.toggle("active", btn.dataset.tab === trayTab);
   }
+  el("#tray-add").hidden = trayTab === "overview";
   el("#tray-list").hidden = trayTab === "overview";
   el("#tray-overview").hidden = trayTab !== "overview";
   syncHeaderRefresh();
@@ -317,6 +322,7 @@ function barsFor(account) {
 function accountRow(account) {
   const row = document.createElement("div");
   row.className = "tray-row";
+  row.dataset.id = account.id;
 
   const dot = document.createElement("span");
   const alive = account.status && typeof account.status.alive === "boolean" ? account.status.alive : null;
@@ -331,7 +337,10 @@ function accountRow(account) {
   const { label, email } = trayIdentity(account);
   note.textContent = label;
   note.title = label;
-  noteLine.append(note);
+  const tag = document.createElement("span");
+  tag.className = "tag kind-" + account.kind;
+  tag.textContent = kindLabel(account.kind);
+  noteLine.append(tag, note);
   if (email) {
     const emailSpan = document.createElement("span");
     emailSpan.className = "tray-note-email";
@@ -347,9 +356,11 @@ function accountRow(account) {
   const status = account.status || null;
   const plan = accountPlanInfo(account).label;
   const parts = [];
+  const titles = [];
   if (plan) parts.push(plan);
   if (account.kind === "opencode") {
-    parts.push(account.opencodeAuthorized ? "当前成员额度 / 工作区用量" : "待独立授权");
+    if (account.opencodeAuthorized) titles.push("额度窗口属于当前成员，用量与余额按工作区统计");
+    else parts.push("待独立授权");
     if (status?.stale) parts.push("部分数据为缓存");
   }
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
@@ -358,7 +369,6 @@ function accountRow(account) {
     ? (account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
     : null;
   const endMs = endIso ? Date.parse(endIso) : NaN;
-  const titles = [];
   if (Number.isFinite(endMs)) {
     const exp = remainInfo(endMs);
     parts.push(exp.expired ? "已到期" : `有效期 ${exp.text}`);
@@ -396,7 +406,7 @@ function accountRow(account) {
   }
   const info = document.createElement("span");
   info.textContent = parts.join(" · ");
-  if (titles.length) info.title = titles.join("\n");
+  info.title = [info.textContent, ...titles].join("\n");
   sub.append(info);
   if (alive === false) {
     const bad = document.createElement("span");
@@ -415,7 +425,7 @@ function accountRow(account) {
     main.append(barsRow);
   }
 
-  row.append(dot, main);
+  row.append(orderHandle(label), dot, main);
 
   const actions = document.createElement("div");
   actions.className = "tray-actions";
@@ -457,25 +467,16 @@ function accountRow(account) {
   return row;
 }
 
-/** 某一类型的账户按主窗口账户页同款套餐顺序排列（不改动 accounts 本身的存储顺序）。 */
-function sortedAccounts(kind) {
-  return accounts.filter((a) => a.kind === kind).sort(compareAccounts);
-}
-
 function render() {
-  // 总览 tab 下列表隐藏，无需重建行（切回账户 tab 时会重新渲染）
-  if (trayTab !== "overview") {
+  if (trayTab === "accounts" && (!rowOrder || rowOrder.canRender())) {
     const list = el("#tray-list");
-    list.replaceChildren();
-    const kind = trayTab === "codex" ? "codex" : trayTab === "claude" ? "claude" : trayTab === "opencode" ? "opencode" : "cursor";
-    const subset = sortedAccounts(kind);
-    if (!subset.length) {
+    const rows = accountOrder.rows(accounts);
+    list.replaceChildren(...rows.map(accountRow));
+    if (!rows.length) {
       const empty = document.createElement("div");
       empty.className = "tray-empty";
-      empty.textContent = `暂无 ${kindLabel(kind)} 账户，请到主窗口添加。`;
+      empty.textContent = "点击右上角的「＋」添加第一个账户。";
       list.append(empty);
-    } else {
-      for (const account of subset) list.append(accountRow(account));
     }
   }
   syncHeaderRefresh();
@@ -513,9 +514,11 @@ async function refreshDeletedRecords() {
 /** 重载账户列表与已删除记录（缓存状态，不刷新账户）；面板被唤起属于主动查看，总览按 5 分钟新鲜度补拉。 */
 async function load({ viewing = true } = {}) {
   try {
-    const [view] = await Promise.all([invoke("accounts_list"), refreshDeletedRecords()]);
+    const [view] = await Promise.all([loadAccountList(), refreshDeletedRecords()]);
+    accountOrder.apply(view);
     accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
     syncCursorUsageFilters(accounts);
+    lastInterval = view?.intervalMinutes;
     const u = Number(view && view.intervalMinutes);
     setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
     render();
@@ -553,7 +556,7 @@ async function refreshAll() {
   void syncCodexUsage("manual");
   const overview = trayTab === "overview" ? loadOverview({ force: true, synchronize: false }) : Promise.resolve();
   // 供应商之间并行，组内顺序与主窗口一致；只快照身份，后端出队后读取最新凭据。
-  const batch = getAccountGroupOrder().flatMap((kind) => sortedAccounts(kind).map(({ id, kind }) => ({ id, kind })));
+  const batch = accountOrder.rows(accounts);
   try {
     setStatus("", `正在刷新账户 0/${batch.length}…`);
     const failures = await refreshByProvider(batch, async id => {
@@ -1807,6 +1810,13 @@ setupDesktopGuards();
 mountSyncProgress(el("#tray-sync-progress"), { compact: true });
 // 账户标签页和总览都同步 GPT 用量并刷新账户；总览同时重算所选日的其它来源。
 // （账户状态刷新会广播 accounts-changed，主窗口据此按其当前跨度预取用量，各处数据一并更新）
+rowOrder = initRowOrder(el("#tray-list"), {
+  ids: () => accountOrder.rows(accounts).map(a => a.id),
+  scrollBox: el("#tray-list"), render,
+  save: accountOrder.move,
+  onError: () => setStatus("bad", "账户顺序未保存，请重试。"),
+});
+el("#tray-add").addEventListener("click", () => { void invoke("tray_open_main", { addAccount: true }); });
 el("#tray-refresh").addEventListener("click", refreshAll);
 el("#tray-open").addEventListener("click", () => { void invoke("tray_open_main"); });
 for (const btn of document.querySelectorAll(".tray-tab")) {
@@ -1828,6 +1838,11 @@ window.addEventListener("focus", () => {
 // 订阅后端广播：主窗口刷新 / 增删改账户时，开着的面板实时同步（获焦重载仍保留作兜底）
 listen("accounts-changed", (event) => {
   const view = event.payload;
+  const orderChanged = accountOrder.apply(view);
+  if (orderChanged && JSON.stringify(view?.accounts) === JSON.stringify(accounts) && view.intervalMinutes === lastInterval) {
+    render();
+    return;
+  }
   const beforeIds = accounts.map((a) => a.id).join(",");
   accounts = view && Array.isArray(view.accounts) ? view.accounts : [];
   syncCursorUsageFilters(accounts);
@@ -1836,6 +1851,7 @@ listen("accounts-changed", (event) => {
     if (!ids.has(id)) remoteRefreshingIds.delete(id);
   }
   const u = Number(view && view.intervalMinutes);
+  lastInterval = view?.intervalMinutes;
   if (Number.isFinite(u)) setUsageCacheTtlMs(u > 0 ? u * 60_000 : DEFAULT_USAGE_TTL_MS);
   render();
   // 账户增删会改变已删除账户保留数据的集合（删除时保留 / 重新添加后接管）：先重读列表再重载总览

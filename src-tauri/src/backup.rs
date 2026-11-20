@@ -340,6 +340,12 @@ struct SettingsImport {
 }
 
 fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -> SettingsImport {
+    let backup_order = match &incoming.account_order {
+        Some(order) => crate::account_order::complete(order, &incoming.accounts),
+        None => crate::account_order::legacy(&[], &incoming.accounts),
+    };
+    let local_order = s.account_order.clone().unwrap_or_else(|| crate::account_order::legacy(&[], &s.accounts));
+    let mut restored_ids = std::collections::HashMap::new();
     let mut imported_ids = Vec::new();
     let mut added = Vec::new();
     let mut skipped_exists = 0;
@@ -359,7 +365,8 @@ fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -
             skipped_invalid += 1;
             continue;
         }
-        if accounts::is_duplicate_account(&s.accounts, &kind, &token, None) {
+        if let Some(existing) = accounts::duplicate_account(&s.accounts, &kind, &token, None) {
+            restored_ids.insert(acc.id, existing.id.clone());
             skipped_exists += 1;
             continue;
         }
@@ -384,6 +391,7 @@ fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -
             status: acc.status,
         };
         imported_ids.push(entry.id.clone());
+        restored_ids.insert(acc.id, entry.id.clone());
         added.push((
             entry.id.clone(),
             entry.kind.clone(),
@@ -392,6 +400,9 @@ fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -
         ));
         s.accounts.push(entry);
     }
+    let order: Vec<_> = backup_order.iter().filter_map(|id| restored_ids.get(id).cloned())
+        .chain(local_order).collect();
+    s.set_account_order(Some(crate::account_order::complete(&order, &s.accounts)));
     // 其余设置整体以备份为准（已在 sanitize_loaded 归一化）
     s.interval_minutes = incoming.interval_minutes;
     s.proxy = incoming.proxy;
@@ -452,6 +463,10 @@ pub async fn backup_import_apply(
         incoming.codex_usage_sync = crate::codex_sync::validate_saved_config(incoming.codex_usage_sync)?;
     }
     let ui_prefs = data.get("uiPrefs").cloned().unwrap_or(Value::Null);
+    if incoming.account_order.is_none() {
+        let groups = serde_json::from_value::<Vec<String>>(ui_prefs["accountGroupOrder"].clone()).unwrap_or_default();
+        incoming.account_order = Some(crate::account_order::legacy(&groups, &incoming.accounts));
+    }
     let usage_archives: Vec<Value> = data
         .get("usageArchives")
         .and_then(Value::as_array)

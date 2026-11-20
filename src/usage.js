@@ -1210,8 +1210,8 @@ function applyVisibility() {
   for (const key of LOCAL_KEYS) el(LOCAL_SOURCES[key].form).hidden = selection !== key;
   // 各来源账单表：合并视图（全部总览 / 多选 / 已删除）列出参与合并的来源
   el("#usage-overview").hidden = !isMergedView();
-  // 「原始账单」「生成快照」仅对单个 Cursor 账户视图开放（合并视图 / 本地分析无对应存档口径）
-  el("#usage-raw").hidden = isMergedView() || isLocalSelection() || currentAccount()?.kind === "opencode";
+  // 单个托管用量来源可查看原始账单；快照从 Cursor 事件库生成。
+  el("#usage-raw").hidden = isMergedView() || isLocalSelection() || !currentAccount();
   el("#usage-snapshot").hidden = isMergedView() || isLocalSelection() || currentAccount()?.kind === "opencode";
   el("#usage-results").hidden = true;
   el("#usage-skeleton").hidden = true;
@@ -1397,12 +1397,12 @@ async function onEditDeletedPlan(record) {
 }
 
 /**
- * 打开某个 Cursor 账户（在用或已删除保留的数据）在当前时间范围内的原始账单弹窗。
+ * 打开当前范围的逐笔账单；已删除的 Cursor 账户使用保留的事件库。
  * 在用账户在弹窗里清除本地数据后，由 USAGE_LOCAL_CLEARED_EVENT 统一触发视图重载。
  */
-function openRawBill({ accountId, label, deleted }) {
+function openRawBill({ accountId, label, deleted, kind = "cursor" }) {
   const { start, end } = rangeBounds();
-  void openRawEvents({ accountId, label, deleted, start, end, rangeText: rangeText() });
+  void openRawEvents({ accountId, label, kind, deleted, start, end, rangeText: rangeText() });
 }
 
 /**
@@ -1499,7 +1499,7 @@ function renderOverviewTable() {
   // 统计失败但有缓存数据的来源仍显示旧数字（状态列展示错误）。
   // 「数据更新」列为该来源用量数据的获取时间——各来源缓存时间可能不同，逐行展示。
   // 统计中 / 更新中的来源状态格带旋转指示并用强调色，避免与「完成」等静态文案混在一起看不出来。
-  // Cursor 账户行：状态格放「原始账单」按钮；已删除账户行：名称旁标「已删除」，
+  // 在用账户行的状态格提供「原始账单」；已删除账户行的名称旁标「已删除」，
   // 状态格放「原始账单」「编辑备注」与「删除统计数据」按钮（actions）。
   const sourceRow = ({
     kind,
@@ -1637,12 +1637,12 @@ function renderOverviewTable() {
         agg,
         planText,
         ratioText,
-        actions: a.kind === "opencode" ? [] : [
+        actions: [
           {
             icon: "bill",
             label: "原始账单",
             title: "原始账单：查看该账户在当前时间范围内的逐笔用量事件",
-            onClick: () => openRawBill({ accountId: a.id, label: accountLabel(a), deleted: false }),
+            onClick: () => openRawBill({ accountId: a.id, kind: a.kind, label: accountLabel(a), deleted: false }),
           },
         ],
       });
@@ -2576,7 +2576,7 @@ export function initUsage() {
   // 原始账单：单账户视图下查看该账户在当前时间范围内的逐笔用量事件（弹窗见 raw_events.js）
   el("#usage-raw").addEventListener("click", () => {
     const account = currentAccount();
-    if (account) openRawBill({ accountId: account.id, label: accountLabel(account), deleted: false });
+    if (account) openRawBill({ accountId: account.id, kind: account.kind, label: accountLabel(account), deleted: false });
   });
   window.addEventListener(USAGE_LOCAL_CLEARED_EVENT, (event) => {
     const id = event.detail && event.detail.accountId;

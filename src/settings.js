@@ -1,5 +1,4 @@
 import { createModal } from "./modal.js";
-import { getAccountGroupOrder, setAccountGroupOrder } from "./account_order.js";
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
 import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
 import { initSyncSettings, loadSyncSettings, saveSyncSettings } from "./usage_sync.js";
@@ -245,15 +244,12 @@ function collectUiPrefs() {
   try {
     if (localStorage.getItem("theme") === "light") theme = "light";
   } catch { /* ignore */ }
-  return { theme, numberUnit: getNumberUnit(), accountGroupOrder: getAccountGroupOrder() };
+  return { theme, numberUnit: getNumberUnit() };
 }
 
 /** 应用备份携带的界面偏好：主题即时切换，数字单位广播 unitchange 重绘各视图。 */
 function applyUiPrefs(prefs) {
   if (!prefs || typeof prefs !== "object") return;
-  if (Array.isArray(prefs.accountGroupOrder)) {
-    try { setAccountGroupOrder(prefs.accountGroupOrder); } catch { /* 界面存储不可用不影响数据恢复 */ }
-  }
   if (prefs.theme === "light" || prefs.theme === "dark") {
     document.documentElement.dataset.theme = prefs.theme;
     try { localStorage.setItem("theme", prefs.theme); } catch { /* ignore */ }

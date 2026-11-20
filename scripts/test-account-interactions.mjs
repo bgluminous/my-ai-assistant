@@ -19,7 +19,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-async function fixture(source, { stored, invoke = async () => {}, mocks = {} } = {}) {
+async function fixture(source, { stored, invoke = async () => {}, mocks = {}, events } = {}) {
   const { document, window: dom } = parseHTML(html);
   Object.defineProperty(document, "activeElement", { value: document.body, writable: true });
   dom.HTMLElement.prototype.select = function () {};
@@ -60,9 +60,9 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {} } =
     setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); deadlines.set(id, now + delay); return id; },
     clearTimeout: id => { timers.delete(id); deadlines.delete(id); } });
   const calls = [];
-  window.__TAURI__ = { core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
+  window.__TAURI__ = { event: events, core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
   const modules = new Map();
-  for (const name of ["shared", "modal", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
+  for (const name of ["shared", "modal", "codex_auth_editor", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
     modules.set(`./${name}.js`, new vm.SourceTextModule(
       await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8"), { context }));
   }
@@ -75,10 +75,6 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {} } =
   }
   const entry = new vm.SourceTextModule(source, { context });
   await entry.link(path => modules.get(path)); await entry.evaluate();
-  const panel = document.querySelector("#accounts-panel");
-  for (const card of panel.children) card.getBoundingClientRect = () => ({
-    top: [...panel.children].indexOf(card) * 100, height: 100,
-  });
   const event = (node, type, properties) => {
     const event = new dom.Event(type, { bubbles: true, cancelable: true });
     Object.assign(event, properties);
@@ -93,44 +89,319 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {} } =
       }
     },
     backdrop(root) { const target = root.querySelector(".modal-backdrop") || root; event(target, "pointerdown", { clientX: -1, clientY: -1 }); event(target, "click", { clientX: -1, clientY: -1 }); },
-    order: () => [...panel.children].map(card => card.dataset.accountKind),
-    handle: kind => document.querySelector(`[data-account-kind="${kind}"] .account-card-handle`),
+    order: () => [...document.querySelectorAll("#accounts-body tr")].map(row => row.dataset.id),
+    handle: id => document.querySelector(`[data-id="${id}"] .account-order-handle`),
     button: text => [...document.querySelectorAll("dialog button")].find(button => button.textContent === text),
   };
 }
 
-test("card order normalizes saved preferences and keyboard reordering survives reopening", async () => {
-  const f = await fixture(orderSource, { stored: [["accountGroupOrder", '["opencode","opencode","bad","claude"]']] });
-  f.api.initAccountCardOrder(); f.api.initAccountCardOrder();
-  assert.deepEqual(f.order(), ["opencode", "claude", "cursor", "codex"]);
-  assert.equal(f.document.querySelectorAll(".account-card-handle").length, 4);
-  f.event(f.handle("claude"), "keydown", { key: "ArrowUp" });
-  assert.deepEqual(f.order(), ["claude", "opencode", "cursor", "codex"]);
-  const reopened = await fixture(orderSource, { stored: [...f.values] });
-  reopened.api.initAccountCardOrder(); assert.deepEqual(reopened.order(), f.order());
+function accountBackend() {
+  const accounts = ["cursor", "opencode", "cursor"].map((kind, i) => ({
+    id: "id" + i, kind, token: "fixture", note: "账户" + i,
+  }));
+  const state = { accounts, intervalMinutes: 0, accountOrder: ["id2", "id1", "id0"], orderRevision: 1 };
+  const listeners = [];
+  const events = { async listen(name, callback) {
+    if (name === "accounts-changed") listeners.push(callback);
+    return () => {};
+  } };
+  const broadcast = () => { for (const fn of listeners) fn({ payload: structuredClone(state) }); };
+  return { state, broadcast, events, async invoke(cmd, args) {
+    if (cmd === "accounts_list") return structuredClone(state);
+    if (cmd === "accounts_move") {
+      const order = state.accountOrder.filter(id => id !== args.id);
+      order.splice(args.beforeId === null ? order.length : order.indexOf(args.beforeId), 0, args.id);
+      state.accountOrder = order;
+      state.orderRevision++;
+      broadcast();
+      return structuredClone(state);
+    }
+  } };
+}
+
+async function accountWindow(backend) {
+  const f = await fixture(accountSource, backend);
+  f.api.initAccounts();
+  await tick();
+  return f;
+}
+
+test("one list shows mixed accounts, keyboard moves reach another window and survive reopening", async () => {
+  const backend = accountBackend();
+  const first = await accountWindow(backend), second = await accountWindow(backend);
+  assert.deepEqual(first.order(), ["id2", "id1", "id0"]);
+  assert.deepEqual([...first.document.querySelectorAll(".account-name-line .tag")].map(n => n.textContent),
+    ["Cursor", "OpenCode", "Cursor"]);
+  first.event(first.handle("id0"), "keydown", { key: "ArrowUp" }); await tick();
+  second.advance(150);
+  assert.deepEqual(second.order(), ["id2", "id0", "id1"]);
+  second.event(second.handle("id2"), "keydown", { key: "ArrowDown" }); await tick();
+  first.advance(150);
+  assert.deepEqual(first.order(), ["id0", "id2", "id1"]);
+  assert.deepEqual((await accountWindow(backend)).order(), first.order());
 });
 
-test("pointer drag commits only on release; cancel restores the previous order", async () => {
-  const f = await fixture(orderSource); f.api.initAccountCardOrder();
-  f.event(f.handle("opencode"), "pointerdown", { button: 0, pointerId: 7, clientY: 350 });
-  f.event(f.window, "pointermove", { pointerId: 7, clientY: 10 });
-  assert.equal(f.order()[0], "opencode"); assert.equal(f.values.size, 0);
-  f.event(f.window, "pointercancel", { pointerId: 7 });
-  assert.deepEqual(f.order(), ["cursor", "codex", "claude", "opencode"]);
-  f.event(f.handle("opencode"), "pointerdown", { button: 0, pointerId: 8, clientY: 350 });
-  f.event(f.window, "pointermove", { pointerId: 8, clientY: 10 });
-  f.event(f.window, "pointerup", { pointerId: 8 });
-  assert.equal(JSON.parse(f.values.get("accountGroupOrder"))[0], "opencode");
-  assert.equal(f.document.body.classList.contains("account-cards-dragging"), false);
+test("drag previews across providers, Escape cancels, failed storage restores committed order", async () => {
+  const backend = accountBackend(), f = await accountWindow(backend);
+  const original = f.order();
+  const drag = () => {
+    const list = f.document.querySelector("#accounts-body");
+    for (const row of list.children) row.getBoundingClientRect = () => ({ top: [...list.children].indexOf(row) * 100, height: 100 });
+    f.event(f.handle("id1"), "pointerdown", { button: 0, pointerId: 7, clientY: 150 });
+    f.event(f.window, "pointermove", { pointerId: 7, clientY: 10 });
+    assert.deepEqual(f.order(), ["id1", "id2", "id0"]);
+  };
+  drag();
+  f.event(f.handle("id1"), "keydown", { key: "Escape" });
+  assert.deepEqual(f.order(), original);
+  assert.equal(f.calls.some(c => c.cmd === "accounts_move"), false);
+  drag();
+  f.event(f.window, "pointerup", { pointerId: 7 }); await tick();
+  assert.deepEqual(f.order(), ["id1", "id2", "id0"]);
+  const failed = await accountWindow({ ...backend, invoke: (cmd, args) => {
+    if (cmd === "accounts_move") throw Error("disk");
+    return backend.invoke(cmd, args);
+  } });
+  failed.event(failed.handle("id1"), "keydown", { key: "ArrowDown" }); await tick();
+  assert.deepEqual(failed.order(), f.order());
 });
 
-test("restoring order updates the cards; storage failure does not pretend to save", async () => {
-  const f = await fixture(orderSource); f.api.initAccountCardOrder();
-  f.api.setAccountGroupOrder(["claude"]);
-  assert.deepEqual(f.order(), ["claude", "cursor", "codex", "opencode"]);
-  f.storage.setItem = () => { throw new Error("full"); };
-  f.event(f.handle("cursor"), "keydown", { key: "ArrowUp" });
-  assert.deepEqual(f.order(), ["claude", "cursor", "codex", "opencode"]);
+test("empty list keeps the add picker and dispatches OpenCode to its own authorization flow", async () => {
+  const backend = accountBackend(); backend.state.accounts = []; backend.state.accountOrder = [];
+  const f = await accountWindow(backend);
+  assert.equal(f.order().length, 0);
+  assert.equal(f.document.querySelector("#accounts-empty").hidden, false);
+  f.document.querySelector("#accounts-add").click();
+  const picker = f.document.querySelector("#account-type-modal");
+  assert.equal(picker.hidden, false);
+  assert.equal(picker.querySelectorAll("[data-kind]").length, 4);
+  picker.querySelector('[data-kind="opencode"]').click();
+  assert.equal(picker.hidden, true);
+  assert.ok(f.button("新增 OAuth 授权"));
+});
+
+test("older IPC replies cannot roll back a newer order broadcast", async () => {
+  const f = await fixture(orderSource);
+  const order = f.api.trackAccountOrder(), accounts = [{id:"a"},{id:"b"}];
+  order.apply({ accountOrder:["b","a"], orderRevision:2 });
+  order.apply({ accountOrder:["a","b"], orderRevision:1 });
+  assert.deepEqual(Array.from(order.rows(accounts), a => a.id), ["b","a"]);
+});
+
+test("legacy card preferences reach the backend when the account list first opens", async () => {
+  const f = await fixture(orderSource, { stored: [["accountGroupOrder", '["opencode","cursor","claude","codex"]']] });
+  await f.api.loadAccountList();
+  assert.equal(f.calls[0].cmd, "accounts_list");
+  assert.deepEqual([...f.calls[0].args.legacyGroups], ["opencode","cursor","claude","codex"]);
+});
+
+test("toolbar refreshes all accounts and exports all or the exact selected row", async () => {
+  const f = await accountWindow(accountBackend());
+  const header = [...f.document.querySelectorAll("#accounts-panel .heading-side button")];
+  assert.deepEqual(header.map(button => button.id), ["accounts-refresh", "accounts-import", "accounts-export", "accounts-logout", "accounts-add"]);
+  f.calls.length = 0;
+  header[0].click(); await tick();
+  assert.deepEqual(f.calls.filter(c => c.cmd === "account_refresh").map(c => c.args.id).sort(), ["id0", "id1", "id2"]);
+  for (const id of f.order()) {
+    const row = f.document.querySelector(`tr[data-id="${id}"]`);
+    const buttons = row.querySelectorAll('button[aria-label="导出此账户"]');
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0], row.querySelector(".account-actions").lastElementChild);
+    buttons[0].click(); await tick();
+    assert.equal(f.calls.at(-1).cmd, "account_export_one");
+    assert.equal(f.calls.at(-1).args.id, id);
+  }
+  header[2].click(); await tick();
+  assert.equal(f.calls.at(-1).cmd, "accounts_export_all");
+  header[1].click(); await tick();
+  assert.equal(f.calls.at(-1).cmd, "accounts_import_file");
+});
+
+
+test("sign-out reuses the add picker and confirms only the chosen local client", async () => {
+  const backend = accountBackend();
+  backend.state.accounts = []; backend.state.accountOrder = [];
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) =>
+    cmd.endsWith("_client_status") ? { running: false } : backend.invoke(cmd, args) });
+  const q = s => f.document.querySelector(s);
+  assert.equal(q("#accounts-export").disabled, true);
+  assert.equal(q("#accounts-import").disabled, false);
+  for (const kind of ["cursor", "codex", "claude"]) {
+    q("#accounts-logout").click();
+    assert.deepEqual([...q("#account-type-modal").querySelectorAll("[data-kind]")]
+      .filter(b => !b.hidden).map(b => b.dataset.kind), ["cursor", "codex", "claude"]);
+    q('#account-type-modal [data-kind="' + kind + '"]').click(); await tick();
+    assert.equal(f.calls.at(-1).cmd, kind + "_client_status");
+    assert.equal(q("#switch-modal").hidden, false);
+    q("#switch-cancel").click(); await tick();
+    assert.equal(f.calls.some(c => c.cmd.endsWith("_logout_local")), false);
+  }
+  q("#accounts-add").click();
+  assert.equal(q('#account-type-modal [data-kind="opencode"]').hidden, false);
+});
+
+function authBackend() {
+  const documents = new Map(["a", "b"].map(id => [id, {
+    tokens: { access_token: "fixture-access-" + id, refresh_token: "fixture-refresh-" + id, account_id: id, id_token: "fixture-id-" + id },
+    last_refresh: "2026-11-18T12:00:00Z", custom: { owner: id, nested: [1, 2] },
+  }]));
+  const rows = ["a", "b"].map(id => ({ id, kind: "codex", note: "Account " + id, noteAuto: true,
+    token: documents.get(id).tokens.access_token, refreshToken: documents.get(id).tokens.refresh_token,
+    codexAuthRevision: "r1", refreshIntervalMinutes: 5, autoRefreshToken: true }));
+  const view = () => structuredClone({ accounts: rows, accountOrder: ["b", "a"], intervalMinutes: 0 });
+  const read = id => ({ text: JSON.stringify(documents.get(id), null, 2), revision: rows.find(a => a.id === id).codexAuthRevision });
+  return { rows, documents, read, async invoke(cmd, args) {
+    if (cmd === "accounts_list") return view();
+    if (cmd === "codex_auth_read") return read(args.id);
+    if (cmd === "codex_auth_project") {
+      let auth;
+      try { auth = JSON.parse(args.text); } catch { throw new Error("codex_auth_json:2:9"); }
+      if (args.patch) {
+        auth.tokens.access_token = args.patch.accessToken;
+        if (args.patch.refreshToken) auth.tokens.refresh_token = args.patch.refreshToken;
+        else delete auth.tokens.refresh_token;
+      }
+      if (!auth?.tokens?.access_token) throw new Error("codex_auth_access_token");
+      return { text: JSON.stringify(auth, null, 2), accessToken: auth.tokens.access_token, refreshToken: auth.tokens.refresh_token };
+    }
+    if (cmd === "accounts_update") {
+      const row = rows.find(a => a.id === args.id);
+      if (args.updateCredentials) {
+        if (args.expectedAuthRevision !== row.codexAuthRevision) throw new Error("codex_auth_conflict");
+        const next = JSON.parse(args.codexAuthText);
+        documents.set(row.id, next);
+        row.token = next.tokens.access_token;
+        row.refreshToken = next.tokens.refresh_token;
+        row.codexAuthRevision += "x";
+      }
+      if ("note" in args) row.note = args.note;
+      if (args.updateInterval) row.refreshIntervalMinutes = args.refreshIntervalMinutes;
+      if ("autoRefreshToken" in args) row.autoRefreshToken = args.autoRefreshToken;
+      return view();
+    }
+  } };
+}
+
+test("ChatGPT Auth is loaded by ID on demand and both modes keep edits until a single save", async () => {
+  const backend = authBackend(), f = await accountWindow(backend);
+  const q = s => f.document.querySelector(s), click = async s => { q(s).click(); await tick(); };
+  f.api.openModal(backend.rows[1]);
+  assert.equal(q("#account-auth-field").hidden, true);
+  assert.equal(f.calls.some(c => c.cmd === "codex_auth_read"), false);
+  q("#account-token").value = "fixture-first-edit";
+  await click("#account-mode-auth");
+  const raw = q("#account-auth-json");
+  assert.equal(f.calls.find(c => c.cmd === "codex_auth_read").args.id, "b");
+  const draft = JSON.parse(raw.value);
+  assert.equal(draft.tokens.access_token, "fixture-first-edit");
+  draft.tokens.access_token = "fixture-pasted";
+  delete draft.tokens.refresh_token;
+  draft.more = { enabled: true };
+  raw.value = JSON.stringify(draft);
+  await click("#account-mode-token");
+  assert.equal(q("#account-token").value, "fixture-pasted");
+  assert.equal(q("#account-refresh-token").value, "");
+  await click("#account-mode-auth");
+  assert.equal(raw.value, JSON.stringify(draft));
+  await click("#account-mode-token");
+  q("#account-token").value = "fixture-final";
+  q("#account-note").value = "新备注";
+  q("#account-refresh-interval").value = "";
+  q("#account-auto-refresh-token").checked = false;
+  await f.api.onSave();
+  assert.equal(q("#account-modal").hidden, true);
+  const writes = f.calls.filter(c => c.cmd === "accounts_update");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].args.id, "b");
+  assert.equal(writes[0].args.expectedAuthRevision, "r1");
+  assert.equal(writes[0].args.note, "新备注");
+  assert.equal(writes[0].args.refreshIntervalMinutes, null);
+  assert.equal(writes[0].args.autoRefreshToken, false);
+  assert.equal("token" in writes[0].args, false);
+  f.api.openModal(backend.rows[1]);
+  await click("#account-mode-auth");
+  draft.tokens.access_token = "fixture-final";
+  assert.deepEqual(JSON.parse(raw.value), draft);
+  assert.equal(backend.documents.get("a").tokens.account_id, "a");
+});
+
+test("viewing Auth sends no account update, a metadata-only edit preserves renewed credentials", async () => {
+  const backend = authBackend(), f = await accountWindow(backend);
+  const q = s => f.document.querySelector(s);
+  const open = async () => { f.api.openModal(structuredClone(backend.rows[0])); q("#account-mode-auth").click(); await tick(); };
+  await open();
+  await f.api.onSave();
+  assert.equal(f.calls.filter(c => c.cmd === "accounts_update").length, 0);
+  assert.equal(q("#account-auth-json").value, "");
+  await open();
+  backend.rows[0].codexAuthRevision = "r2";
+  backend.documents.get("a").tokens.id_token = "fixture-renewed";
+  q("#account-note").value = "edited note";
+  await f.api.onSave();
+  const write = f.calls.at(-1);
+  assert.equal(write.cmd, "accounts_update");
+  assert.deepEqual(Object.keys(write.args).sort(), ["id", "note", "updateCredentials", "updateInterval"]);
+  assert.equal(write.args.updateCredentials, false);
+  assert.equal(backend.documents.get("a").tokens.id_token, "fixture-renewed");
+});
+
+test("invalid JSON and concurrent renewal preserve the draft and reload only replaces credentials", async () => {
+  const backend = authBackend(), f = await accountWindow(backend);
+  const q = s => f.document.querySelector(s), click = async s => { q(s).click(); await tick(); };
+  f.api.openModal(structuredClone(backend.rows[0]));
+  await click("#account-mode-auth");
+  const raw = q("#account-auth-json"), note = q("#account-note"), status = q("#account-auth-status");
+  raw.value = '{\n"tokens":}';
+  await click("#account-mode-token");
+  assert.equal(raw.value, '{\n"tokens":}');
+  assert.equal(q("#account-auth-field").hidden, false);
+  assert.match(status.textContent, /第 2 行，第 9 列/);
+  await f.api.onSave();
+  assert.equal(f.calls.some(c => c.cmd === "accounts_update"), false);
+  note.value = "keep me";
+  const draft = structuredClone(backend.documents.get("a")); draft.custom.extra = true;
+  raw.value = JSON.stringify(draft);
+  backend.documents.get("a").tokens.access_token = "fixture-renewed";
+  backend.rows[0].codexAuthRevision = "r2";
+  await f.api.onSave();
+  assert.equal(q("#account-modal").hidden, false);
+  assert.equal(raw.value, JSON.stringify(draft));
+  assert.equal(note.value, "keep me");
+  assert.equal(q("#account-auth-reload").hidden, false);
+  await click("#account-auth-reload");
+  assert.equal(JSON.parse(raw.value).tokens.access_token, "fixture-renewed");
+  assert.equal(note.value, "keep me");
+  await f.api.onSave();
+  assert.equal(f.calls.at(-1).args.updateCredentials, false);
+});
+
+test("first Auth read detects renewal after typing in Token mode and keeps that input", async () => {
+  const backend = authBackend(), f = await accountWindow(backend);
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(structuredClone(backend.rows[0]));
+  q("#account-token").value = "manual-draft";
+  backend.rows[0].codexAuthRevision = "r2";
+  backend.documents.get("a").tokens.access_token = "renewed-access";
+  q("#account-mode-auth").click(); await tick();
+  assert.equal(q("#account-token").value, "manual-draft");
+  assert.equal(q("#account-token-fields").hidden, false);
+  assert.equal(q("#account-auth-reload").hidden, false);
+  assert.equal(f.calls.some(c => c.cmd === "accounts_update"), false);
+  q("#account-auth-reload").click(); await tick();
+  assert.equal(q("#account-auth-field").hidden, false);
+  assert.equal(JSON.parse(q("#account-auth-json").value).tokens.access_token, "renewed-access");
+});
+
+test("a pending Auth read from a closed account never populates the next editor", async () => {
+  const backend = authBackend(), first = deferred();
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) =>
+    cmd === "codex_auth_read" && args.id === "a" ? first.promise : backend.invoke(cmd, args) });
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(backend.rows[0]); q("#account-mode-auth").click();
+  q("#account-cancel").click();
+  f.api.openModal(backend.rows[1]); q("#account-mode-auth").click(); await tick();
+  first.resolve(backend.read("a")); await tick();
+  assert.equal(JSON.parse(q("#account-auth-json").value).tokens.account_id, "b");
 });
 
 test("OpenCode add stays local until a method is chosen and imports only the selected workspace with its note", async () => {
@@ -426,7 +697,7 @@ test("OpenCode partial reads explain each failing field without adding summary o
   assert.match(icon.title, /额度：/); assert.match(icon.title, /余额：/);
   assert.match(icon.title, /缓存/); assert.match(icon.title, /管理员/);
   assert.equal(row.querySelectorAll(".summary-meta, .ondemand-limit, .account-error").length, 0);
-  assert.equal(row.children[4].textContent, "$0.00");
+  assert.equal(row.children[5].textContent, "$0.00");
 });
 
 test("credential expiry sits below state and alongside renewal instead of inside the primary label", async () => {
@@ -445,7 +716,7 @@ test("credential expiry sits below state and alongside renewal instead of inside
 test("all account editors confirm Escape and backdrop separately and restore focus after closing", async () => {
   for (const kind of ["cursor", "codex", "claude", "opencode"]) {
     const f = await fixture(kind === "opencode" ? oauthSource : accountSource);
-    const trigger = f.document.querySelector(`#accounts-add-${kind}`);
+    const trigger = f.document.querySelector("#accounts-add");
     const open = () => {
       trigger.focus();
       if (kind === "opencode") f.api.editOpenCode({ id: "a", token: "wrk_a", note: "draft" });
@@ -630,6 +901,86 @@ test("OpenCode saving uses the same busy hint for Escape, backdrop and explicit 
   assert.equal(input.disabled, false); assert.equal(input.value, "draft");
   f.event(root.querySelector("[data-close]"), "click"); await tick();
   assert.equal(root.isConnected, false);
+});
+
+test("OpenCode raw bills export all filtered pages with blank unknown costs and token subcounts", async () => {
+  const source = await readFile(new URL("../src/raw_events.js", import.meta.url), "utf8");
+  let exported;
+  const events = Array.from({ length: 302 }, (_, i) => ({
+    timestampMs: 1700000000000 - i, requestId: "req-" + i, product: "go",
+    model: i === 301 ? "other" : "sample", displayModel: "normalized-" + (i === 301 ? "other" : "sample"),
+    pricedAs: null, equivalentUsd: null, reportedCostUsd: i === 0 ? 0 : null,
+    inputTokens: 10, cacheReadTokens: 30, cacheWriteTokens: 40, cacheWrite1hTokens: 12,
+    outputTokens: 20, reasoningTokens: 15, totalTokens: 100,
+  }));
+  const f = await fixture(source, { mocks: {
+    fetchRawEvents: async (id, args) => {
+      assert.equal(args.kind, "opencode");
+      return { events, total: 302, syncedAt: 100, coverageGaps: [{}] };
+    },
+    exportUsageEventsCsv: async (name, csv) => { exported = { name, csv }; return {cancelled:true}; },
+  } });
+  f.api.initRawEvents(); await f.api.openRawEvents({ accountId:"wk", kind:"opencode", label:"Work" });
+  const elem = id => f.document.querySelector("#raw-" + id);
+  assert.equal(elem("clear").hidden, true);
+  assert.match(elem("status").textContent, /归档缺口/);
+  assert.equal(elem("body").children.length, 300);
+  elem("search").value = "normalized-sample"; f.event(elem("search"), "input");
+  assert.match(elem("count").textContent, /301 条.*30,100 tok.*记录成本 \$0.00/);
+  assert.match(elem("count").textContent, /300 条未提供成本/);
+  elem("export").click(); await tick();
+  assert.match(exported.name, /^opencode-usage_/);
+  const lines = exported.csv.trimEnd().split("\r\n");
+  assert.equal(lines.length, 302);
+  assert.match(lines[0], /官方记录成本/); assert.doesNotMatch(lines[0], /实扣/);
+  assert.match(lines[1], /,12,15,0,$/); assert.match(lines.at(-1), /req-300.*?,12,15,,$/);
+  elem("more").click(); assert.equal(elem("body").children.length, 301);
+});
+
+test("Cursor live and retained bills keep their charges, CSV format and clear permissions", async () => {
+  const source = await readFile(new URL("../src/raw_events.js", import.meta.url), "utf8");
+  let exported;
+  const row = { model:"sample", displayModel:"sample", pricedAs:"sample", inputTokens:10, cacheReadTokens:8,
+    cacheWriteTokens:2, outputTokens:5, totalTokens:25, actualUsd:0.004, equivalentUsd:0.003, timestampMs:1000 };
+  const f = await fixture(source, { mocks: {
+    fetchRawEvents: async (id, {kind}) => {
+      assert.equal(kind, "cursor");
+      return {events:[row], total:1, syncedAt:2000};
+    },
+    exportUsageEventsCsv: async (_, csv) => { exported = csv; return {cancelled:true}; },
+  } });
+  f.api.initRawEvents();
+  for (const deleted of [false, true]) {
+    await f.api.openRawEvents({ accountId:"id", label:"Cursor", deleted });
+    const elem = id => f.document.querySelector("#raw-" + id);
+    assert.equal(elem("clear").hidden, deleted);
+    assert.equal(elem("cost-heading").textContent, "实扣");
+    assert.equal(elem("body").children.length, 1);
+    assert.equal(elem("modal-sub").textContent.includes("已删除"), deleted);
+    elem("export").click(); await tick();
+    assert.match(exported, /实扣\(USD\)/);
+    assert.match(exported, /0\.004000,0\.003000/);
+    assert.doesNotMatch(exported, /请求 ID|1h|官方记录成本/);
+    elem("close").click();
+  }
+});
+
+test("OpenCode empty archives distinguish first sync, coverage gaps and a completed empty range", async () => {
+  const source = await readFile(new URL("../src/raw_events.js", import.meta.url), "utf8");
+  let data;
+  const f = await fixture(source, { mocks: { fetchRawEvents: async () => ({events:[],total:0,...data}) } });
+  for (const [coverage, message] of [
+    [{syncedAt:0}, /尚未完成首次同步/],
+    [{syncedAt:200,coverageGaps:[{start:11,end:12}]}, /已归档部分/],
+    [{syncedAt:200,pendingSince:201}, /已归档部分/],
+    [{syncedAt:200,coverageGaps:[]}, /该范围内没有用量事件/],
+  ]) {
+    data = coverage;
+    await f.api.openRawEvents({accountId:"wk",kind:"opencode",label:"Work",start:10,end:100});
+    assert.match(f.document.querySelector("#raw-empty").textContent, message);
+    assert.equal(f.document.querySelector("#raw-export").disabled, true);
+    f.document.querySelector("#raw-close").click();
+  }
 });
 
 test("read-only bills still close on one backdrop click and ignore an earlier load after reopening", async () => {

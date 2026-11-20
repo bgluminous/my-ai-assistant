@@ -13,9 +13,11 @@ use crate::{
     local_crypto, settings,
 };
 
+pub(crate) mod auth_edit;
+
 /// 账户 JSON 导入/导出文件标识。
 const EXPORT_FORMAT: &str = "my-ai-assistant-accounts";
-const EXPORT_VERSION: u32 = 1;
+const EXPORT_VERSION: u32 = 2;
 
 /// OpenAI OAuth token 端点（Codex access_token 续期）。
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -265,6 +267,10 @@ pub struct AccountsFile {
     #[serde(default)]
     pub accounts: Vec<Account>,
     #[serde(default)]
+    pub account_order: Option<Vec<String>>,
+    #[serde(skip)]
+    pub order_revision: u64,
+    #[serde(default)]
     pub interval_minutes: u32,
 }
 
@@ -287,7 +293,11 @@ where
     let data = settings::mutate(|s| {
         let mut data = s.accounts_file();
         f(&mut data)?;
+        if let Some(order) = &data.account_order {
+            data.account_order = Some(crate::account_order::complete(order, &data.accounts));
+        }
         s.apply_accounts(data.clone());
+        data.order_revision = s.account_order_revision;
         Ok(data)
     })?;
     let _ = app.emit("accounts-changed", view(&data));
@@ -318,6 +328,8 @@ pub struct AccountView {
     /// ChatGPT：凭据组（access / refresh token）最后一次换新的时刻（unix 毫秒），来自副本的 last_refresh；
     /// 无副本或副本没记时间为 None。
     pub codex_auth_refreshed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_auth_revision: Option<String>,
     pub opencode_authorized: bool,
 }
 
@@ -330,6 +342,7 @@ pub(crate) fn account_view(acc: &Account) -> AccountView {
     AccountView {
         account,
         codex_auth_refreshed_at,
+        codex_auth_revision: (acc.kind == "codex").then(|| auth_edit::revision(acc)),
         opencode_authorized: acc.kind == "opencode" && crate::opencode::account_credential(acc).is_ok(),
     }
 }
@@ -338,6 +351,8 @@ pub(crate) fn account_view(acc: &Account) -> AccountView {
 #[serde(rename_all = "camelCase")]
 pub struct AccountsView {
     pub accounts: Vec<AccountView>,
+    pub account_order: Option<Vec<String>>,
+    pub order_revision: u64,
     pub interval_minutes: u32,
     pub path: String,
 }
@@ -345,6 +360,8 @@ pub struct AccountsView {
 fn view(data: &AccountsFile) -> AccountsView {
     AccountsView {
         accounts: data.accounts.iter().map(account_view).collect(),
+        account_order: data.account_order.clone(),
+        order_revision: data.order_revision,
         interval_minutes: data.interval_minutes,
         path: settings::path_display(),
     }
@@ -561,12 +578,18 @@ pub(crate) fn is_duplicate_account(
     token: &str,
     exclude_id: Option<&str>,
 ) -> bool {
+    duplicate_account(accounts, kind, token, exclude_id).is_some()
+}
+
+pub(crate) fn duplicate_account<'a>(
+    accounts: &'a [Account], kind: &str, token: &str, exclude_id: Option<&str>,
+) -> Option<&'a Account> {
     let identity = account_identity(kind, token);
     accounts
         .iter()
         .filter(|a| a.kind == kind)
         .filter(|a| exclude_id.is_none_or(|id| a.id != id))
-        .any(|a| match &identity {
+        .find(|a| match &identity {
             Some(idn) => account_identity(kind, &a.token)
                 .is_some_and(|other| if kind == "opencode" { other == *idn } else { other.eq_ignore_ascii_case(idn) }),
             None => a.token == token,
@@ -624,12 +647,32 @@ pub(crate) fn replace_opencode_auth(
 }
 
 #[tauri::command]
-pub fn accounts_list() -> Result<AccountsView, String> {
+pub fn accounts_list(app: AppHandle, legacy_groups: Option<Vec<String>>) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
     // 启动时载入失败（如文件被短暂占用）会在这里自愈；仍失败则明确报错，
     // 前端展示错误横幅而不是被误导成「暂无账户」。
     settings::ensure_loaded()?;
-    Ok(view(&current()))
+    let data = current();
+    if data.account_order.is_none() {
+        if let Some(groups) = legacy_groups {
+            let migrated = mutate(&app, |data| {
+                data.account_order.get_or_insert_with(|| crate::account_order::legacy(&groups, &data.accounts));
+                Ok(())
+            })?;
+            return Ok(view(&migrated));
+        }
+    }
+    Ok(view(&data))
+}
+
+#[tauri::command]
+pub fn accounts_move(app: AppHandle, id: String, before_id: Option<String>) -> Result<Value, String> {
+    let _operation = crate::operations::begin()?;
+    let data = mutate(&app, |data| {
+        let order = data.account_order.as_mut().ok_or("account_order_uninitialized")?;
+        crate::account_order::move_before(order, &id, before_id.as_deref())
+    })?;
+    Ok(json!({"accountOrder":data.account_order, "orderRevision":data.order_revision}))
 }
 
 #[tauri::command]
@@ -741,20 +784,139 @@ pub(crate) fn notify_usage_archive_changed(app: &AppHandle) {
     let _ = app.emit("usage-archive-changed", ());
 }
 
+/// 已准备好的编辑，在 settings 的同一写锁下校验、查重并更新整行。
+struct AccountEdit {
+    note: Option<String>,
+    update_credentials: bool,
+    token: String,
+    refresh_token: Option<String>,
+    new_codex_auth: Option<Value>,
+    expected_auth_revision: Option<String>,
+    // None 保留当前设置，Some(None) 恢复跟随全局。
+    interval: Option<Option<u32>>,
+    auto_refresh_token: Option<bool>,
+    ignore_api_models: Option<bool>,
+}
+
+impl AccountEdit {
+    fn apply(
+        self,
+        data: &mut AccountsFile,
+        id: &str,
+        archive: Option<&crate::usage_archive::UsageArchive>,
+    ) -> Result<Vec<&'static str>, String> {
+        let pos = data
+            .accounts
+            .iter()
+            .position(|a| a.id == id)
+            .ok_or("not_found")?;
+        let current = &data.accounts[pos];
+        let mut token = self.token;
+        let mut refresh = self.refresh_token;
+        if self.update_credentials {
+            if let Some(expected) = &self.expected_auth_revision {
+                auth_edit::check_revision(current, expected)?;
+            }
+            if let Some(auth) = &self.new_codex_auth {
+                if current.kind != "codex" {
+                    return Err("not_codex_account".into());
+                }
+                (token, refresh) = auth_edit::credentials(auth)?;
+            }
+            if is_duplicate_account(&data.accounts, &current.kind, &token, Some(id)) {
+                return Err("duplicate_account".into());
+            }
+        }
+        let mut changed = Vec::new();
+        let acc = &mut data.accounts[pos];
+        if acc.kind == "cursor" {
+            if let Some(ignore) = self.ignore_api_models {
+                if ignore {
+                    crate::usage_archive::save_api_events_removal(archive)?;
+                }
+                if ignore != acc.ignore_api_models {
+                    acc.ignore_api_models = ignore;
+                    changed.push("不记录 API 额度用量");
+                }
+            }
+        }
+        if self.update_credentials {
+            if let Some(auth) = &self.new_codex_auth {
+                if codex_auth_json(acc).as_ref() != Some(auth) {
+                    acc.codex_auth = Some(local_crypto::seal(&auth.to_string())?);
+                    changed.push("Auth 凭据");
+                }
+            }
+            if token != acc.token || refresh != acc.refresh_token {
+                acc.status = None;
+                acc.last_refresh_at = None;
+            }
+            if token != acc.token {
+                changed.push("Token");
+            }
+            if refresh != acc.refresh_token {
+                changed.push("Refresh Token");
+            }
+            acc.token = token;
+            // 刻意删除的可选凭据也须反映在内存与磁盘上。
+            acc.refresh_token = refresh;
+        }
+        if let Some(note) = self.note.as_deref().map(str::trim) {
+            let auto = note.is_empty();
+            let value = if !auto {
+                note.to_owned()
+            } else if acc.kind == "opencode" || !self.update_credentials {
+                best_identity(acc)
+            } else {
+                default_note_from_token(&acc.kind, &acc.token)
+            };
+            if value != acc.note || auto != acc.note_auto {
+                acc.note = value;
+                acc.note_auto = auto;
+                changed.push("备注");
+            }
+        }
+        if let Some(interval) = self.interval {
+            if interval != acc.refresh_interval_minutes {
+                acc.refresh_interval_minutes = interval;
+                changed.push("同步间隔");
+            }
+        }
+        if let Some(enabled) = self.auto_refresh_token.filter(|_| acc.kind != "cursor") {
+            if enabled != acc.auto_refresh_token {
+                acc.auto_refresh_token = enabled;
+                changed.push("自动续期 Token");
+            }
+        }
+        Ok(changed)
+    }
+}
+
 #[tauri::command]
 pub async fn accounts_update(
     app: AppHandle,
     id: String,
-    note: String,
-    token: String,
+    note: Option<String>,
+    token: Option<String>,
     refresh_token: Option<String>,
     ignore_api_models: Option<bool>,
     refresh_interval_minutes: Option<u32>,
     auto_refresh_token: Option<bool>,
     update_credentials: Option<bool>,
+    update_interval: Option<bool>,
+    codex_auth_text: Option<String>,
+    expected_auth_revision: Option<String>,
 ) -> Result<AccountsView, String> {
     let _operation = crate::operations::begin()?;
-    let update_credentials = update_credentials.unwrap_or(true);
+    let token = token.as_deref().unwrap_or_default();
+    let full_auth = codex_auth_text
+        .as_deref()
+        .map(auth_edit::parse)
+        .transpose()?;
+    if full_auth.is_some() && expected_auth_revision.is_none() {
+        return Err("codex_auth_conflict".into());
+    }
+    let update_credentials = full_auth.is_some() || update_credentials.unwrap_or(true);
     // 仅修改设置不排队，关闭开关可以立即影响后续续期；主动改凭据与该供应商刷新互斥。
     let kind = snapshot(&id)?.kind;
     let _queued = if update_credentials {
@@ -763,34 +925,42 @@ pub async fn accounts_update(
         None
     };
     let before = snapshot(&id)?;
-    if update_credentials && before.kind == "opencode" && (token.trim() != before.token || refresh_token.as_deref().is_some_and(|s| !s.is_empty())) {
+    if let Some(revision) = expected_auth_revision
+        .as_deref()
+        .filter(|_| update_credentials)
+    {
+        auth_edit::check_revision(&before, revision)?;
+    }
+    if update_credentials
+        && before.kind == "opencode"
+        && (token.trim() != before.token || refresh_token.as_deref().is_some_and(|s| !s.is_empty()))
+    {
         return Err("opencode_use_oauth".into());
     }
-    let token = if update_credentials { sanitize_token(&before.kind, &token)? } else { before.token.clone() };
-    let refresh_token = if update_credentials { sanitize_refresh_token(refresh_token) } else { before.refresh_token.clone() };
-    let credentials_changed = update_credentials && (token != before.token || refresh_token != before.refresh_token);
-    // ChatGPT 改了凭据：与添加时一样立刻换一组完整凭据存成副本（换不到退回骨架副本）
-    let mut exchange_note = String::new();
-    let new_codex_auth = if before.kind == "codex" && credentials_changed {
-        let full = match refresh_token.as_deref() {
-            Some(rt) => exchange_codex_auth(rt).await,
-            None => Err("没有 Refresh Token".to_string()),
+    let (token, refresh_token) = if let Some(auth) = &full_auth {
+        auth_edit::credentials(auth)?
+    } else if update_credentials {
+        (
+            sanitize_token(&before.kind, token)?,
+            sanitize_refresh_token(refresh_token),
+        )
+    } else {
+        (before.token.clone(), before.refresh_token.clone())
+    };
+    let credentials_changed =
+        update_credentials && (token != before.token || refresh_token != before.refresh_token);
+    // 完整 Auth 已是用户要保存的副本。只有原有 Token 编辑流程才尝试换票。
+    let new_codex_auth = if full_auth.is_some() {
+        full_auth
+    } else if before.kind == "codex" && credentials_changed {
+        let exchanged = match refresh_token.as_deref() {
+            Some(rt) => exchange_codex_auth(rt).await.ok(),
+            None => None,
         };
-        Some(match full {
-            Ok(v) => {
-                exchange_note = "，已换取完整凭据".to_string();
-                v
-            }
-            Err(e) => {
-                exchange_note = format!("，未能换取完整凭据：{e}");
-                skeleton_codex_auth(&token, refresh_token.as_deref())
-            }
-        })
+        Some(exchanged.unwrap_or_else(|| skeleton_codex_auth(&token, refresh_token.as_deref())))
     } else {
         None
     };
-    let mut name = String::new();
-    let mut changed: Vec<&str> = Vec::new();
     // 与用量同步串行：清理成功后才保存开关，防止并发同步把 API 事件写回。
     let usage_lock = crate::usage_archive::account_lock(&id);
     let _usage_guard = if before.kind == "cursor" {
@@ -808,73 +978,22 @@ pub async fn accounts_update(
     } else {
         None
     };
-    let data = mutate(&app, |d| {
-        let pos = d
-            .accounts
-            .iter()
-            .position(|a| a.id == id)
-            .ok_or_else(|| "not_found".to_string())?;
-        let kind = d.accounts[pos].kind.clone();
-        // 改后的凭据与其它同类账户查重（排除自身）
-        if update_credentials && is_duplicate_account(&d.accounts, &kind, &token, Some(id.as_str())) {
-            return Err("duplicate_account".into());
-        }
-        let acc = &mut d.accounts[pos];
-        // 备注留空 = 恢复自动（用邮箱/用户名兜底）；非空 = 用户手填，之后刷新不再覆盖
-        let trimmed_note = note.trim().to_string();
-        let new_note_auto = trimmed_note.is_empty();
-        let new_note = if new_note_auto {
-            if kind == "opencode" || !update_credentials { best_identity(acc) } else { default_note_from_token(&kind, &token) }
-        } else {
-            trimmed_note
-        };
-        if new_note != acc.note {
-            changed.push("备注");
-        }
-        if update_credentials && token != acc.token {
-            changed.push("Token");
-        }
-        if update_credentials && refresh_token != acc.refresh_token {
-            changed.push("Refresh Token");
-        }
-        if kind == "cursor" {
-            if let Some(ignore) = ignore_api_models {
-                if ignore {
-                    crate::usage_archive::save_api_events_removal(filtered_archive.as_ref())?;
-                }
-                if ignore != acc.ignore_api_models {
-                    changed.push("不记录 API 额度用量");
-                    acc.ignore_api_models = ignore;
-                }
-            }
-        }
-        // 凭据发生变化时旧的状态摘要随之失效
-        if credentials_changed {
-            acc.status = None;
-            acc.last_refresh_at = None;
-        }
-        acc.note = new_note;
-        acc.note_auto = new_note_auto;
-        if update_credentials {
-            acc.token = token.clone();
-            acc.refresh_token = refresh_token.clone();
-        }
-        if let Some(v) = &new_codex_auth {
-            set_codex_auth(acc, v)?;
-        }
-        if acc.refresh_interval_minutes != refresh_interval_minutes {
-            changed.push("同步间隔");
-            acc.refresh_interval_minutes = refresh_interval_minutes;
-        }
-        if kind != "cursor" {
-            if let Some(enabled) = auto_refresh_token {
-                if acc.auto_refresh_token != enabled {
-                    changed.push(if enabled { "开启自动续期 Token" } else { "关闭自动续期 Token" });
-                    acc.auto_refresh_token = enabled;
-                }
-            }
-        }
-        name = display_name(&acc.kind, &acc.note, &acc.token);
+    let edit = AccountEdit {
+        note,
+        update_credentials,
+        token,
+        refresh_token,
+        new_codex_auth,
+        expected_auth_revision,
+        interval: update_interval
+            .unwrap_or(true)
+            .then_some(refresh_interval_minutes),
+        auto_refresh_token,
+        ignore_api_models,
+    };
+    let mut changed = Vec::new();
+    let data = mutate(&app, |data| {
+        changed = edit.apply(data, &id, filtered_archive.as_ref())?;
         Ok(())
     })?;
     let what = if changed.is_empty() {
@@ -882,9 +1001,19 @@ pub async fn accounts_update(
     } else {
         format!("更新了{}", changed.join("、"))
     };
+    let label = if kind == "codex" {
+        "ChatGPT 账户".into()
+    } else {
+        let acc = data
+            .accounts
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or("not_found")?;
+        display_name(&kind, &acc.note, &acc.token)
+    };
     audit::log(
         "account_update",
-        format!("编辑账户：{name}（{what}{exchange_note}）"),
+        format!("编辑账户：{label}（{what}）"),
         Some(serde_json::json!({ "id": id })),
     );
     Ok(view(&data))
@@ -1933,12 +2062,14 @@ pub async fn accounts_import_local(app: AppHandle, kind: String, workspace_id: O
 }
 
 // ---------------------------------------------------------------------------
-// JSON 文件导入 / 导出（按 kind 隔离）
+// JSON 文件导入 / 导出（v2 每行记录类型，兼容 v1 单类型文件）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountExportItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     #[serde(default)]
     note: String,
     #[serde(default)]
@@ -1949,6 +2080,7 @@ struct AccountExportItem {
     refresh_interval_minutes: Option<u32>,
     #[serde(default = "default_auto_refresh_token")]
     auto_refresh_token: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
@@ -1964,7 +2096,8 @@ struct AccountExportItem {
 struct AccountsExportFile {
     format: String,
     version: u32,
-    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     exported_at: i64,
     accounts: Vec<AccountExportItem>,
 }
@@ -2022,75 +2155,100 @@ pub(crate) fn ensure_json_ext(mut path: PathBuf) -> PathBuf {
     path
 }
 
-fn default_export_name(kind: &str) -> &'static str {
-    match kind {
-        "codex" => "chatgpt-accounts.json",
-        "claude" => "claude-accounts.json",
-        "opencode" => "opencode-accounts.json",
-        _ => "cursor-accounts.json",
-    }
+fn export_item(a: &Account) -> Result<AccountExportItem, String> {
+    // ChatGPT 只导出完整加密副本；旧账户没有副本时使用已有凭据生成。
+    let codex_auth = if a.kind == "codex" {
+        let auth = auth_edit::saved_value(a)?;
+        auth_edit::credentials(&auth)?;
+        Some(match &a.codex_auth {
+            Some(blob) => blob.clone(),
+            None => local_crypto::seal(&auth.to_string())?,
+        })
+    } else {
+        None
+    };
+    Ok(AccountExportItem {
+        kind: Some(a.kind.clone()),
+        note: a.note.clone(),
+        note_auto: a.note_auto,
+        ignore_api_models: a.kind == "cursor" && a.ignore_api_models,
+        refresh_interval_minutes: a.refresh_interval_minutes,
+        auto_refresh_token: a.auto_refresh_token,
+        token: if codex_auth.is_some() {
+            String::new()
+        } else {
+            a.token.clone()
+        },
+        refresh_token: if a.kind == "claude" {
+            a.refresh_token.clone()
+        } else {
+            None
+        },
+        codex_auth,
+        opencode_auth: a.opencode_auth.clone(),
+    })
 }
 
-/// 导出指定类型账户为 JSON 文件。对话框取消返回 cancelled，不写盘。
-#[tauri::command]
-pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResult, String> {
-    let _operation = crate::operations::begin()?;
-    settings::ensure_loaded()?;
-    let kind = sanitize_kind(&kind)?;
-    let rows: Vec<AccountExportItem> = current()
-        .accounts
+fn export_accounts(data: &AccountsFile, id: Option<&str>) -> Result<AccountsExportFile, String> {
+    let accounts = if let Some(id) = id {
+        vec![export_item(
+            data.accounts
+                .iter()
+                .find(|a| a.id == id)
+                .ok_or("not_found")?,
+        )?]
+    } else {
+        let by_id: std::collections::HashMap<_, _> =
+            data.accounts.iter().map(|a| (a.id.as_str(), a)).collect();
+        crate::account_order::complete(
+            data.account_order.as_deref().unwrap_or_default(),
+            &data.accounts,
+        )
         .iter()
-        .filter(|a| a.kind == kind)
-        .map(|a| AccountExportItem {
-            note: a.note.clone(),
-            note_auto: a.note_auto,
-            ignore_api_models: a.kind == "cursor" && a.ignore_api_models,
-            refresh_interval_minutes: a.refresh_interval_minutes,
-            auto_refresh_token: a.auto_refresh_token,
-            token: a.token.clone(),
-            // Cursor 没有 refresh_token 概念；Codex / Claude 随导出（用于自动续期）
-            refresh_token: if kind == "cursor" {
-                None
-            } else {
-                a.refresh_token.clone()
-            },
-            codex_auth: a.codex_auth.clone(),
-            opencode_auth: a.opencode_auth.clone(),
-        })
-        .collect();
-    if rows.is_empty() {
+        .map(|id| export_item(by_id[id.as_str()]))
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    if accounts.is_empty() {
         return Err("no_accounts".into());
     }
-    let count = rows.len();
-    let label = kind_label(&kind);
-    let title = format!("导出 {label} 账户");
-    let file_name = default_export_name(&kind).to_string();
-    let app_for_dialog = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        pick_json_path(&app_for_dialog, &title, Some(&file_name), true)
+    Ok(AccountsExportFile {
+        format: EXPORT_FORMAT.into(),
+        version: EXPORT_VERSION,
+        kind: None,
+        exported_at: Utc::now().timestamp(),
+        accounts,
+    })
+}
+
+async fn export_to_file(app: AppHandle, id: Option<String>) -> Result<ExportResult, String> {
+    let _operation = crate::operations::begin()?;
+    settings::ensure_loaded()?;
+    let (title, filename) = if id.is_some() {
+        ("导出此账户", "account.json")
+    } else {
+        ("导出全部账户", "accounts.json")
+    };
+    let dialog_app = app.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        pick_json_path(&dialog_app, title, Some(filename), true)
     })
     .await
     .map_err(|e| e.to_string())?;
-    let Some(path) = picked else {
+    let Some(path) = path else {
         return Ok(ExportResult {
             cancelled: true,
             count: 0,
         });
     };
-    let path = ensure_json_ext(path);
-    let payload = AccountsExportFile {
-        format: EXPORT_FORMAT.into(),
-        version: EXPORT_VERSION,
-        kind: kind.clone(),
-        exported_at: Utc::now().timestamp(),
-        accounts: rows,
-    };
-    let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    // 在用户选择文件后读取一次一致快照，包含对话框打开期间更新的凭据与排序。
+    let payload = export_accounts(&current(), id.as_deref())?;
+    let count = payload.accounts.len();
+    let bytes = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    crate::codex_auth_store::atomic_write(&ensure_json_ext(path), &bytes)?;
     audit::log(
         "account_export",
-        format!("导出 {count} 个{label}账户"),
-        Some(json!({ "kind": kind, "count": count })),
+        format!("导出 {count} 个账户"),
+        Some(json!({ "count": count })),
     );
     Ok(ExportResult {
         cancelled: false,
@@ -2098,123 +2256,189 @@ pub async fn accounts_export(app: AppHandle, kind: String) -> Result<ExportResul
     })
 }
 
-/// 从 JSON 文件导入指定类型账户：合并到现有列表，同身份跳过，类型不符则报错。
 #[tauri::command]
-pub async fn accounts_import_file(app: AppHandle, kind: String) -> Result<ImportFileResult, String> {
+pub async fn accounts_export_all(app: AppHandle) -> Result<ExportResult, String> {
+    export_to_file(app, None).await
+}
+
+#[tauri::command]
+pub async fn account_export_one(app: AppHandle, id: String) -> Result<ExportResult, String> {
+    export_to_file(app, Some(id)).await
+}
+
+fn parse_account_file(text: &str) -> Result<AccountsExportFile, String> {
+    let mut file: AccountsExportFile =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|_| "invalid_format")?;
+    if file.format != EXPORT_FORMAT {
+        return Err("invalid_format".into());
+    }
+    let legacy = match file.version {
+        1 => Some(
+            sanitize_kind(file.kind.as_deref().unwrap_or_default())
+                .map_err(|_| "invalid_format")?,
+        ),
+        EXPORT_VERSION if file.kind.is_none() => None,
+        _ => return Err("invalid_format".into()),
+    };
+    for item in &mut file.accounts {
+        let kind = match &legacy {
+            Some(kind) if item.kind.as_ref().is_none_or(|k| k == kind) => kind.clone(),
+            None => sanitize_kind(item.kind.as_deref().unwrap_or_default())
+                .map_err(|_| "invalid_format")?,
+            _ => return Err("invalid_format".into()),
+        };
+        item.kind = Some(kind);
+    }
+    Ok(file)
+}
+
+fn imported_account(item: AccountExportItem, legacy: bool) -> Result<Option<Account>, String> {
+    let kind = item.kind.ok_or("invalid_kind")?;
+    let mut token = item.token;
+    let mut refresh_token = sanitize_refresh_token(item.refresh_token);
+    let mut codex_auth = None;
+    if kind == "codex" {
+        let decoded = item
+            .codex_auth
+            .as_deref()
+            .and_then(local_crypto::open)
+            .and_then(|text| auth_edit::parse(&text).ok())
+            .and_then(|v| auth_edit::credentials(&v).ok());
+        if let Some((access, refresh)) = decoded {
+            token = access;
+            refresh_token = refresh;
+            codex_auth = item.codex_auth;
+        } else if !legacy {
+            return Ok(None);
+        }
+    }
+    let Ok(token) = sanitize_token(&kind, &token) else {
+        return Ok(None);
+    };
+    if kind == "opencode"
+        && item
+            .opencode_auth
+            .as_deref()
+            .is_some_and(|blob| crate::opencode::decode(blob, &token).is_none())
+    {
+        return Ok(None);
+    }
+    if kind == "codex" && codex_auth.is_none() {
+        codex_auth = Some(local_crypto::seal(
+            &skeleton_codex_auth(&token, refresh_token.as_deref()).to_string(),
+        )?);
+    }
+    let note = item.note.trim();
+    Ok(Some(Account {
+        id: new_id(),
+        note_auto: item.note_auto || note.is_empty(),
+        note: if note.is_empty() {
+            default_note_from_token(&kind, &token)
+        } else {
+            note.to_owned()
+        },
+        ignore_api_models: kind == "cursor" && item.ignore_api_models,
+        refresh_token: if kind == "claude" || kind == "codex" {
+            refresh_token
+        } else {
+            None
+        },
+        opencode_auth: if kind == "opencode" {
+            item.opencode_auth
+        } else {
+            None
+        },
+        token,
+        kind,
+        codex_auth,
+        refresh_interval_minutes: item.refresh_interval_minutes,
+        auto_refresh_token: item.auto_refresh_token,
+        last_refresh_at: None,
+        status: None,
+    }))
+}
+
+fn merge_account_file(
+    data: &mut AccountsFile,
+    file: AccountsExportFile,
+) -> Result<(Vec<ImportedItem>, Vec<SkippedItem>), String> {
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+    for item in file.accounts {
+        let kind = item.kind.clone().unwrap_or_default();
+        let hint = item.note.clone();
+        let Some(account) = imported_account(item, file.version == 1)? else {
+            skipped.push(SkippedItem {
+                kind,
+                label: hint,
+                reason: "invalid".into(),
+            });
+            continue;
+        };
+        let label = import_label(&account.note, &account.token);
+        if is_duplicate_account(&data.accounts, &kind, &account.token, None) {
+            skipped.push(SkippedItem {
+                kind,
+                label,
+                reason: "exists".into(),
+            });
+            continue;
+        }
+        imported.push(ImportedItem {
+            id: account.id.clone(),
+            kind,
+            label,
+        });
+        data.accounts.push(account);
+    }
+    Ok((imported, skipped))
+}
+
+#[tauri::command]
+pub async fn accounts_import_file(app: AppHandle) -> Result<ImportFileResult, String> {
     let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
-    let kind = sanitize_kind(&kind)?;
-    let label = kind_label(&kind);
-    let title = format!("导入 {label} 账户");
-    let app_for_dialog = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        pick_json_path(&app_for_dialog, &title, None, false)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let dialog_app = app.clone();
+    let picked =
+        tokio::task::spawn_blocking(move || pick_json_path(&dialog_app, "导入账户", None, false))
+            .await
+            .map_err(|e| e.to_string())?;
     let Some(path) = picked else {
         return Ok(ImportFileResult {
             cancelled: true,
-            imported: Vec::new(),
-            skipped: Vec::new(),
+            imported: vec![],
+            skipped: vec![],
             view: view(&current()),
         });
     };
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let parsed: AccountsExportFile =
-        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|_| "invalid_format".to_string())?;
-    if parsed.format != EXPORT_FORMAT || parsed.version != EXPORT_VERSION {
-        return Err("invalid_format".into());
-    }
-    let file_kind = sanitize_kind(&parsed.kind).map_err(|_| "invalid_format".to_string())?;
-    if file_kind != kind {
-        return Err("kind_mismatch".into());
-    }
-
-    let mut imported: Vec<ImportedItem> = Vec::new();
-    let mut skipped: Vec<SkippedItem> = Vec::new();
-    let mut audit_names: Vec<String> = Vec::new();
-    let mut added: Vec<(String, String, String, String)> = Vec::new();
-    let data = if parsed.accounts.is_empty() {
-        current()
-    } else {
-        mutate(&app, |d| {
-            for item in parsed.accounts {
-                if kind == "opencode" && item.opencode_auth.as_deref().is_some_and(|blob| crate::opencode::decode(blob,&item.token).is_none()) {
-                    skipped.push(SkippedItem {kind:kind.clone(),label:item.note.clone(),reason:"invalid".into()});
-                    continue;
-                }
-                let Ok(token) = sanitize_token(&kind, &item.token) else {
-                    skipped.push(SkippedItem {
-                        kind: kind.clone(),
-                        label: import_label(&item.note, &item.token),
-                        reason: "invalid".into(),
-                    });
-                    continue;
-                };
-                let trimmed_note = item.note.trim().to_string();
-                let note_auto = item.note_auto || trimmed_note.is_empty();
-                let note = if trimmed_note.is_empty() {
-                    default_note_from_token(&kind, &token)
-                } else {
-                    trimmed_note
-                };
-                let label = import_label(&note, &token);
-                if is_duplicate_account(&d.accounts, &kind, &token, None) {
-                    skipped.push(SkippedItem {
-                        kind: kind.clone(),
-                        label,
-                        reason: "exists".into(),
-                    });
-                    continue;
-                }
-                let refresh_token = if kind == "cursor" || kind == "opencode" {
-                    None
-                } else {
-                    sanitize_refresh_token(item.refresh_token)
-                };
-                let mut entry = Account {
-                    id: new_id(),
-                    kind: kind.clone(),
-                    ignore_api_models: kind == "cursor" && item.ignore_api_models,
-                    note,
-                    note_auto,
-                    token,
-                    refresh_token,
-                    // 文件里带的副本能解开就用它（含 id_token），否则由明文凭据组骨架副本
-                    codex_auth: if kind == "codex" { item.codex_auth } else { None },
-                    opencode_auth: if kind == "opencode" { item.opencode_auth } else { None },
-                    refresh_interval_minutes: item.refresh_interval_minutes,
-                    auto_refresh_token: item.auto_refresh_token,
-                    last_refresh_at: None,
-                    status: None,
-                };
-                if entry.kind == "codex" {
-                    hydrate_accounts(std::slice::from_mut(&mut entry));
-                }
-                let name = display_name(&entry.kind, &entry.note, &entry.token);
-                audit_names.push(name.clone());
-                added.push((entry.id.clone(), entry.kind.clone(), entry.token.clone(), name));
-                imported.push(ImportedItem {
-                    id: entry.id.clone(),
-                    kind: entry.kind.clone(),
-                    label,
-                });
-                d.accounts.push(entry);
-            }
-            Ok(())
-        })?
-    };
-
-    if !audit_names.is_empty() {
-        let ids: Vec<String> = imported.iter().map(|i| i.id.clone()).collect();
+    let file = parse_account_file(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
+    let (mut imported, mut skipped) = (Vec::new(), Vec::new());
+    let data = mutate(&app, |d| {
+        (imported, skipped) = merge_account_file(d, file)?;
+        Ok(())
+    })?;
+    if !imported.is_empty() {
+        let ids: std::collections::HashSet<_> = imported.iter().map(|i| i.id.as_str()).collect();
         audit::log(
             "account_import_file",
-            format!("从文件导入{label}账户：{}", audit_names.join("、")),
-            Some(json!({ "kind": kind, "ids": ids })),
+            format!("从文件导入 {} 个账户", ids.len()),
+            Some(json!({ "ids": ids })),
         );
+        let added = data
+            .accounts
+            .iter()
+            .filter(|a| a.kind == "cursor" && ids.contains(a.id.as_str()))
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    a.kind.clone(),
+                    a.token.clone(),
+                    display_name(&a.kind, &a.note, &a.token),
+                )
+            })
+            .collect::<Vec<_>>();
+        adopt_deleted_usage(&app, &added).await;
     }
-    adopt_deleted_usage(&app, &added).await;
     Ok(ImportFileResult {
         cancelled: false,
         imported,

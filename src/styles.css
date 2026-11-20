@@ -752,11 +752,8 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* ---------- 账户管理 ---------- */
 
-/* 卡片标题栏右侧：组统计小字 + 刷新 / 添加图标按钮 */
+/* 账户工具栏的数量、刷新、更多和添加入口。 */
 .heading-side { display: flex; align-items: center; gap: 10px; }
-.heading-actions { display: flex; gap: 6px; }
-/* 相邻图标按钮的 margin 规则是给表格操作列用的，这里间距由 gap 管理 */
-.heading-actions .icon-action + .icon-action { margin-left: 0; }
 .compact-select {
   width: auto;
   padding: 7px 10px;
@@ -883,6 +880,7 @@ td.account-time { white-space: nowrap; }
 .summary-meta-item { white-space: nowrap; }
 .summary-meta-item.expired { color: var(--bad); }
 td.account-actions { white-space: nowrap; }
+.account-actions .account-export { display: flex; margin: 4px 0 0; }
 
 .tag.kind-cursor { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .tag.kind-codex { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
@@ -1415,7 +1413,8 @@ input.price-input {
 
 /* 原始账单弹窗：搜索 + 合计 + 导出的工具栏，表头吸顶的逐笔事件表，分批「显示更多」 */
 .raw-toolbar #raw-search { flex: 0 1 360px; }
-.raw-toolbar #raw-count { margin-left: auto; white-space: nowrap; }
+.raw-toolbar { flex-wrap: wrap; }
+.raw-toolbar #raw-count { margin-left: auto; }
 .raw-table-wrap {
   flex: 1 1 auto;
   min-height: 160px;
@@ -1432,6 +1431,7 @@ input.price-input {
   white-space: nowrap;
 }
 .raw-table tbody td { padding: 6px 12px; vertical-align: middle; white-space: nowrap; }
+.raw-subline { display: block; max-width: 190px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 11px; }
 .raw-time { color: var(--muted); font-size: 12.5px; }
 .raw-model {
   font-family: var(--font-mono);
@@ -1907,6 +1907,7 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 
 /* OpenCode 的授权与备注编辑使用原生 dialog 管理焦点和背景交互。 */
 .kind-opencode { color: #58cbb7; background: rgba(88, 203, 183, .12); }
+:root[data-theme="light"] .kind-opencode { color: #09695b; }
 .opencode-dialog { padding: 0; width: min(520px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; border: 1px solid var(--border-strong); border-radius: 14px; color: var(--text); background: var(--surface); }
 .opencode-dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .opencode-dialog .modal-head { display: flex; align-items: center; justify-content: space-between; }
@@ -1960,14 +1961,29 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 .opencode-local-fields:not([hidden]) { display: grid; gap: 10px; }
 .opencode-local-fields select { width: 100%; min-width: 0; }
 
-.account-card .section-heading h3 { display: flex; align-items: center; gap: 8px; }
-.account-card-handle { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: grab; touch-action: none; flex-shrink: 0; }
-.account-card-handle:hover { color: var(--text); background: var(--surface-2); }
-.account-card-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.account-card-handle svg { width: 14px; height: 18px; }
-.account-card-moving { opacity: .6; border-color: var(--accent); }
-.account-cards-dragging, .account-cards-dragging * { cursor: grabbing !important; user-select: none; }
-
+.account-order-handle {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 28px;
+  padding: 0; border: 0; background: transparent; color: var(--muted); cursor: grab;
+  touch-action: none; flex-shrink: 0;
+}
+.account-order-handle:hover { color: var(--text); background: var(--surface-2); }
+.account-order-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.account-order-handle svg { width: 14px; height: 18px; }
+.account-order-moving { opacity: .65; background: var(--surface-2); }
+.account-order-dragging, .account-order-dragging * { cursor: grabbing !important; user-select: none; }
+.accounts-table .col-grip { width: 32px; }
+.accounts-table .account-grip { padding-inline: 5px 0; }
+.account-name-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.account-name-line .tag { flex-shrink: 0; }
+#accounts-panel .heading-side { gap: 6px; }
+#accounts-panel .heading-side .icon-action { margin-left: 0; flex: none; }
+#accounts-count { margin-right: 4px; }
+#account-auth-mode { margin-top: 14px; }
+#account-auth-json { font: 12px/1.5 var(--font-mono); tab-size: 2; min-height: 7em; resize: vertical; }
+#account-modal .modal-foot, #account-modal .modal-head { flex-shrink: 0; }
+#account-modal.codex-edit .modal-card { max-width: 640px; }
+#account-auth-status { margin: 8px 0; }
+.account-type-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 .client-result-lines { white-space: pre-line; overflow-wrap: anywhere; }

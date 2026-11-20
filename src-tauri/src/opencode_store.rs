@@ -312,12 +312,56 @@ where
     Ok(())
 }
 
-pub fn query_db(
-    db: &Connection,
-    workspace: &str,
-    start: Option<i64>,
-    end: Option<i64>,
-) -> Result<Value, String> {
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveCoverage {
+    synced_at: i64,
+    coverage_start: Option<i64>,
+    coverage_gaps: Vec<Value>,
+    pending_since: Option<i64>,
+}
+
+fn archive_coverage(
+    db: &Connection, workspace: &str, start: Option<i64>, end: Option<i64>,
+) -> Result<ArchiveCoverage, String> {
+    let intervals = coverage(db, workspace)?;
+    let covered_start = intervals.first().map(|i| i.0);
+    let now = Utc::now().timestamp_millis();
+    let expected_start = start.or(covered_start).unwrap_or(now - 30 * DAY);
+    let expected_end = end.unwrap_or(now).min(now);
+    let synced = watermark(db, workspace)?;
+    let mut cursor = expected_start;
+    let mut gaps = Vec::new();
+    for (a, b) in intervals {
+        if cursor > expected_end || a > expected_end {
+            break;
+        }
+        if b < cursor {
+            continue;
+        }
+        if a > cursor {
+            gaps.push(json!({"start":cursor, "end":a - 1}));
+        }
+        cursor = b.saturating_add(1);
+    }
+    // 已确认的水位之后标记为待同步；单独显示，不把它误当作完整零用量。
+    let historical_end = if synced == 0 { expected_end } else { expected_end.min(synced) };
+    if cursor <= historical_end {
+        gaps.push(json!({"start":cursor, "end":historical_end}));
+    }
+    Ok(ArchiveCoverage {
+        synced_at: synced,
+        coverage_start: covered_start,
+        coverage_gaps: gaps,
+        pending_since: (synced > 0 && synced < expected_end && expected_start <= expected_end)
+            .then(|| synced.saturating_add(1).max(expected_start)),
+    })
+}
+
+fn visit_events(
+    db: &Connection, workspace: &str, start: Option<i64>, end: Option<i64>,
+    mut visit: impl FnMut(Event),
+) -> Result<(), String> {
     if start.zip(end).is_some_and(|(a, b)| a > b) {
         return Err("invalid_range".into());
     }
@@ -332,15 +376,37 @@ pub fn query_db(
             |r| r.get::<_, String>(0),
         )
         .map_err(|_| "opencode_archive_read_failed")?;
+    for raw in strings {
+        let event: Event = serde_json::from_str(&raw.map_err(|_| "opencode_archive_read_failed")?)
+            .map_err(|_| "opencode_archive_corrupt")?;
+        visit(event);
+    }
+    Ok(())
+}
+
+impl Event {
+    fn token_row(&self) -> pricing::TokenRow {
+        pricing::TokenRow {
+            model: self.model.clone(), input: self.input as f64, output: self.output as f64,
+            cache_read: self.cache_read as f64, cache_write: self.cache_write as f64,
+            actual_cents: 0.0, timestamp_ms: Some(self.time),
+        }
+    }
+}
+
+pub fn query_db(
+    db: &Connection,
+    workspace: &str,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Result<Value, String> {
     let table = pricing::load();
     let mut rows = Vec::new();
     let mut costs: HashMap<String, f64> = HashMap::new();
     let mut cost = 0.0;
     let mut unknown_cost = 0;
     let mut known_cost = 0;
-    for raw in strings {
-        let event: Event = serde_json::from_str(&raw.map_err(|_| "opencode_archive_read_failed")?)
-            .map_err(|_| "opencode_archive_corrupt")?;
+    visit_events(db, workspace, start, end, |event| {
         if let Some(usd) = event.reported_cost_usd {
             known_cost += 1;
             cost += usd;
@@ -350,16 +416,8 @@ pub fn query_db(
         } else {
             unknown_cost += 1;
         }
-        rows.push(pricing::TokenRow {
-            model: event.model,
-            input: event.input as f64,
-            output: event.output as f64,
-            cache_read: event.cache_read as f64,
-            cache_write: event.cache_write as f64,
-            actual_cents: 0.0,
-            timestamp_ms: Some(event.time),
-        });
-    }
+        rows.push(event.token_row());
+    })?;
     let dates = pricing::hourly_dates_for(start, end);
     let mut agg = serde_json::to_value(pricing::aggregate_and_price_for(
         rows,
@@ -373,37 +431,7 @@ pub fn query_db(
     {
         model["reportedCostUsd"] = json!(costs.get(opencode::text(model, "model")).copied());
     }
-    let intervals = coverage(db, workspace)?;
-    let covered_start = intervals.first().map(|i| i.0);
-    let expected_start = start
-        .or(covered_start)
-        .unwrap_or_else(|| Utc::now().timestamp_millis() - 30 * DAY);
-    let expected_end = end
-        .unwrap_or_else(|| Utc::now().timestamp_millis())
-        .min(Utc::now().timestamp_millis());
-    let synced = watermark(db, workspace)?;
-    let mut cursor = expected_start;
-    let mut gaps = Vec::new();
-    for (a, b) in &intervals {
-        if *b <= cursor {
-            continue;
-        }
-        if *a > cursor && cursor < expected_end {
-            gaps.push(json!({"start":cursor,"end":(*a).min(expected_end)}));
-        }
-        cursor = cursor.max(*b);
-    }
-    // 已确认的水位之后标记为待同步；单独显示，不把它误当作完整零用量。
-    if synced == 0 && cursor < expected_end {
-        gaps.push(json!({"start":cursor,"end":expected_end}));
-    } else if cursor < expected_end.min(synced) {
-        gaps.push(json!({"start":cursor,"end":expected_end.min(synced)}));
-    }
-    agg["pendingSince"] = if synced > 0 && synced < expected_end {
-        json!(synced.max(expected_start))
-    } else {
-        Value::Null
-    };
+    let state = archive_coverage(db, workspace, start, end)?;
     let check: Option<String> = db
         .query_row(
             "SELECT data FROM checks WHERE workspace=?1",
@@ -423,9 +451,72 @@ pub fn query_db(
     };
     agg["unreportedCostEvents"] = json!(unknown_cost);
     agg["actualUnavailable"] = json!(true);
-    agg["coverageStart"] = json!(covered_start);
-    agg["coverageGaps"] = json!(gaps);
-    Ok(json!({"agg":agg,"syncedAt":synced,"syncError":null}))
+    agg["coverageStart"] = json!(state.coverage_start);
+    agg["pendingSince"] = json!(state.pending_since);
+    agg["coverageGaps"] = json!(state.coverage_gaps);
+    Ok(json!({"agg":agg,"syncedAt":state.synced_at,"syncError":null}))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BillEvent {
+    #[serde(flatten)]
+    usage: pricing::BillUsage,
+    request_id: Option<String>,
+    product: String,
+    reasoning_tokens: u64,
+    cache_write1h_tokens: u64,
+    reported_cost_usd: Option<f64>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawBill {
+    events: Vec<BillEvent>,
+    total: i64,
+    #[serde(flatten)]
+    coverage: ArchiveCoverage,
+}
+
+fn raw_bill(db: &Connection, workspace: &str, start: Option<i64>, end: Option<i64>) -> Result<RawBill, String> {
+    let table = pricing::load();
+    let mut events = Vec::new();
+    visit_events(db, workspace, start, end, |event| {
+        events.push(BillEvent {
+            usage: event.token_row().into_bill_usage(&table),
+            request_id: event.request_id,
+            product: event.product,
+            reasoning_tokens: event.reasoning,
+            cache_write1h_tokens: event.cache_write_1h,
+            reported_cost_usd: event.reported_cost_usd,
+        });
+    })?;
+    events.reverse();
+    let total = db.query_row("SELECT count(*) FROM events WHERE workspace=?1", [workspace], |r| r.get(0))
+        .map_err(|_| "opencode_archive_read_failed")?;
+    Ok(RawBill { events, total, coverage: archive_coverage(db, workspace, start, end)? })
+}
+
+/// 在同一只读事务中读取指定工作区的记录与覆盖范围。
+#[tauri::command]
+pub async fn opencode_usage_events(account_id: String, start: Option<i64>, end: Option<i64>) -> Result<RawBill, String> {
+    let _operation = crate::operations::begin()?;
+    if start.zip(end).is_some_and(|(a, b)| a > b) { return Err("invalid_range".into()); }
+    let account = accounts::account_snapshot(&account_id)?;
+    if account.kind != "opencode" || !opencode::valid_workspace(&account.token) {
+        return Err("not_opencode_account".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = paths::app_dir().ok_or("home_dir_unavailable")?.join("opencode-usage.sqlite");
+        if !path.try_exists().map_err(|_| "opencode_archive_open_failed")? {
+            return Ok(RawBill::default());
+        }
+        let mut db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| "opencode_archive_open_failed")?;
+        db.busy_timeout(Duration::from_secs(5)).map_err(|_| "opencode_archive_open_failed")?;
+        let tx = db.transaction().map_err(|_| "opencode_archive_read_failed")?;
+        raw_bill(&tx, &account.token, start, end)
+    }).await.map_err(|_| "opencode_archive_read_failed")?
 }
 
 #[tauri::command]
