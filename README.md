@@ -63,7 +63,14 @@ Account management, usage overview, and the tray account panel (shown with sampl
   the entered values. Hints follow the light or dark theme.
 - Choose "+" to add a Cursor, ChatGPT, Claude, or OpenCode account. Each account has one row
   with its provider, quota and actions. The toolbar offers Refresh all, Import, Export all,
-  Sign out locally and Add. The add dialog also supports local client import.
+  Sign out locally and Add. Choose the provider once; the form then stays with that provider.
+  The add dialog also supports local client import.
+- ChatGPT accounts have three tabs: Token, auth.json file, and JSON. Select one file or paste one
+  complete auth.json object, then choose Save to add the account. Each tab keeps its own draft;
+  only the active tab is submitted. Notes are shared, and closing clears the credential drafts.
+  File and JSON modes require `tokens.access_token` and preserve the complete Auth copy, including
+  extension fields, in encrypted local storage. Adding through these modes does not exchange
+  tokens; the usual background refresh runs after saving. Duplicate accounts are rejected.
 - Export all writes a single file in list order. To export one account, use the export icon on the
   second line of its Actions column. Both exports include the latest encrypted Auth copy for each
   included ChatGPT account. Import accepts mixed-account files and older single-provider files.

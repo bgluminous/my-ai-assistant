@@ -927,11 +927,10 @@
         </div>
 
         <div class="modal-body">
-          <label id="account-kind-label">账户类型</label>
-          <div id="account-kind" class="segmented segmented-full" role="group" aria-label="账户类型">
-            <button class="seg active" type="button" data-kind="cursor">Cursor</button>
-            <button class="seg" type="button" data-kind="codex">ChatGPT</button>
-            <button class="seg" type="button" data-kind="claude">Claude</button>
+          <div id="account-add-mode" class="segmented segmented-full" role="tablist" aria-label="ChatGPT 添加方式" hidden>
+            <button id="account-add-mode-token" class="seg active" type="button" role="tab" aria-selected="true" aria-controls="account-token-fields" data-mode="token">Token</button>
+            <button id="account-add-mode-file" class="seg" type="button" role="tab" aria-selected="false" aria-controls="account-auth-file-field" tabindex="-1" data-mode="file">auth.json 文件</button>
+            <button id="account-add-mode-json" class="seg" type="button" role="tab" aria-selected="false" aria-controls="account-auth-field" tabindex="-1" data-mode="json">JSON</button>
           </div>
 
           <!-- Claude 专属：浏览器 OAuth 授权，登录后粘贴回调页展示的授权码即可自动填好凭据 -->
@@ -998,6 +997,14 @@
             <div id="account-auth-field" hidden>
               <label for="account-auth-json">auth.json</label>
               <textarea id="account-auth-json" rows="8" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+            </div>
+            <div id="account-auth-file-field" hidden>
+              <label>auth.json 文件</label>
+              <div class="account-auth-file-row">
+                <button id="account-auth-pick" class="secondary compact" type="button">选择文件</button>
+                <span id="account-auth-file-name" class="muted small">尚未选择文件</span>
+              </div>
+              <p id="account-auth-file-status" class="status" role="status" hidden></p>
             </div>
             <p id="account-auth-status" class="status" role="status" hidden></p>
             <button id="account-auth-reload" class="secondary compact" type="button" hidden>重新载入 Auth</button>

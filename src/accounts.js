@@ -1,4 +1,5 @@
 import { createCodexAuthEditor } from "./codex_auth_editor.js";
+import { createCodexAuthAdder } from "./codex_auth_add.js";
 import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { createAccountRefreshScheduler, refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients, bindClaudeDesktop, clientError } from "./linked_client_ui.js";
@@ -70,6 +71,7 @@ let modalKind = "cursor";
 let editingId = null;
 let editingAccount = null;
 let authEditor = null;
+let authAdder = null;
 
 function providerRefreshing(kind) {
   return scheduledProviders.has(kind) || groupRefreshing.has(kind)
@@ -1725,6 +1727,8 @@ function getAccountModal() {
   return accountModal ||= createModal(el("#account-modal"), { onClose: () => {
     authEditor?.dispose();
     authEditor = null;
+    authAdder?.dispose();
+    authAdder = null;
     editingId = null;
     editingAccount = null;
     el("#account-token").value = el("#account-refresh-token").value = "";
@@ -1733,9 +1737,6 @@ function getAccountModal() {
 
 function setModalKind(kind) {
   modalKind = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
-  for (const seg of el("#account-kind").querySelectorAll(".seg")) {
-    seg.classList.toggle("active", seg.dataset.kind === modalKind);
-  }
   el("#account-token").placeholder = TOKEN_PLACEHOLDERS[modalKind];
   el("#account-refresh-field").hidden = modalKind === "cursor";
   el("#account-api-field").hidden = modalKind !== "cursor" || editingId == null;
@@ -1754,33 +1755,34 @@ function openModal(account, presetKind) {
   if (getAccountModal().busy) return;
   authEditor?.dispose();
   authEditor = null;
+  authAdder?.dispose();
+  authAdder = null;
   editingAccount = account ? {
     note: (account.note || "").trim(), token: (account.token || "").trim(), refreshToken: (account.refreshToken || "").trim(),
     refreshIntervalMinutes: account.refreshIntervalMinutes ?? null, autoRefreshToken: account.autoRefreshToken !== false,
   } : null;
   editingId = account ? account.id : null;
+  const kind = account ? account.kind : presetKind || "cursor";
   const codexEdit = account?.kind === "codex";
-  el("#account-modal-title").textContent = codexEdit ? "编辑 ChatGPT 账户" : account ? "编辑账户" : "添加账户";
-  el("#account-modal").classList.toggle("codex-edit", codexEdit);
-  el("#account-modal-description").textContent = codexEdit
+  el("#account-modal-title").textContent = `${account ? "编辑" : "添加"} ${kindLabel(kind)} 账户`;
+  el("#account-modal").classList.toggle("codex-auth", kind === "codex");
+  el("#account-modal-description").textContent = kind === "codex"
     ? "凭据保存在此账户的加密副本中。切换账户时可应用到本机客户端。"
     : "Token 仅保存在本地配置文件，用于查询账户状态与用量。";
   el(codexEdit ? "#account-interval-field" : "#account-api-field").before(el("#account-credential-fields"));
   el("#account-auth-mode").hidden = !codexEdit;
-  el("#account-kind-label").hidden = el("#account-kind").hidden = codexEdit;
-  el("#account-token-label").textContent = codexEdit ? "Access Token" : "Token";
+  el("#account-token-label").textContent = kind === "codex" ? "Access Token" : "Token";
   el("#account-note").value = account ? account.note || "" : "";
   el("#account-token").value = account ? account.token || "" : "";
   el("#account-refresh-token").value = account ? account.refreshToken || "" : "";
   if (codexEdit) authEditor = createCodexAuthEditor(account);
+  else if (kind === "codex") authAdder = createCodexAuthAdder({ isSaving: () => getAccountModal().busy, clearStatus: clearModalStatus });
   el("#account-auto-refresh-token").checked = account?.autoRefreshToken !== false;
   el("#account-ignore-api-models").checked = !!(account && account.ignoreApiModels);
   el("#account-interval-field").hidden = !account;
   el("#account-refresh-interval").value = account?.refreshIntervalMinutes == null ? "" : String(account.refreshIntervalMinutes);
   el("#account-oauth-code").value = "";
-  setModalKind(account ? account.kind : presetKind || "cursor");
-  // 编辑时不允许切换账户类型
-  for (const seg of el("#account-kind").querySelectorAll(".seg")) seg.disabled = !!account;
+  setModalKind(kind);
   // 「从本机导入」是添加场景的快捷入口，编辑时隐藏；「清除本地数据」只在编辑 Cursor 账户时提供
   el("#account-import-local").hidden = !!account;
   const clearBtn = el("#account-clear-usage");
@@ -1860,9 +1862,9 @@ async function onClearLocalUsage() {
 }
 
 async function onSave() {
-  if (getAccountModal().busy || authEditor?.busy) return;
+  if (getAccountModal().busy || authEditor?.busy || authAdder?.busy) return;
   const token = el("#account-token").value.trim();
-  if (!token && !authEditor?.full) {
+  if (!token && !authEditor?.full && !authAdder?.full) {
     setModalStatus("bad", modalKind === "claude" ? "请填写 Token，或使用上方 OAuth 授权添加。" : "请填写 Token。");
     return;
   }
@@ -1880,10 +1882,13 @@ async function onSave() {
   const operation = getAccountModal().beginSave([
     btn, el("#account-oauth-finish"), el("#account-import-local"),
     el("#account-mode-token"), el("#account-mode-auth"), el("#account-auth-reload"),
+    el("#account-auth-pick"), ...el("#account-add-mode").querySelectorAll("[role=tab]"),
   ]);
   if (!operation) return;
+  authAdder?.clear();
   setModalStatus("", "保存中…");
   try {
+    const addedCredentials = authAdder?.credentials();
     let update = { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes, autoRefreshToken, updateCredentials };
     if (authEditor) {
       authEditor.clear();
@@ -1904,7 +1909,7 @@ async function onSave() {
     }
     const view = isEdit
       ? await invoke("accounts_update", update)
-      : await invoke("accounts_add", { account: { kind: modalKind, note, token, refreshToken } });
+      : await invoke("accounts_add", { account: { kind: modalKind, note, ...(addedCredentials || { token, refreshToken }) } });
     applyView(view);
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
     render();
@@ -1915,6 +1920,7 @@ async function onSave() {
   } catch (error) {
     if (!operation.current()) return;
     if (authEditor?.showError(error)) { clearModalStatus(); return; }
+    if (authAdder?.showError(error)) { clearModalStatus(); return; }
     const msg = resetError(error);
     if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
     else setModalStatus("bad", `保存失败：${msg}`);
@@ -2070,12 +2076,9 @@ export function initAccounts() {
     });
   }
 
-  for (const seg of el("#account-kind").querySelectorAll(".seg")) {
-    seg.addEventListener("click", () => { if (!getAccountModal().busy) setModalKind(seg.dataset.kind); });
-  }
   el("#account-save").addEventListener("click", () => { void onSave(); });
   el("#account-import-local").addEventListener("click", () => {
-    if (getAccountModal().busy) return;
+    if (getAccountModal().busy || authAdder?.busy) return;
     const kind = modalKind;
     closeModal();
     void onImportLocal(kind);

@@ -280,6 +280,68 @@ fn auth_fixture(id: &str) -> Value {
     })
 }
 
+#[test]
+fn adding_full_auth_preserves_encrypted_credentials_extensions_and_optional_fields() {
+    let mut auth = auth_fixture("add");
+    auth["extension"]["precise"] = serde_json::from_str::<Value>("0.123456789012345678901").unwrap();
+    for with_refresh in [true, false] {
+        if !with_refresh { auth["tokens"].as_object_mut().unwrap().remove("refresh_token"); }
+        let input: NewAccount = serde_json::from_value(json!({
+            "kind":"codex", "note":" imported ", "codexAuthText":auth.to_string(),
+            "token":"ignored-token", "refreshToken":"ignored-refresh"
+        })).unwrap();
+        let account = prepare_new_account(input).unwrap();
+        assert_eq!(account.note, "imported");
+        assert!(!account.note_auto);
+        assert_eq!(account.token, "fixture-access-add");
+        assert_eq!(account.refresh_token.as_deref(), with_refresh.then_some("fixture-refresh-add"));
+        assert_eq!(codex_auth_json(&account).unwrap(), auth);
+        assert!(account.codex_auth.is_some()); // 完整副本使 accounts_add 跳过换票分支。
+        let mut stored = vec![account];
+        dehydrate_accounts(&mut stored);
+        let encoded = serde_json::to_string(&stored).unwrap();
+        assert!(!encoded.contains("fixture-access"));
+        assert!(!encoded.contains("fixture-refresh"));
+        assert!(!encoded.contains("fixture-id"));
+        let mut reopened: Vec<Account> = serde_json::from_str(&encoded).unwrap();
+        hydrate_accounts(&mut reopened);
+        assert_eq!(codex_auth_json(&reopened[0]).unwrap(), auth);
+        assert!(is_duplicate_account(&reopened, "codex", "fixture-access-add", None));
+    }
+    let input: NewAccount = serde_json::from_value(json!({"kind":"codex", "codexAuthText":auth.to_string()})).unwrap();
+    assert!(prepare_new_account(input).unwrap().note_auto);
+}
+
+#[test]
+fn adding_auth_rejects_invalid_shapes_and_other_providers_without_falling_back_to_token() {
+    for (text, error) in [
+        ("[]", "codex_auth_object"),
+        ("null", "codex_auth_object"),
+        (r#"{"tokens":{"access_token":" "}}"#, "codex_auth_access_token"),
+        (r#"{"access_token":"flat"}"#, "codex_auth_access_token"),
+        (r#"{"tokens":{"access_token":42}}"#, "codex_auth_access_token"),
+        (r#"{"tokens":{"access_token":"a","refresh_token":42}}"#, "codex_auth_refresh_token"),
+    ] {
+        let input = serde_json::from_value(json!({"kind":"codex", "codexAuthText":text, "token":"fallback"})).unwrap();
+        assert_eq!(prepare_new_account(input).unwrap_err(), error);
+    }
+    let input = serde_json::from_value(json!({"kind":"codex", "codexAuthText":"{\n\"secret\":}"})).unwrap();
+    let error = prepare_new_account(input).unwrap_err();
+    assert!(error.starts_with("codex_auth_json:2:"));
+    assert!(!error.contains("secret"));
+    for kind in ["cursor", "claude", "opencode"] {
+        let input = serde_json::from_value(json!({"kind":kind, "codexAuthText":auth_fixture("a").to_string()})).unwrap();
+        assert_eq!(prepare_new_account(input).unwrap_err(), "not_codex_account");
+    }
+    let missing = serde_json::from_value(json!({"kind":"codex"})).unwrap();
+    assert_eq!(prepare_new_account(missing).unwrap_err(), "empty_token");
+    let legacy = serde_json::from_value(json!({"kind":"codex", "token":" manual ", "refreshToken":" refresh "})).unwrap();
+    let account = prepare_new_account(legacy).unwrap();
+    assert_eq!(account.token, "manual");
+    assert_eq!(account.refresh_token.as_deref(), Some("refresh"));
+    assert!(account.codex_auth.is_none()); // Token 模式仍由 accounts_add 尝试补齐凭据。
+}
+
 fn fixture_accounts() -> AccountsFile {
     let mut data: AccountsFile = serde_json::from_value(json!({
         "accounts":[{"id":"a","kind":"codex","note":"A","token":""},

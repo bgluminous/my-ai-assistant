@@ -1,5 +1,24 @@
 import { el, invoke, resetError, fillStatus } from "./shared.js";
 
+export function codexAuthErrorMessage(error) {
+  const code = resetError(error);
+  const pos = /^codex_auth_json:(\d+):(\d+)$/.exec(code);
+  const messages = {
+    codex_auth_conflict: "此账户的凭据已更新。草稿已保留，重新载入会替换凭据草稿。",
+    codex_auth_object: "完整 Auth 必须是 JSON 对象。",
+    codex_auth_access_token: "请填写有效的 tokens.access_token。",
+    codex_auth_refresh_token: "tokens.refresh_token 应为字符串或 null。",
+    codex_auth_unreadable: "无法读取此账户的 Auth 副本。",
+    codex_auth_missing: "此账户还没有可读取的 Auth 凭据。",
+    codex_auth_file_read: "无法读取所选文件，请检查文件内容和读取权限。",
+    codex_auth_file_missing: "请选择 auth.json 文件。",
+    codex_auth_text_missing: "请粘贴完整的 auth.json 内容。",
+    duplicate_account: "该账号已存在，请检查凭据所属的账户。",
+    not_found: "此账户已被删除。",
+  };
+  return pos ? `JSON 格式错误，第 ${pos[1]} 行，第 ${pos[2]} 列。` : messages[code];
+}
+
 // 一个编辑会话只持有当前账户的草稿。关闭后到达的 IPC 回复不得再写入表单。
 export function createCodexAuthEditor({ id, codexAuthRevision }) {
   const access = el("#account-token"), refresh = el("#account-refresh-token");
@@ -30,18 +49,7 @@ export function createCodexAuthEditor({ id, codexAuthRevision }) {
   }
   function showError(error) {
     const code = resetError(error);
-    const pos = /^codex_auth_json:(\d+):(\d+)$/.exec(code);
-    const messages = {
-      codex_auth_conflict: "此账户的凭据已更新。草稿已保留，重新载入会替换凭据草稿。",
-      codex_auth_object: "完整 Auth 必须是 JSON 对象。",
-      codex_auth_access_token: "请填写有效的 tokens.access_token。",
-      codex_auth_refresh_token: "tokens.refresh_token 应为字符串或 null。",
-      codex_auth_unreadable: "无法读取此账户的 Auth 副本。",
-      codex_auth_missing: "此账户还没有可读取的 Auth 凭据。",
-      duplicate_account: "该账号已存在，请检查凭据所属的账户。",
-      not_found: "此账户已被删除。",
-    };
-    const message = pos ? `JSON 格式错误，第 ${pos[1]} 行，第 ${pos[2]} 列。` : messages[code];
+    const message = codexAuthErrorMessage(error);
     if (!message) return false;
     fillStatus(status, "bad", message);
     reload.hidden = code !== "codex_auth_conflict";

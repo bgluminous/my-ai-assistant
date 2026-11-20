@@ -238,6 +238,7 @@ pub fn run() {
             accounts::accounts_delete,
             accounts::accounts_import_local,
             accounts::auth_edit::codex_auth_read,
+            accounts::auth_edit::codex_auth_pick_file,
             accounts::auth_edit::codex_auth_project,
             accounts::accounts_export_all,
             accounts::account_export_one,

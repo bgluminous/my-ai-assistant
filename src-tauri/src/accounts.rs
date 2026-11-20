@@ -374,9 +374,12 @@ pub struct NewAccount {
     pub kind: String,
     #[serde(default)]
     pub note: String,
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub codex_auth_text: Option<String>,
 }
 
 pub(crate) fn new_id() -> String {
@@ -675,25 +678,25 @@ pub fn accounts_move(app: AppHandle, id: String, before_id: Option<String>) -> R
     Ok(json!({"accountOrder":data.account_order, "orderRevision":data.order_revision}))
 }
 
-#[tauri::command]
-pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<AccountsView, String> {
-    let _operation = crate::operations::begin()?;
+/// 先离线校验并准备账户；完整 Auth 直接加密，后续只有 Token 模式需要尝试换票。
+fn prepare_new_account(account: NewAccount) -> Result<Account, String> {
     let kind = sanitize_kind(&account.kind)?;
+    if account.codex_auth_text.is_some() && kind != "codex" {
+        return Err("not_codex_account".into());
+    }
     if kind == "opencode" { return Err("opencode_auth_required".into()); }
-    let token = sanitize_token(&kind, &account.token)?;
+    let full_auth = account.codex_auth_text.as_deref().map(auth_edit::parse).transpose()?;
+    let (token, refresh_token) = if let Some(auth) = &full_auth {
+        auth_edit::credentials(auth)?
+    } else {
+        (sanitize_token(&kind, &account.token)?, sanitize_refresh_token(account.refresh_token))
+    };
     // 备注留空时用邮箱/用户名兜底，并标记为自动生成（刷新时可升级为真实邮箱）。
     let trimmed_note = account.note.trim().to_string();
     let note_auto = trimmed_note.is_empty();
     let note = if note_auto {
         // 本地兜底：Codex 从 JWT 拿邮箱、Cursor 拿 user_id。
-        let mut n = default_note_from_token(&kind, &token);
-        // Cursor 本地拿不到邮箱，添加时顺带调 auth/me 升级为真实邮箱（best-effort，与 Codex 体验对齐）。
-        if kind == "cursor" {
-            if let Some(email) = cursor::fetch_email(&token).await {
-                n = email;
-            }
-        }
-        n
+        default_note_from_token(&kind, &token)
     } else {
         trimmed_note
     };
@@ -704,7 +707,7 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         note,
         note_auto,
         token,
-        refresh_token: sanitize_refresh_token(account.refresh_token),
+        refresh_token,
         auto_refresh_token: true,
         codex_auth: None,
         opencode_auth: None,
@@ -712,11 +715,28 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         last_refresh_at: None,
         status: None,
     };
+    if let Some(auth) = full_auth {
+        set_codex_auth(&mut entry, &auth)?;
+    }
+    Ok(entry)
+}
+
+#[tauri::command]
+pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<AccountsView, String> {
+    let _operation = crate::operations::begin()?;
+    let mut entry = prepare_new_account(account)?;
+    // Cursor 本地拿不到邮箱，添加时顺带调 auth/me 升级为真实邮箱（best-effort）。
+    if entry.kind == "cursor" && entry.note_auto {
+        if let Some(email) = cursor::fetch_email(&entry.token).await {
+            entry.note = email;
+        }
+    }
+    let supplied_auth = entry.codex_auth.is_some();
     // ChatGPT：手动粘贴的凭据没有 id_token，立刻用 refresh_token 换一组完整凭据存成副本
     //（会消耗并轮换 refresh_token）；换不到时退回骨架副本，首次续期或切换时再补全。
     let mut exchanged = false;
     let mut exchange_error = String::new();
-    if entry.kind == "codex" {
+    if entry.kind == "codex" && !supplied_auth {
         let full = match entry.refresh_token.as_deref() {
             Some(rt) => exchange_codex_auth(rt).await,
             None => Err("没有 Refresh Token".to_string()),
@@ -745,9 +765,10 @@ pub async fn accounts_add(app: AppHandle, account: NewAccount) -> Result<Account
         d.accounts.push(entry);
         Ok(())
     })?;
-    let suffix = match (entry_kind.as_str(), exchanged) {
-        ("codex", true) => "（已换取完整凭据）".to_string(),
-        ("codex", false) => format!("（未能换取完整凭据：{exchange_error}；首次续期或切换时补全）"),
+    let suffix = match (entry_kind.as_str(), supplied_auth, exchanged) {
+        ("codex", true, _) => "（已保存完整 Auth）".to_string(),
+        ("codex", false, true) => "（已换取完整凭据）".to_string(),
+        ("codex", false, false) => format!("（未能换取完整凭据：{exchange_error}；首次续期或切换时补全）"),
         _ => String::new(),
     };
     audit::log(

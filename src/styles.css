@@ -1981,8 +1981,13 @@ button.primary.danger { background: var(--bad); box-shadow: none; }
 #account-auth-mode { margin-top: 14px; }
 #account-auth-json { font: 12px/1.5 var(--font-mono); tab-size: 2; min-height: 7em; resize: vertical; }
 #account-modal .modal-foot, #account-modal .modal-head { flex-shrink: 0; }
-#account-modal.codex-edit .modal-card { max-width: 640px; }
+#account-modal.codex-auth .modal-card { max-width: 640px; }
 #account-auth-status { margin: 8px 0; }
+#account-add-mode { display: flex; }
+#account-add-mode .seg { min-width: 0; flex: 1; }
+.account-auth-file-row { display: flex; align-items: center; gap: 12px; }
+.account-auth-file-row button { flex-shrink: 0; }
+#account-auth-file-name { min-width: 0; overflow-wrap: anywhere; }
 .account-type-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 

@@ -1,9 +1,9 @@
-//! 主窗口按需编辑单个托管账户的 Auth。明文只存在于此次请求，错误只报告位置或字段。
+//! 主窗口按需添加或编辑单个托管账户的 Auth。明文只存在于此次请求，错误只报告位置或字段。
 use super::{codex_auth_json, json_str_at, skeleton_codex_auth, Account};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::WebviewWindow;
+use tauri::{AppHandle, WebviewWindow};
 
 pub(super) fn revision(account: &Account) -> String {
     let mut hash = Sha256::new();
@@ -70,6 +70,35 @@ pub(crate) fn codex_auth_read(window: WebviewWindow, id: String) -> Result<AuthS
     })
 }
 
+#[derive(Serialize)]
+pub(crate) struct AuthFile {
+    name: String,
+    text: String,
+}
+
+/// 只读取用户选中的文件，不修改本机登录，也不创建账户。取消选择保持现有草稿。
+#[tauri::command]
+pub(crate) async fn codex_auth_pick_file(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Option<AuthFile>, String> {
+    main_only(&window)?;
+    let _operation = crate::operations::begin()?;
+    tokio::task::spawn_blocking(move || -> Result<Option<AuthFile>, String> {
+        let Some(path) = super::pick_json_path(&app, "选择 auth.json", None, false) else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(&path).map_err(|_| "codex_auth_file_read".to_string())?;
+        credentials(&parse(&text)?)?;
+        Ok(Some(AuthFile {
+            name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            text,
+        }))
+    })
+    .await
+    .map_err(|_| "codex_auth_file_read".to_string())?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TokenFields {
@@ -78,6 +107,7 @@ pub(crate) struct TokenFields {
 }
 
 pub(super) fn parse(text: &str) -> Result<Value, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let value: Value = serde_json::from_str(text).map_err(|e| {
         let line = e.line().max(1);
         // serde_json 以 UTF-8 字节计列，界面以字符显示，避免中文前缀使位置偏移。
@@ -188,6 +218,7 @@ mod tests {
         assert_eq!(value["ratio"].to_string(), "0.123456789012345678901");
         assert_eq!(parse("{\"中文\": }").unwrap_err(), "codex_auth_json:1:8");
         assert_eq!(value["tokens"]["nested"], serde_json::json!([1, 2]));
+        assert_eq!(parse(&format!("\u{feff}{source}")).unwrap(), parse(source).unwrap());
         assert_eq!(result.access_token, "new");
         assert!(value["tokens"].get("refresh_token").is_none());
         assert!(parse("{\n  \"fixture\": }")

@@ -62,7 +62,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {}, ev
   const calls = [];
   window.__TAURI__ = { event: events, core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
   const modules = new Map();
-  for (const name of ["shared", "modal", "codex_auth_editor", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
+  for (const name of ["shared", "modal", "codex_auth_editor", "codex_auth_add", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
     modules.set(`./${name}.js`, new vm.SourceTextModule(
       await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8"), { context }));
   }
@@ -186,6 +186,186 @@ test("older IPC replies cannot roll back a newer order broadcast", async () => {
   order.apply({ accountOrder:["b","a"], orderRevision:2 });
   order.apply({ accountOrder:["a","b"], orderRevision:1 });
   assert.deepEqual(Array.from(order.rows(accounts), a => a.id), ["b","a"]);
+});
+
+test("provider selection happens once and every account form names its fixed provider", async () => {
+  const f = await accountWindow(accountBackend()), q = s => f.document.querySelector(s);
+  assert.equal(q("#account-kind"), null);
+  for (const [kind, label] of [["cursor", "Cursor"], ["codex", "ChatGPT"], ["claude", "Claude"]]) {
+    q("#accounts-add").click();
+    assert.equal(q("#account-type-modal").querySelectorAll("[data-kind]").length, 4);
+    q(`#account-type-modal [data-kind="${kind}"]`).click();
+    assert.equal(q("#account-modal-title").textContent, `添加 ${label} 账户`);
+    assert.equal(q("#account-add-mode").hidden, kind !== "codex");
+    assert.equal(q("#account-import-local").textContent, `从本机导入 ${label}`);
+    f.api.closeModal();
+    f.api.openModal({ id: kind, kind, token: "fixture" });
+    assert.equal(q("#account-modal-title").textContent, `编辑 ${label} 账户`);
+    assert.equal(q("#account-add-mode").hidden, true);
+    assert.equal(q("#account-auth-mode").hidden, kind !== "codex");
+    f.api.closeModal();
+  }
+});
+
+const addAuthText = '{"tokens":{"access_token":"fixture-file","refresh_token":"fixture-refresh","id_token":"fixture-id"},"extra":9007199254740993}';
+
+function addBackend() {
+  const backend = accountBackend(); backend.state.accounts = []; backend.state.accountOrder = [];
+  return { ...backend, async invoke(cmd, args) {
+    if (cmd === "codex_auth_pick_file") return { name: "auth.json", text: addAuthText };
+    if (cmd === "accounts_add") {
+      const row = { id: "added", kind: args.account.kind, note: args.account.note, token: "fixture-added" };
+      backend.state.accounts.push(row); backend.state.accountOrder.push(row.id);
+      return structuredClone(backend.state);
+    }
+    if (cmd === "account_refresh") return backend.state.accounts.find(a => a.id === args.id);
+    return backend.invoke(cmd, args);
+  } };
+}
+
+test("ChatGPT add tabs keep independent drafts, support keyboard selection and submit only active JSON", async () => {
+  const f = await accountWindow(addBackend()), q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex");
+  assert.equal(q("#account-add-mode-token").getAttribute("aria-selected"), "true");
+  assert.equal(q("#account-token-fields").hidden, false);
+  q("#account-note").value = "共用备注";
+  q("#account-token").value = "manual-access"; q("#account-refresh-token").value = "manual-refresh";
+  f.event(q("#account-add-mode-token"), "keydown", { key: "ArrowRight" });
+  assert.equal(f.document.activeElement, q("#account-add-mode-file"));
+  q("#account-auth-pick").click(); await tick();
+  assert.equal(q("#account-auth-file-name").textContent, "auth.json");
+  f.event(q("#account-add-mode-file"), "keydown", { key: "End" });
+  assert.equal(q("#account-auth-field").hidden, false);
+  const json = addAuthText.replace("fixture-file", "fixture-json");
+  q("#account-auth-json").value = json;
+  f.event(q("#account-add-mode-json"), "keydown", { key: "Home" });
+  assert.equal(q("#account-token").value, "manual-access");
+  assert.equal(q("#account-refresh-token").value, "manual-refresh");
+  f.event(q("#account-add-mode-token"), "keydown", { key: "ArrowLeft" });
+  assert.equal(q("#account-auth-json").value, json);
+  assert.equal(q("#account-note").value, "共用备注");
+  assert.equal(q("#account-add-mode-file").tabIndex, -1);
+  assert.equal(f.calls.some(c => c.cmd === "accounts_add"), false);
+  await f.api.onSave(); await tick();
+  const write = f.calls.find(c => c.cmd === "accounts_add");
+  assert.deepEqual(JSON.parse(JSON.stringify(write.args.account)), { kind: "codex", note: "共用备注", codexAuthText: json });
+  assert.equal(f.calls.filter(c => c.cmd === "accounts_add").length, 1);
+  assert.equal(f.calls.filter(c => c.cmd === "account_refresh").length, 1);
+  assert.equal(q("#account-modal").hidden, true);
+  assert.equal(q("#account-auth-json").value, "");
+  assert.equal(q("#account-token").value, "");
+  assert.equal(q("#account-auth-file-name").textContent, "尚未选择文件");
+  f.api.openModal(null, "codex");
+  assert.equal(q("#account-add-mode-token").getAttribute("aria-selected"), "true");
+});
+
+test("file add preserves its exact source across cancelled and failed reselection", async () => {
+  const backend = addBackend(); let selection = 0;
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) => {
+    if (cmd === "codex_auth_pick_file") {
+      selection++;
+      if (selection === 2) return null;
+      if (selection === 3) throw Error("codex_auth_access_token");
+    }
+    return backend.invoke(cmd, args);
+  } });
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex"); q("#account-add-mode-file").click();
+  await f.api.onSave();
+  assert.match(q("#account-auth-status").textContent, /请选择/);
+  for (let i = 0; i < 3; i++) { q("#account-auth-pick").click(); await tick(); }
+  assert.equal(q("#account-auth-file-name").textContent, "auth.json");
+  assert.match(q("#account-auth-status").textContent, /tokens.access_token/);
+  q("#account-add-mode-json").click(); q("#account-auth-json").value = "invalid unused JSON";
+  q("#account-add-mode-file").click();
+  await f.api.onSave();
+  assert.equal(f.calls.find(c => c.cmd === "accounts_add").args.account.codexAuthText, addAuthText);
+});
+
+test("Token add ignores other drafts and keeps the existing token request shape", async () => {
+  const f = await accountWindow(addBackend()), q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex");
+  q("#account-add-mode-json").click(); q("#account-auth-json").value = "invalid unused JSON";
+  q("#account-add-mode-token").click();
+  await f.api.onSave();
+  assert.equal(f.calls.some(c => c.cmd === "accounts_add"), false);
+  q("#account-token").value = " manual "; q("#account-refresh-token").value = " refresh ";
+  await f.api.onSave();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(c => c.cmd === "accounts_add").args.account)),
+    { kind: "codex", note: "", token: "manual", refreshToken: "refresh" });
+});
+
+test("JSON validation, duplicates and failed writes retain drafts without leaking backend credential text", async () => {
+  const backend = addBackend(); let error = "";
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) => {
+    if (cmd === "accounts_add") throw Error(error);
+    return backend.invoke(cmd, args);
+  } });
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex"); q("#account-add-mode-json").click();
+  await f.api.onSave();
+  assert.match(q("#account-auth-status").textContent, /请粘贴/);
+  assert.equal(f.calls.some(c => c.cmd === "accounts_add"), false);
+  for (const [text, code, expected] of [
+    ['{\n"tokens":}', "codex_auth_json:2:10", /第 2 行，第 10 列/],
+    ["[]", "codex_auth_object", /JSON 对象/],
+    ['{"tokens":{}}', "codex_auth_access_token", /tokens.access_token/],
+    ['{"tokens":{"access_token":"a","refresh_token":42}}', "codex_auth_refresh_token", /tokens.refresh_token/],
+    [addAuthText, "duplicate_account", /已存在/],
+    [addAuthText, "disk full", /保存失败/],
+  ]) {
+    error = code; q("#account-auth-json").value = text; q("#account-note").value = "keep note";
+    await f.api.onSave();
+    const status = code === "disk full" ? q("#account-modal-status") : q("#account-auth-status");
+    assert.match(status.textContent, expected);
+    assert.equal(status.textContent.includes("fixture-refresh"), false);
+    assert.equal(q("#account-auth-json").value, text);
+    assert.equal(q("#account-note").value, "keep note");
+    assert.equal(q("#account-modal").hidden, false);
+    assert.equal(q("#account-save").disabled, false);
+    assert.equal(q("#account-add-mode-json").disabled, false);
+  }
+  assert.equal(f.calls.some(c => c.cmd === "account_refresh"), false);
+});
+
+test("closing during file selection discards late replies without changing the next account form", async () => {
+  const backend = addBackend(), pending = deferred();
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) =>
+    cmd === "codex_auth_pick_file" ? pending.promise : backend.invoke(cmd, args) });
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex"); q("#account-add-mode-file").click(); q("#account-auth-pick").click();
+  assert.equal(q("#account-save").disabled, true);
+  await f.api.onSave();
+  assert.equal(f.calls.some(c => c.cmd === "accounts_add"), false);
+  q("#account-cancel").click();
+  f.api.openModal(null, "codex"); q("#account-add-mode-json").click();
+  q("#account-auth-json").value = "new draft";
+  pending.resolve({ name: "old.json", text: addAuthText }); await tick();
+  assert.equal(q("#account-auth-json").value, "new draft");
+  assert.equal(q("#account-auth-file-name").textContent, "尚未选择文件");
+  assert.equal(q("#account-save").disabled, false);
+});
+
+test("saving full Auth locks every source and close action and prevents duplicate submissions", async () => {
+  const backend = addBackend(), pending = deferred();
+  const f = await accountWindow({ ...backend, invoke: (cmd, args) =>
+    cmd === "accounts_add" ? pending.promise : backend.invoke(cmd, args) });
+  const q = s => f.document.querySelector(s);
+  f.api.openModal(null, "codex"); q("#account-add-mode-json").click(); q("#account-auth-json").value = addAuthText;
+  const saving = f.api.onSave();
+  for (const selector of ["#account-add-mode-token", "#account-add-mode-file", "#account-add-mode-json", "#account-auth-pick", "#account-import-local", "#account-auth-json"]) {
+    assert.equal(q(selector).disabled, true);
+  }
+  f.event(q("#account-add-mode-json"), "keydown", { key: "Home" });
+  q("#account-cancel").click(); f.event(f.document, "keydown", { key: "Escape" });
+  f.backdrop(q("#account-modal")); await f.api.onSave();
+  assert.equal(q("#account-modal").hidden, false);
+  assert.equal(q("#account-add-mode-json").getAttribute("aria-selected"), "true");
+  assert.equal(f.calls.filter(c => c.cmd === "accounts_add").length, 1);
+  pending.reject(Error("disk full")); await saving;
+  assert.equal(q("#account-auth-json").value, addAuthText);
+  assert.equal(q("#account-auth-pick").disabled, false);
+  assert.equal(q("#account-add-mode-token").disabled, false);
 });
 
 test("legacy card preferences reach the backend when the account list first opens", async () => {
