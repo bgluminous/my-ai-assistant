@@ -22,7 +22,8 @@ import {
   relativeFromMs,
   relativeFromUnixSeconds,
   accountPlanInfo,
-  subscriptionDateInfo,
+  accountDateInfo,
+  quotaResetInfo,
   remainInfo,
   centsText,
   usdText,
@@ -259,10 +260,10 @@ function fillPlanCell(cell, account) {
   if (!status || status.alive === false) return;
   // Claude 的额度窗口重置时间见摘要列，接口不提供订阅起止日期
   if (account.kind === "claude") return;
-  const end = subscriptionDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd);
+  const end = accountDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd);
   if (!end) return;
   const expiry = expiryNode(end.ms);
-  const startText = subscriptionDateInfo(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart)?.text;
+  const startText = accountDateInfo(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart)?.text;
   const renewHint = account.kind === "codex" || account.kind === "opencode"
     ? status.planWillRenew === true
       ? "（到期自动续期）"
@@ -318,11 +319,11 @@ function quotaBar(label, usedPercent, extra) {
   pct.textContent = `${Math.round(remaining)}%`;
   pct.title = `剩余 ${Math.round(remaining)}%`;
   wrap.append(name, track, pct);
-  if (extra) {
+  if (extra?.text) {
     const extraSpan = document.createElement("span");
     extraSpan.className = "quota-bar-extra";
-    extraSpan.textContent = extra;
-    extraSpan.title = extra;
+    extraSpan.textContent = extra.text;
+    extraSpan.title = extra.title ?? extra.text;
     wrap.append(extraSpan);
   }
   return wrap;
@@ -334,12 +335,6 @@ function metaItem(text, bad) {
   span.className = `summary-meta-item${bad ? " expired" : ""}`;
   span.textContent = text;
   return span;
-}
-
-function shortDate(iso) {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "";
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 // 摘要列拆成两部分：bars 为额度进度条（两列网格排布），meta 为一行小字补充信息
@@ -364,7 +359,7 @@ function cursorSummaryNodes(status) {
         usedPct = (used / (remaining + used)) * 100;
       }
       const detail = plan.used != null || plan.limit != null ? `${fmtNum(plan.used)} / ${fmtNum(plan.limit)}` : "";
-      const bar = usedPct != null ? quotaBar("Plan", usedPct, detail) : null;
+      const bar = usedPct != null ? quotaBar("Plan", usedPct, { text: detail }) : null;
       if (bar) bars.push(bar);
       else if (detail) meta.push(metaItem(`额度 ${detail}`));
     }
@@ -374,25 +369,10 @@ function cursorSummaryNodes(status) {
   if (sand && sand.included) {
     let usedPct = Number(sand.usagePercent);
     if (sand.hasAvailableUsage === false) usedPct = 100;
-    const reset = sand.nextResetAt ? resetTimeText(Date.parse(sand.nextResetAt)) : "";
-    const bar = quotaBar("Sand", usedPct, reset);
+    const bar = quotaBar("Sand", usedPct, quotaResetInfo(sand.nextResetAt));
     if (bar) bars.push(bar);
   }
   return { bars, meta };
-}
-
-/**
- * 额度重置时刻的紧凑文案（额度条右侧小字，空间有限）：一律显示具体时刻而非倒计时——
- * 距重置不足 24 小时显示时刻（HH:mm），24 小时以上显示日期（MM-DD）；
- * 时刻已过说明数据陈旧，显示「已重置」。Cursor 的 Sand 周额度与 ChatGPT / Claude 的额度窗口共用。
- */
-function resetTimeText(resetAtMs) {
-  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return "";
-  const inSec = Math.round((resetAtMs - Date.now()) / 1000);
-  if (inSec <= 0) return "已重置";
-  const d = new Date(resetAtMs);
-  if (inSec >= 86400) return `重置 ${shortDate(d)}`;
-  return `重置 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** 超额列（Cursor）：超出套餐的按需消费金额 + 可选的上限小字；未开启或无数据为 —。 */
@@ -449,26 +429,6 @@ function fillCreditsCell(cell, account) {
   }
 }
 
-/**
- * 额度窗口的重置时刻（毫秒）：resetAt 绝对值优先；否则以锚点（账户刷新时间，unix 秒）
- * + resetsInSeconds 推算——resetsInSeconds 是拉取当时的相对值，锚定 Date.now() 会随
- * 数据陈旧而漂移。无锚点时才退回 Date.now()。取不到返回 null。
- */
-function windowResetAtMs(w, anchorSec) {
-  const abs = Number(w && w.resetAt);
-  if (abs > 0) return abs * 1000;
-  const rel = Number(w && w.resetsInSeconds);
-  if (!(rel > 0)) return null;
-  const anchorMs = Number(anchorSec) > 0 ? Number(anchorSec) * 1000 : Date.now();
-  return anchorMs + rel * 1000;
-}
-
-/** ChatGPT / Claude 额度窗口的重置时间文案：与 Sand 同一口径，显示具体时刻而非倒计时。 */
-function windowResetText(w, anchorSec) {
-  const resetAtMs = windowResetAtMs(w, anchorSec);
-  return resetAtMs ? resetTimeText(resetAtMs) : "";
-}
-
 // 与 cursorSummaryNodes 结构对齐：bars 为额度窗口进度条（Token 到期倒计时见套餐列），
 // meta 为额度条下方的小字：ChatGPT 的剩余额度重置次数（接口提供时才显示）
 function codexSummaryNodes(status, anchorSec) {
@@ -477,7 +437,8 @@ function codexSummaryNodes(status, anchorSec) {
   const windows = Array.isArray(status.windows) ? status.windows : [];
   for (const w of windows.slice(0, 3)) {
     if (!w) continue;
-    const bar = quotaBar(w.label || "额度窗口", w.usedPercent, windowResetText(w, anchorSec));
+    const reset = quotaResetInfo(w.resetAt, w.resetsInSeconds, anchorSec);
+    const bar = quotaBar(w.label || "额度窗口", w.usedPercent, reset);
     if (bar) bars.push(bar);
   }
   // 「剩余重置 2 次 · 最早 09-30 过期」：次数与最早过期时间用间隔点连成一条不换行的小字，

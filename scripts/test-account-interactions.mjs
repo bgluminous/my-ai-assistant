@@ -19,7 +19,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-async function fixture(source, { stored, invoke = async () => {}, mocks = {}, events, markup = html, realModules = [] } = {}) {
+async function fixture(source, { stored, invoke = async () => {}, mocks = {}, events, markup = html, realModules = [], nowMs = 10000 } = {}) {
   const { document, window: dom } = parseHTML(markup);
   Object.defineProperty(document, "activeElement", { value: document.body, writable: true });
   dom.HTMLElement.prototype.select = function () {};
@@ -44,7 +44,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {}, ev
     return element;
   };
   const handlers = new Map(), values = new Map(stored || []), timers = new Map();
-  let nextTimer = 0, now = 10000;
+  let nextTimer = 0, now = nowMs;
   const deadlines = new Map();
   class Clock extends Date { static now() { return now; } }
   const window = {
@@ -880,6 +880,17 @@ test("OpenCode partial reads explain each failing field without adding summary o
   assert.equal(row.children[5].textContent, "$0.00");
 });
 
+async function accountAndTrayWindows(accounts, nowMs) {
+  const backend = { nowMs, invoke: async cmd => cmd === "accounts_list" ? { accounts, intervalMinutes: 0 } : null };
+  const main = await accountWindow(backend);
+  const tray = await fixture(await readFile(new URL("../src/tray_panel.js", import.meta.url), "utf8"), {
+    ...backend, markup: await readFile(new URL("../src/tray.html", import.meta.url), "utf8"),
+    stored: [["trayTab", "accounts"]], realModules: ["usage_data"],
+  });
+  await tick();
+  return { main, tray };
+}
+
 test("subscription tooltips in the account list and tray preserve local minutes and calendar dates", async () => {
   const midnight = new Date(2026, 11, 1, 0, 0, 58).toISOString();
   const afternoon = new Date(2026, 11, 1, 15, 30, 49).toISOString();
@@ -894,13 +905,7 @@ test("subscription tooltips in the account list and tray preserve local minutes 
     { id: "zero", kind: "opencode", status: { billingCycleEnd: 0 } },
     { id: "invalid", kind: "cursor", status: { billingCycleEnd: "invalid" } },
   ].map(account => ({ ...account, opencodeAuthorized: true, status: { alive: true, ...account.status } }));
-  const backend = { invoke: async cmd => cmd === "accounts_list" ? { accounts, intervalMinutes: 0 } : null };
-  const main = await accountWindow(backend);
-  const tray = await fixture(await readFile(new URL("../src/tray_panel.js", import.meta.url), "utf8"), {
-    ...backend, markup: await readFile(new URL("../src/tray.html", import.meta.url), "utf8"),
-    stored: [["trayTab", "accounts"]], realModules: ["usage_data"],
-  });
-  await tick();
+  const { main, tray } = await accountAndTrayWindows(accounts);
 
   for (const [id, mainTitle, trayTitle] of [
     ["chat", "订阅有效期：2026/11/01 ~ 2026/12/01 15:30（到期自动续期）", "订阅至 2026/12/01 15:30（到期自动续期）"],
@@ -924,6 +929,54 @@ test("subscription tooltips in the account list and tray preserve local minutes 
     const summary = tray.document.querySelector(`[data-id="${id}"] .tray-sub span`);
     assert.doesNotMatch(summary.title, /订阅至|计费周期截止|有效期/);
   }
+});
+
+test("quota reset tooltips agree across windows for absolute, anchored, date-only and missing times", async () => {
+  const now = new Date(2026, 10, 30, 15, 30).getTime();
+  const nowSec = now / 1000;
+  const midnight = new Date(2026, 11, 1, 0, 0, 47);
+  const meter = (label, timing) => ({ label, usedPercent: 25, ...timing });
+  const sand = (id, nextResetAt) => ({ id, kind: "cursor", status: {
+    sand: { included: true, usagePercent: 25, nextResetAt },
+  } });
+  const accounts = [
+    { id: "chat", kind: "codex", lastRefreshAt: nowSec, status: { windows: [
+      meter("5 小时", { resetAt: String(midnight.getTime() / 1000), resetsInSeconds: 30 }),
+      meter("每周", { resetAt: nowSec + 86400 }),
+    ] } },
+    { id: "claude", kind: "claude", status: { windows: [
+      meter("5 小时", { resetAt: nowSec - 120 }), meter("每周", { resetAt: nowSec + 86399 }),
+    ] } },
+    { id: "open", kind: "opencode", lastRefreshAt: nowSec - 7200, status: { windows: [
+      meter("滚动", { resetsInSeconds: 10800 }), meter("每周", {}), meter("每月", { resetAt: nowSec + 3 * 86400 }),
+    ] } },
+    { id: "unanchored", kind: "codex", status: { windows: [meter("每周", { resetsInSeconds: 1800 })] } },
+    sand("sand-time", midnight.toISOString()), sand("sand-today", "2026-11-30"),
+    sand("sand-past", "2026-11-29"), sand("sand-invalid", "2026-02-30"),
+    { id: "plan", kind: "cursor", status: { plan: { used: 25, limit: 100 } } },
+  ].map(account => ({ ...account, opencodeAuthorized: true, status: { alive: true, ...account.status } }));
+  const { main, tray } = await accountAndTrayWindows(accounts, now);
+  for (const [id, index, inline, full] of [
+    ["chat", 0, "重置 00:00", "2026/12/01 00:00"], ["chat", 1, "重置 12-01", "2026/12/01 15:30"],
+    ["claude", 0, "已重置", "2026/11/30 15:28"], ["claude", 1, "重置 15:29", "2026/12/01 15:29"],
+    ["open", 0, "重置 16:30", "2026/11/30 16:30"], ["open", 1, null, null],
+    ["open", 2, "重置 12-03", "2026/12/03 15:30"], ["unanchored", 0, null, null],
+    ["sand-time", 0, "重置 00:00", "2026/12/01 00:00"], ["sand-today", 0, "重置 11-30", "2026/11/30"],
+    ["sand-past", 0, "已重置", "2026/11/29"], ["sand-invalid", 0, null, null],
+  ]) {
+    const bar = main.document.querySelectorAll(`[data-id="${id}"] .quota-bar`)[index];
+    const mini = tray.document.querySelectorAll(`[data-id="${id}"] .tray-bar`)[index];
+    const label = bar.querySelector(".quota-bar-label").textContent;
+    const reset = bar.querySelector(".quota-bar-extra");
+    assert.equal(reset?.textContent ?? null, inline, id);
+    assert.equal(reset?.title ?? null, full && `${full} 重置`, id);
+    assert.equal(mini.title, `${label} 剩余 75%` + (full ? `\n${full} 重置` : ""), id);
+    assert.equal(mini.querySelector(".tray-bar-val").textContent, "75%");
+    assert.doesNotMatch(mini.textContent, /重置/);
+  }
+  const planDetail = main.document.querySelector('[data-id="plan"] .quota-bar-extra');
+  assert.equal(planDetail.textContent, "25 / 100");
+  assert.equal(planDetail.title, planDetail.textContent);
 });
 
 test("credential expiry sits below state and alongside renewal instead of inside the primary label", async () => {

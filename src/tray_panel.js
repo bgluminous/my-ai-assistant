@@ -3,7 +3,7 @@ import { refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, subscriptionDateInfo, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, accountDateInfo, quotaResetInfo, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
 import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
@@ -267,13 +267,14 @@ function tierClass(remaining) {
 }
 
 /** 迷你进度条（无动画）：标签 + 剩余百分比填充 + 数值，颜色按剩余量分档。 */
-function miniBar(label, usedPercent) {
+function miniBar(label, usedPercent, reset) {
   const used = Number(usedPercent);
   if (!Number.isFinite(used)) return null;
   const remaining = Math.min(100, Math.max(0, 100 - used));
   const wrap = document.createElement("span");
   wrap.className = `tray-bar ${tierClass(remaining)}`;
   wrap.title = `${label} 剩余 ${Math.round(remaining)}%`;
+  if (reset) wrap.title += `\n${reset.title}`;
   const name = document.createElement("span");
   name.className = "tray-bar-label";
   name.textContent = label;
@@ -297,7 +298,9 @@ function barsFor(account) {
     // Codex / Claude 的额度窗口结构一致（windows: label / usedPercent）
     const windows = Array.isArray(status.windows) ? status.windows : [];
     for (const w of windows.slice(0, account.kind === "opencode" ? 3 : 2)) {
-      const bar = w && miniBar(w.label || "窗口", w.usedPercent);
+      if (!w) continue;
+      const reset = quotaResetInfo(w.resetAt, w.resetsInSeconds, account.lastRefreshAt);
+      const bar = miniBar(w.label || "窗口", w.usedPercent, reset);
       if (bar) bars.push(bar);
     }
   } else {
@@ -312,7 +315,7 @@ function barsFor(account) {
     if (sand && sand.included) {
       let usedPct = Number(sand.usagePercent);
       if (sand.hasAvailableUsage === false) usedPct = 100;
-      const sandBar = miniBar("Sand", usedPct);
+      const sandBar = miniBar("Sand", usedPct, quotaResetInfo(sand.nextResetAt));
       if (sandBar) bars.push(sandBar);
     }
   }
@@ -366,7 +369,7 @@ function accountRow(account) {
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
   // Claude 接口不提供订阅起止，不展示有效期
   const end = status?.alive === true && account.kind !== "claude"
-    ? subscriptionDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
+    ? accountDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
     : null;
   if (end) {
     const exp = remainInfo(end.ms);

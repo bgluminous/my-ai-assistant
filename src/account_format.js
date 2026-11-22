@@ -189,14 +189,19 @@ export function relativeFromUnixSeconds(seconds) {
   return relativeFromMs(n * 1000);
 }
 
-const subscriptionDateFormat = { year: "numeric", month: "2-digit", day: "2-digit" };
-const subscriptionTimeFormat = {
-  ...subscriptionDateFormat,
-  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-};
+const accountDateFormat = { year: "numeric", month: "2-digit", day: "2-digit" };
+const accountTimeFormat = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
 
-/** 套餐周期的倒计时基准和悬停文案。纯日期沿用原日历日，具体时刻转为本地时分。 */
-export function subscriptionDateInfo(value) {
+function finiteNumber(value) {
+  if (typeof value === "number" || typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** 套餐和额度窗口共用的本地日期与时分。仅提供日期时保留原日历日。 */
+export function accountDateInfo(value) {
   let raw;
   if (typeof value === "string") {
     raw = value.trim();
@@ -209,13 +214,36 @@ export function subscriptionDateInfo(value) {
   const date = new Date(raw);
   const ms = date.getTime();
   if (!Number.isFinite(ms)) return null;
+  let day;
   if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     // ISO 纯日期按 UTC 解析，直接显示其年月日，避免在负时区退到前一天。
     if (date.toISOString().slice(0, 10) !== raw) return null;
-    return { ms, text: raw.replaceAll("-", "/") };
+    day = raw.replaceAll("-", "/");
+  } else {
+    day = date.toLocaleDateString("zh-CN", accountDateFormat);
   }
-  const format = typeof raw === "string" && !raw.includes(":") ? subscriptionDateFormat : subscriptionTimeFormat;
-  return { ms, text: date.toLocaleString("zh-CN", format) };
+  const time = typeof raw === "string" && !raw.includes(":") ? "" : date.toLocaleTimeString("zh-CN", accountTimeFormat);
+  return { ms, day, time, text: time ? `${day} ${time}` : day };
+}
+
+/** 返回额度条的短文案与完整提示。相对秒数属于刷新时的快照，必须有对应的刷新时间。 */
+export function quotaResetInfo(resetAt, resetsInSeconds, lastRefreshAt) {
+  // 兼容旧额度窗口里的数字字符串，同时保留 Sand 返回的 ISO 日期或时刻。
+  let reset = accountDateInfo(finiteNumber(resetAt) ?? resetAt);
+  if (!reset) {
+    const delay = finiteNumber(resetsInSeconds);
+    const anchor = finiteNumber(lastRefreshAt);
+    if (!(delay > 0 && anchor > 0)) return null;
+    reset = accountDateInfo(anchor + delay);
+    if (!reset) return null;
+  }
+
+  const now = Date.now();
+  const remaining = reset.ms - now;
+  // 只有日期时，当天的重置时刻未知，等本地日历翻到下一天再标记已重置。
+  const passed = reset.time ? remaining <= 0 : reset.day < new Date(now).toLocaleDateString("zh-CN", accountDateFormat);
+  const short = reset.time && remaining < 86_400_000 ? reset.time : reset.day.slice(-5).replace("/", "-");
+  return { text: passed ? "已重置" : `重置 ${short}`, title: `${reset.text} 重置` };
 }
 
 /** 到期剩余时长的紧凑文本（Nd / Nh / <1h）；已过期返回 expired=true。 */
@@ -247,26 +275,18 @@ export function centsText(cents) {
  */
 const CODEX_CREDIT_USD = 0.04;
 
-function creditsNumber(value) {
-  if (typeof value === "number" || typeof value === "string") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
 /**
  * 从 credits 取出点数与美元余额。结构为
  * `{ has_credits, unlimited, balance }`；兼容 available / remaining 别名。
  */
 export function parseCreditsUsd(credits) {
   if (credits == null) return { unlimited: false, units: null, usd: null };
-  let raw = creditsNumber(credits);
+  let raw = finiteNumber(credits);
   let unlimited = false;
   if (raw == null && typeof credits === "object") {
     unlimited = credits.unlimited === true;
     for (const key of ["balance", "available", "remaining"]) {
-      raw = creditsNumber(credits[key]);
+      raw = finiteNumber(credits[key]);
       if (raw != null) break;
     }
   }

@@ -89,8 +89,9 @@ Account management, usage overview, and the tray account panel (shown with sampl
   The tray's secondary line shows only the reset count. Hovering over the count shows all returned
   reset records, including status, expiration, and acquisition / usage times when available. Used
   and expired records remain accessible when the remaining count is zero, including in the tray.
-  Quota resets always show a specific time: time of day within 24 hours, a date otherwise, or
-  "Reset" once passed.
+  The account list shows the reset time within 24 hours, the date for later resets, and "Reset"
+  once the time has passed. Hover over the reset text or the matching quota bar in the tray for
+  the full local date and time. Date-only records show just the date.
 - Refresh automatically every 5 / 15 / 30 minutes or 1 / 6 / 12 / 24 hours, or manually refresh one
   account or all accounts. Each editor offers "Follow global", a custom interval, or
   "Off"; new and existing accounts default to following the global setting. Per-account settings
