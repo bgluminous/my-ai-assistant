@@ -3,7 +3,7 @@ import { refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, subscriptionDateInfo, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
 import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
@@ -365,22 +365,20 @@ function accountRow(account) {
   }
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
   // Claude 接口不提供订阅起止，不展示有效期
-  const endIso = status && status.alive === true && account.kind !== "claude"
-    ? (account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
+  const end = status?.alive === true && account.kind !== "claude"
+    ? subscriptionDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd)
     : null;
-  const endMs = endIso ? Date.parse(endIso) : NaN;
-  if (Number.isFinite(endMs)) {
-    const exp = remainInfo(endMs);
+  if (end) {
+    const exp = remainInfo(end.ms);
     parts.push(exp.expired ? "已到期" : `有效期 ${exp.text}`);
-    const endText = new Date(endMs).toLocaleDateString("zh-CN");
     const renewHint = (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === true
       ? "（到期自动续期）"
       : (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === false
       ? "（到期不续期）"
       : "";
     titles.push(account.kind === "codex" || account.kind === "opencode"
-      ? `订阅至 ${endText}${renewHint}`
-      : `本期计费周期截止 ${endText}（到期自动续期，额度重置）`);
+      ? `订阅至 ${end.text}${renewHint}`
+      : `本期计费周期截止 ${end.text}（到期自动续期，额度重置）`);
   }
   const extra = account.kind === "codex" || account.kind === "opencode"
     ? creditsBrief(status)

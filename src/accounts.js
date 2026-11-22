@@ -22,6 +22,7 @@ import {
   relativeFromMs,
   relativeFromUnixSeconds,
   accountPlanInfo,
+  subscriptionDateInfo,
   remainInfo,
   centsText,
   usdText,
@@ -258,11 +259,10 @@ function fillPlanCell(cell, account) {
   if (!status || status.alive === false) return;
   // Claude 的额度窗口重置时间见摘要列，接口不提供订阅起止日期
   if (account.kind === "claude") return;
-  const endIso = account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd;
-  const endText = isoDateText(endIso);
-  if (!endText) return;
-  const expiry = expiryNode(new Date(endIso).getTime());
-  const startText = isoDateText(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart);
+  const end = subscriptionDateInfo(account.kind === "codex" ? status.planActiveUntil : status.billingCycleEnd);
+  if (!end) return;
+  const expiry = expiryNode(end.ms);
+  const startText = subscriptionDateInfo(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart)?.text;
   const renewHint = account.kind === "codex" || account.kind === "opencode"
     ? status.planWillRenew === true
       ? "（到期自动续期）"
@@ -273,11 +273,11 @@ function fillPlanCell(cell, account) {
   expiry.title =
     account.kind === "codex"
       ? startText
-        ? `订阅有效期：${startText} ~ ${endText}${renewHint}`
-        : `订阅至 ${endText}${renewHint}`
+        ? `订阅有效期：${startText} ~ ${end.text}${renewHint}`
+        : `订阅至 ${end.text}${renewHint}`
       : startText
-      ? `本期计费周期：${startText} ~ ${endText}${renewHint}`
-      : `本期计费周期截止 ${endText}${renewHint}`;
+      ? `本期计费周期：${startText} ~ ${end.text}${renewHint}`
+      : `本期计费周期截止 ${end.text}${renewHint}`;
   cell.append(expiry);
 }
 
@@ -340,13 +340,6 @@ function shortDate(iso) {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return "";
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-/** ISO 日期字符串 -> 本地日期文本（省略时间，如 2026/9/21），无效返回空串。 */
-function isoDateText(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isFinite(d.getTime()) ? d.toLocaleDateString("zh-CN") : "";
 }
 
 // 摘要列拆成两部分：bars 为额度进度条（两列网格排布），meta 为一行小字补充信息

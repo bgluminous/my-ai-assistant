@@ -19,8 +19,8 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-async function fixture(source, { stored, invoke = async () => {}, mocks = {}, events } = {}) {
-  const { document, window: dom } = parseHTML(html);
+async function fixture(source, { stored, invoke = async () => {}, mocks = {}, events, markup = html, realModules = [] } = {}) {
+  const { document, window: dom } = parseHTML(markup);
   Object.defineProperty(document, "activeElement", { value: document.body, writable: true });
   dom.HTMLElement.prototype.select = function () {};
   dom.HTMLElement.prototype.focus = function () { document.activeElement = this; };
@@ -62,7 +62,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {}, ev
   const calls = [];
   window.__TAURI__ = { event: events, core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
   const modules = new Map();
-  for (const name of ["shared", "modal", "codex_auth_editor", "codex_auth_add", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui"]) {
+  for (const name of ["shared", "modal", "codex_auth_editor", "codex_auth_add", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui", ...realModules]) {
     modules.set(`./${name}.js`, new vm.SourceTextModule(
       await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8"), { context }));
   }
@@ -878,6 +878,52 @@ test("OpenCode partial reads explain each failing field without adding summary o
   assert.match(icon.title, /缓存/); assert.match(icon.title, /管理员/);
   assert.equal(row.querySelectorAll(".summary-meta, .ondemand-limit, .account-error").length, 0);
   assert.equal(row.children[5].textContent, "$0.00");
+});
+
+test("subscription tooltips in the account list and tray preserve local minutes and calendar dates", async () => {
+  const midnight = new Date(2026, 11, 1, 0, 0, 58).toISOString();
+  const afternoon = new Date(2026, 11, 1, 15, 30, 49).toISOString();
+  const accounts = [
+    { id: "chat", kind: "codex", status: { planActiveStart: "2026-11-01", planActiveUntil: afternoon, planWillRenew: true } },
+    { id: "cursor", kind: "cursor", status: { billingCycleStart: midnight, billingCycleEnd: afternoon } },
+    { id: "midnight", kind: "opencode", status: { billingCycleEnd: midnight, planWillRenew: false } },
+    { id: "date", kind: "opencode", status: { billingCycleEnd: "2026-12-01" } },
+    { id: "seconds", kind: "opencode", status: { billingCycleEnd: Date.parse(afternoon) / 1000 } },
+    { id: "millis", kind: "opencode", status: { billingCycleEnd: Date.parse(afternoon) } },
+    { id: "missing", kind: "codex", status: {} },
+    { id: "zero", kind: "opencode", status: { billingCycleEnd: 0 } },
+    { id: "invalid", kind: "cursor", status: { billingCycleEnd: "invalid" } },
+  ].map(account => ({ ...account, opencodeAuthorized: true, status: { alive: true, ...account.status } }));
+  const backend = { invoke: async cmd => cmd === "accounts_list" ? { accounts, intervalMinutes: 0 } : null };
+  const main = await accountWindow(backend);
+  const tray = await fixture(await readFile(new URL("../src/tray_panel.js", import.meta.url), "utf8"), {
+    ...backend, markup: await readFile(new URL("../src/tray.html", import.meta.url), "utf8"),
+    stored: [["trayTab", "accounts"]], realModules: ["usage_data"],
+  });
+  await tick();
+
+  for (const [id, mainTitle, trayTitle] of [
+    ["chat", "订阅有效期：2026/11/01 ~ 2026/12/01 15:30（到期自动续期）", "订阅至 2026/12/01 15:30（到期自动续期）"],
+    ["cursor", "本期计费周期：2026/12/01 00:00 ~ 2026/12/01 15:30（到期自动续期，额度重置）",
+      "本期计费周期截止 2026/12/01 15:30（到期自动续期，额度重置）"],
+    ["midnight", "本期计费周期截止 2026/12/01 00:00（到期不续期）", "订阅至 2026/12/01 00:00（到期不续期）"],
+    ["date", "本期计费周期截止 2026/12/01", "订阅至 2026/12/01"],
+    ["seconds", "本期计费周期截止 2026/12/01 15:30", "订阅至 2026/12/01 15:30"],
+    ["millis", "本期计费周期截止 2026/12/01 15:30", "订阅至 2026/12/01 15:30"],
+  ]) {
+    const expiry = main.document.querySelector(`[data-id="${id}"] .plan-expiry`);
+    const summary = tray.document.querySelector(`[data-id="${id}"] .tray-sub span`);
+    assert.equal(expiry.title, mainTitle);
+    assert.equal(summary.title.split("\n").at(-1), trayTitle);
+    assert.match(expiry.textContent, /^\d+d$/);
+    assert.ok(summary.textContent.includes(`有效期 ${expiry.textContent}`));
+    assert.doesNotMatch(summary.textContent, /2026/);
+  }
+  for (const id of ["missing", "zero", "invalid"]) {
+    assert.equal(main.document.querySelector(`[data-id="${id}"] .plan-expiry`), null);
+    const summary = tray.document.querySelector(`[data-id="${id}"] .tray-sub span`);
+    assert.doesNotMatch(summary.title, /订阅至|计费周期截止|有效期/);
+  }
 });
 
 test("credential expiry sits below state and alongside renewal instead of inside the primary label", async () => {

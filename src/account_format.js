@@ -189,6 +189,35 @@ export function relativeFromUnixSeconds(seconds) {
   return relativeFromMs(n * 1000);
 }
 
+const subscriptionDateFormat = { year: "numeric", month: "2-digit", day: "2-digit" };
+const subscriptionTimeFormat = {
+  ...subscriptionDateFormat,
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+};
+
+/** 套餐周期的倒计时基准和悬停文案。纯日期沿用原日历日，具体时刻转为本地时分。 */
+export function subscriptionDateInfo(value) {
+  let raw;
+  if (typeof value === "string") {
+    raw = value.trim();
+  } else if (typeof value === "number" && value > 0) {
+    // 与订阅接口的日期解析一致，兼容 Unix 秒和毫秒。
+    raw = value <= 10_000_000_000 ? value * 1000 : value;
+  } else {
+    return null;
+  }
+  const date = new Date(raw);
+  const ms = date.getTime();
+  if (!Number.isFinite(ms)) return null;
+  if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    // ISO 纯日期按 UTC 解析，直接显示其年月日，避免在负时区退到前一天。
+    if (date.toISOString().slice(0, 10) !== raw) return null;
+    return { ms, text: raw.replaceAll("-", "/") };
+  }
+  const format = typeof raw === "string" && !raw.includes(":") ? subscriptionDateFormat : subscriptionTimeFormat;
+  return { ms, text: date.toLocaleString("zh-CN", format) };
+}
+
 /** 到期剩余时长的紧凑文本（Nd / Nh / <1h）；已过期返回 expired=true。 */
 export function remainInfo(endMs) {
   const remainMs = endMs - Date.now();
