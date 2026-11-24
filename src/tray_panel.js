@@ -1,6 +1,6 @@
 import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { refreshByProvider } from "./account_refresh.js";
-import { switchLocalClients } from "./linked_client_ui.js";
+import { switchLocalClients, startSwitchResultCountdown } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
 import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, accountDateInfo, quotaResetInfo, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
@@ -1571,9 +1571,6 @@ const SWITCH_ERRORS = {
   claude_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
 };
 
-/** 切换成功的结果弹窗停留秒数，到点自动关闭（按钮上倒计时，期间可手动关闭）。 */
-const SWITCH_RESULT_AUTO_CLOSE_SECONDS = 3;
-
 // 切换弹窗：busy（检测中）→ confirm（可取消）→ steps（进行中，禁止关闭）→ result（仅「关闭」）
 // 成功结果倒计时自动关闭，失败结果保留到用户手动关闭。
 const trayModal = (() => {
@@ -1589,7 +1586,7 @@ const trayModal = (() => {
   let confirmResolve = null;
   let icons = [];
   let current = -1;
-  let autoCloseTimer = null;
+  let cancelAutoClose = null;
 
   function settleConfirm(value) {
     const resolve = confirmResolve;
@@ -1598,26 +1595,8 @@ const trayModal = (() => {
   }
 
   function stopAutoClose() {
-    if (autoCloseTimer) {
-      clearTimeout(autoCloseTimer);
-      autoCloseTimer = null;
-    }
-  }
-
-  // 结果阶段倒计时：按钮显示「关闭（3s）」逐秒递减，归零自动 close
-  function startAutoClose() {
-    stopAutoClose();
-    let remain = SWITCH_RESULT_AUTO_CLOSE_SECONDS;
-    const tick = () => {
-      if (remain <= 0) {
-        close();
-        return;
-      }
-      btnOk.textContent = `关闭（${remain}s）`;
-      remain -= 1;
-      autoCloseTimer = setTimeout(tick, 1000);
-    };
-    tick();
+    cancelAutoClose?.();
+    cancelAutoClose = null;
   }
 
   function openBusy(titleText, text) {
@@ -1704,7 +1683,8 @@ const trayModal = (() => {
     btnCancel.hidden = true;
     btnOk.textContent = "关闭";
     btnOk.classList.remove("danger");
-    if (ok) startAutoClose();
+    stopAutoClose();
+    if (ok) cancelAutoClose = startSwitchResultCountdown(btnOk, close);
   }
 
   function close() {

@@ -1348,6 +1348,7 @@ test("a Desktop failure remains partial and duplicate switch clicks share one op
   assert.equal(f.document.querySelectorAll("dialog").length, 1);
   await tick(); await f.button("两端一起").onclick();
   assert.equal(await task, false); assert.equal(completed, 1);
+  f.advance(3000);
   const status = f.document.querySelector("dialog .status");
   assert.equal(status.classList.contains("bad"), true);
   assert.match(f.document.querySelector(".opencode-content").textContent, /CLI：切换成功/);
@@ -1492,8 +1493,42 @@ test("one button click submits exactly its own endpoints for every provider", as
       assert.equal(writes[0].args.target, target);
       assert.equal(writes[0].args.closeDesktop, target !== "cli");
       assert.equal(f.document.querySelectorAll("dialog .client-endpoint-result").length, clients.length);
+      const close = f.button("关闭（3s）");
+      assert.ok(close);
+      f.advance(1000);
+      assert.equal(close.textContent, "关闭（2s）");
+      f.advance(1999);
+      assert.equal(close.textContent, "关闭（1s）");
+      assert.equal(close.isConnected, true);
+      f.advance(1);
+      assert.equal(f.document.querySelector("dialog"), null);
     }
   }
+});
+
+test("manually closing a switch result during refresh cancels its countdown before the next switch", async () => {
+  const refresh = deferred();
+  const f = await fixture(linkedSource, { invoke: cmd => cmd === "local_clients_status"
+    ? { cli: { installed: true } }
+    : { state: "complete", switched: true, clients: [{ target: "cli", status: "success" }] } });
+  const first = f.api.switchLocalClients({ id: "first", kind: "codex" }, () => refresh.promise);
+  await tick();
+  const switching = f.button("仅 CLI").onclick();
+  assert.equal(await first, true);
+  f.event(f.button("关闭（3s）"), "click");
+  await tick();
+  assert.equal(f.document.querySelector("dialog"), null);
+  assert.equal(f.timers.size, 0);
+
+  const next = f.api.switchLocalClients({ id: "next", kind: "codex" });
+  await tick();
+  refresh.resolve();
+  await switching;
+  f.advance(3000);
+  const root = f.document.querySelector("dialog");
+  assert.ok(root);
+  f.event(root, "keydown", { key: "Escape" });
+  assert.equal(await next, false);
 });
 
 test("CLI selection bypasses unbound, pending and broken Claude Desktop sessions", async () => {

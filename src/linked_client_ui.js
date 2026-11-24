@@ -65,6 +65,24 @@ export function resultText(result) {
     client.status === "success" ? "切换成功" : clientError(client.error || "切换失败")}`).join("\n");
 }
 
+/** 成功结果显示 3 秒。按截止时间更新按钮，手动关闭或复用弹窗时可取消倒计时。 */
+export function startSwitchResultCountdown(button, close) {
+  const deadline = Date.now() + 3000;
+  let timer;
+  function tick() {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      close();
+      return;
+    }
+    const seconds = Math.ceil(remainingMs / 1000);
+    button.textContent = `关闭（${seconds}s）`;
+    timer = setTimeout(tick, remainingMs - (seconds - 1) * 1000);
+  }
+  tick();
+  return () => clearTimeout(timer);
+}
+
 /** Resolves only after binding completes or cancellation has restored the login. */
 export function bindClaudeDesktop(id) {
   const view = dialog("绑定 Claude Desktop 登录");
@@ -118,6 +136,7 @@ export function switchLocalClients(account, onComplete) {
   hint.hidden = true;
   let status, submitting = false, forceButton = null;
   let attempt = null, timer, stopped = false, finished = false;
+  let cancelAutoClose;
   const targets = Object.entries({ cli: "仅 CLI", desktop: "仅 Desktop", both: "两端一起" }).map(([target, label]) => {
     const button = action(view, label, "secondary client-switch-target");
     button.onclick = () => start(target);
@@ -129,6 +148,7 @@ export function switchLocalClients(account, onComplete) {
   void done.finally(() => activeSwitches.delete(kind));
   view.onCancel(async () => {
     stopped = true; clearTimeout(timer);
+    cancelAutoClose?.();
     if (attempt) await invoke("opencode_client_oauth_poll", { id: attempt, cancel: true });
     attempt = null; if (!finished) { finished = true; resolve(false); }
   });
@@ -199,17 +219,19 @@ export function switchLocalClients(account, onComplete) {
       row.className = "client-endpoint-result";
       row.dataset.result = client.status;
     }
+    const switched = result.switched !== false;
     const message = result.state === "cancelled" ? "授权已取消或超时。"
-      : result.switched === false ? "切换未全部完成。" : "已完成切换。";
-    view.setStatus(result.switched === false ? "bad" : "ok", message);
+      : switched ? "已完成切换。" : "切换未全部完成。";
+    view.setStatus(switched ? "ok" : "bad", message);
     view.cancel.textContent = "关闭";
-    if (forceButton && result.switched === false) {
+    if (forceButton && !switched) {
       syncControls();
       view.cancel.focus();
       return;
     }
-    if (!finished) { finished = true; resolve(result.switched !== false); }
-    syncControls();
+    if (!finished) { finished = true; resolve(switched); }
+    busy(false);
+    if (switched && !view.closed) cancelAutoClose = startSwitchResultCountdown(view.cancel, view.close);
     view.cancel.focus();
     if (onComplete) await onComplete(result);
   }

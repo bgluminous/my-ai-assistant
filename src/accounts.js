@@ -2,7 +2,7 @@ import { createCodexAuthEditor } from "./codex_auth_editor.js";
 import { createCodexAuthAdder } from "./codex_auth_add.js";
 import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { createAccountRefreshScheduler, refreshByProvider } from "./account_refresh.js";
-import { switchLocalClients, bindClaudeDesktop, clientError } from "./linked_client_ui.js";
+import { switchLocalClients, bindClaudeDesktop, clientError, startSwitchResultCountdown } from "./linked_client_ui.js";
 import { createModal } from "./modal.js";
 import { addOpenCode, editOpenCode, switchOpenCode } from "./opencode_ui.js";
 import {
@@ -982,9 +982,6 @@ export async function selectDialog({ title, body, confirmText, select, save }) {
 
 /* ---------- 切换账户（写入本地 Cursor / Codex 登录态） ---------- */
 
-/** 切换成功的结果弹窗停留秒数，到点自动关闭（按钮上倒计时，期间可手动关闭）。 */
-const SWITCH_RESULT_AUTO_CLOSE_SECONDS = 3;
-
 /**
  * 账户操作弹窗（#switch-modal）：删除确认，以及切换账户的确认 → 分步进度 → 结果。
  * busy 阶段（openBusy / toSteps 之后、finish 之前）忽略 Esc 与关闭按钮，防止流程中途被关；
@@ -995,7 +992,7 @@ const switchModal = {
   stepIndex: -1,
   confirmResolve: null,
   confirmAction: null,
-  autoCloseTimer: null,
+  cancelAutoClose: null,
   altHandler: null, // 结果阶段备选操作按钮的回调（finish 的 alt 参数）
   editable: false,
   controller: null,
@@ -1243,7 +1240,8 @@ const switchModal = {
     this.editable = false;
     this.controller?.reset();
     btn.focus();
-    if (ok) this.startAutoClose();
+    this.stopAutoClose();
+    if (ok) this.cancelAutoClose = startSwitchResultCountdown(btn, () => this.close());
   },
 
   /** 备选操作按钮：只在结果阶段有效，点击后由调用方接管弹窗（通常重新进入步骤阶段）。 */
@@ -1255,28 +1253,9 @@ const switchModal = {
     handler();
   },
 
-  /** 结果阶段倒计时：按钮显示「关闭（3s）」逐秒递减，归零自动 close。 */
-  startAutoClose() {
-    this.stopAutoClose();
-    const btn = el("#switch-ok");
-    let remain = SWITCH_RESULT_AUTO_CLOSE_SECONDS;
-    const tick = () => {
-      if (remain <= 0) {
-        this.close();
-        return;
-      }
-      btn.textContent = `关闭（${remain}s）`;
-      remain -= 1;
-      this.autoCloseTimer = setTimeout(tick, 1000);
-    };
-    tick();
-  },
-
   stopAutoClose() {
-    if (this.autoCloseTimer) {
-      clearTimeout(this.autoCloseTimer);
-      this.autoCloseTimer = null;
-    }
+    this.cancelAutoClose?.();
+    this.cancelAutoClose = null;
   },
 
   /** 隐藏弹窗并复位。 */
