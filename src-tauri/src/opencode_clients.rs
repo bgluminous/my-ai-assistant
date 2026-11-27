@@ -451,7 +451,7 @@ fn completed(job: &mut Job, key: &str) -> Value {
                             job.index = index;
                             job.attempt = Some(before);
                             return json!({"state":"pending","id":key,"error":"opencode_switch_restore_failed",
-                            "instructions":"Desktop 启动失败，请取消以恢复原登录。","clients":job.clients});
+                            "instructionsKey":"clients.cancelAfterStartFailure","clients":job.clients});
                         }
                         for label in &target.labels {
                             if let Some(client) = job
@@ -580,7 +580,7 @@ pub async fn start(id: String, close_desktop: bool, selection: Option<common::Sw
             let target=&mut job.targets[job.index];
             let restored=cancel_attempt(target,attempt).and_then(|_|restore(target,attempt));
             if restored.is_ok(){job.attempt=None;}
-            else {result=Ok(json!({"state":"pending","id":key,"error":"opencode_switch_restore_failed","instructions":"授权未能启动，请取消以恢复原登录。"}));}
+            else {result=Ok(json!({"state":"pending","id":key,"error":"opencode_switch_restore_failed","instructionsKey":"clients.cancelAfterAuthFailure"}));}
         }
         if result.is_err() && job.attempt.is_none() {
             let error=result.as_ref().err().cloned().unwrap_or_default();

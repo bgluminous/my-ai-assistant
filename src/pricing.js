@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import { createModal } from "./modal.js";
 import { el, invoke, copyText, resetError, fillStatus, fmtDateMs, escapeHtml, toast } from "./shared.js";
 import { notifyPricingChanged } from "./usage_data.js";
@@ -20,12 +21,13 @@ const state = {
   checking: false,
 };
 let chip = null;
+let chipCount = null;
 let modalController;
 function getModal() {
   return modalController ||= createModal(el("#pricing-modal"));
 }
 
-const SOURCE_LABEL = { default: "默认", remote: "在线", custom: "自定义" };
+const SOURCE_LABEL = { get default() { return translate("pricing.default"); }, get remote() { return translate("pricing.online"); }, get custom() { return translate("usage.custom"); } };
 
 // 与后端 model_match 的 Flash 别名规则一致；只允许在基础项修改各版本的共享价格。
 const DEEPSEEK_FLASH_NAME = /^(?:cursor-)?deepseek-(?:v[0-9]+(?:[._-][0-9]+)*-)?flash(?:-[0-9]+)*(?:-(?:fast|xhigh|high|medium|low|minimal|max|thinking|reasoning|latest))*$/;
@@ -44,7 +46,8 @@ function clearStatus() {
 }
 
 function setChip(count) {
-  if (chip) chip.textContent = `价格表：${count} 个模型`;
+  chipCount = count;
+  if (chip) chip.textContent = translate("pricing.pricingModels", count);
 }
 
 function applyView(view) {
@@ -91,12 +94,12 @@ function render() {
       ${priceCell("output", e.output)}
       ${priceCell("cacheRead", e.cacheRead)}
       ${priceCell("cacheWrite", e.cacheWrite)}
-      <td><span class="tag ${e.source === "default" ? "" : e.source}">${SOURCE_LABEL[e.source] || "默认"}</span></td>
-      <td class="col-actions"><button class="table-button" type="button" data-remove aria-label="删除 ${escapeHtml(e.key)}">✕</button></td>`;
+      <td><span class="tag ${e.source === "default" ? "" : e.source}">${escapeHtml(SOURCE_LABEL[e.source] || translate("pricing.default"))}</span></td>
+      <td class="col-actions"><button class="table-button" type="button" data-remove aria-label="${escapeHtml(translate("pricing.removeModel", e.key))}">✕</button></td>`;
     body.append(tr);
   });
   el("#pricing-empty").hidden = shown > 0;
-  el("#pricing-count").textContent = `${state.entries.length} 个模型`;
+  el("#pricing-count").textContent = translate("pricing.models", state.entries.length);
 }
 
 function onEdit(ev) {
@@ -113,7 +116,7 @@ function onEdit(ev) {
   entry.source = "custom";
   const badge = tr.querySelector(".tag");
   if (badge) {
-    badge.textContent = "自定义";
+    badge.textContent = translate("usage.custom");
     badge.className = "tag custom";
   }
 }
@@ -135,15 +138,15 @@ function onAdd() {
   if (getModal().busy) return;
   const key = el("#add-key").value.trim().toLowerCase();
   if (!key) {
-    setStatus("bad", "请先填写模型名。");
+    setStatus("bad", () => translate("pricing.enterAModelNameFirst"));
     return;
   }
   if (key !== "deepseek-flash" && DEEPSEEK_FLASH_NAME.test(key)) {
-    setStatus("bad", "DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。");
+    setStatus("bad", () => translate("pricing.deepseekFlashVersionsSharePricingEditThe"));
     return;
   }
   if (state.entries.some((e) => e.key.toLowerCase() === key)) {
-    setStatus("bad", `模型「${key}」已存在，可直接在表中修改。`);
+    setStatus("bad", () => translate("pricing.modelAlreadyExistsEditItsEntryIn", key));
     return;
   }
   const num = (id) => {
@@ -169,7 +172,7 @@ function onAdd() {
 async function onSave() {
   const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
   if (!operation) return;
-  setStatus("", "保存中…");
+  setStatus("", () => translate("accounts.saving"));
   try {
     const models = state.entries.map((e) => ({
       key: e.key,
@@ -187,10 +190,10 @@ async function onSave() {
     setChip(status.models);
     // 保存成功即关闭弹窗，结果用右上角 toast 提示；失败时保留弹窗与状态条
     closeModal();
-    toast("ok", `价格表已保存，共 ${status.models} 个模型生效，用量统计已按新价重算。`, { key: "pricing" });
+    toast("ok", () => translate("pricing.pricesSavedForModelsUsageCostsHave", status.models), { key: "pricing" });
   } catch (err) {
     if (!operation.current()) return;
-    setStatus("bad", `保存失败：${resetError(err)}`);
+    setStatus("bad", () => translate("accounts.saveFailed", resetError(err)));
   } finally {
     operation.finish();
   }
@@ -199,7 +202,7 @@ async function onSave() {
 async function onReset() {
   const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
   if (!operation) return;
-  setStatus("", "重置中…");
+  setStatus("", () => translate("pricing.resetting"));
   try {
     const view = await invoke("pricing_reset");
     notifyPricingChanged();
@@ -208,11 +211,11 @@ async function onReset() {
     render();
     syncUpdateArea();
     setChip(view.count);
-    setStatus("ok", "已恢复为内置默认价格表（同时清除了在线表缓存），用量统计已按默认价重算。");
+    setStatus("ok", () => translate("pricing.builtInPricesRestoredAndTheOnline"));
     checkUpdate(); // 重置后重新检测：在线表若与默认表不同会再次提示
   } catch (err) {
     if (!operation.current()) return;
-    setStatus("bad", `重置失败：${resetError(err)}`);
+    setStatus("bad", () => translate("pricing.resetFailed", resetError(err)));
   } finally {
     operation.finish();
   }
@@ -222,32 +225,32 @@ async function onReset() {
 function syncUpdateArea(resetInput = false) {
   const input = el("#pricing-update-url");
   if (resetInput) input.value = state.remote.url;
-  input.placeholder = state.remote.defaultUrl ? `默认：${state.remote.defaultUrl}` : "";
+  input.placeholder = state.remote.defaultUrl ? translate("pricing.default2", state.remote.defaultUrl) : "";
   el("#pricing-update-meta").textContent = state.remote.fetchedAtMs
-    ? `上次更新：${fmtDateMs(state.remote.fetchedAtMs)} · 在线表 ${state.remote.models} 个模型`
-    : "尚未在线更新，当前使用内置默认表。";
+    ? translate("pricing.lastUpdatedOnlineModels", fmtDateMs(state.remote.fetchedAtMs), state.remote.models)
+    : translate("pricing.noOnlineUpdateYetUsingBuiltIn");
   const hint = el("#pricing-update-hint");
   hint.hidden = !state.update.available;
   if (state.update.available) {
-    hint.textContent = `检测到在线价格表有更新（远端 ${state.update.models} 个模型），点击「在线更新」应用。`;
+    hint.textContent = translate("pricing.onlinePricingUpdateAvailableModelsSelectOnline", state.update.models);
   }
   if (chip) {
     chip.classList.toggle("has-update", state.update.available);
     chip.title = state.error || (state.update.available
-      ? "检测到在线价格表有更新，点击查看"
-      : "点击查看 / 编辑价格表");
+      ? translate("pricing.pricingUpdateAvailableClickToView")
+      : translate("pricing.viewOrEditPrices"));
     chip.classList.toggle("has-error", !!state.error);
   }
   el("#pricing-update-error").textContent = state.error;
   el("#pricing-update-error").hidden = !state.error;
   el("#pricing-update-retry").disabled = state.checking;
-  el("#pricing-update-retry").textContent = state.checking ? "正在检查…" : state.error ? "重试检查" : "检查更新";
+  el("#pricing-update-retry").textContent = state.checking ? translate("pricing.checking") : state.error ? translate("pricing.checkAgain2") : translate("updater.checkForUpdates");
 }
 
 async function onUpdate() {
   const operation = getModal().beginSave([el("#pricing-save"), el("#pricing-reset"), el("#pricing-update-btn")]);
   if (!operation) return;
-  setStatus("", "正在拉取在线价格表…");
+  setStatus("", () => translate("pricing.fetchingOnlinePrices"));
   try {
     const url = el("#pricing-update-url").value.trim();
     const view = await invoke("pricing_update_apply", { url });
@@ -259,7 +262,7 @@ async function onUpdate() {
     render();
     syncUpdateArea(true);
     setChip(state.entries.length);
-    setStatus("ok", `在线价格表已更新：${state.remote.models} 个模型，用量统计已按新价重算。`);
+    setStatus("ok", () => translate("pricing.updatedPricingForModelsUsageCostsHave", state.remote.models));
   } catch (err) {
     if (!operation.current()) return;
     state.error = pricingError(err);
@@ -279,7 +282,7 @@ async function checkUpdate(manual = false) {
     const res = await invoke("pricing_update_check", { url: manual ? el("#pricing-update-url").value.trim() : null });
     state.update = { available: !!res.hasUpdate, models: Number(res.models) || 0 };
     state.error = "";
-    if (manual) setStatus("ok", res.hasUpdate ? "检测到价格表更新，可点击「在线更新」应用。" : "价格表与当前基础表一致。");
+    if (manual) setStatus("ok", () => res.hasUpdate ? translate("pricing.pricingUpdateAvailableSelectOnlineUpdatesTo") : translate("pricing.pricingMatchesTheCurrentBaseTable"));
   } catch (err) {
     // 失败不清除已有缓存、自定义价格或上次已知的更新。
     state.error = pricingError(err);
@@ -295,10 +298,10 @@ async function onCopyPath() {
   const btn = el("#pricing-copy-path");
   try {
     await copyText(state.path);
-    btn.textContent = "已复制";
-    setTimeout(() => (btn.textContent = "复制路径"), 1200);
+    btn.textContent = translate("pricing.copied");
+    setTimeout(() => (btn.textContent = translate("pricing.copyPath")), 1200);
   } catch {
-    setStatus("bad", "复制失败，无法写入剪贴板。");
+    setStatus("bad", () => translate("pricing.couldNotWriteToTheClipboard"));
   }
 }
 
@@ -316,6 +319,17 @@ function closeModal() {
 
 export async function initPricing() {
   chip = el("#pricing-chip");
+  window.addEventListener("uilanguagechange", () => {
+    if (chipCount != null) setChip(chipCount);
+    else chip.textContent = translate("pricing.pricingUnavailable");
+    syncUpdateArea();
+    for (const row of el("#pricing-body").querySelectorAll("tr")) {
+      const entry = state.entries[Number(row.dataset.index)];
+      if (!entry) continue;
+      row.querySelector(".tag").textContent = SOURCE_LABEL[entry.source];
+      row.querySelector("[data-remove]").setAttribute("aria-label", translate("pricing.removeModel", entry.key));
+    }
+  });
   el("#pricing-search").addEventListener("input", render);
   el("#pricing-add-btn").addEventListener("click", onAdd);
   el("#pricing-save").addEventListener("click", onSave);
@@ -325,7 +339,7 @@ export async function initPricing() {
   el("#pricing-update-retry").addEventListener("click", () => { void checkUpdate(true); });
   el("#pricing-update-proxy").addEventListener("click", () => { if (getModal().busy) return; closeModal(); el("#proxy-btn").click(); });
   el("#pricing-update-source").addEventListener("click", () => {
-    void invoke("app_update_open_pricing").catch(() => setStatus("bad", "无法打开浏览器，请在 GitHub 公共仓库查看 resources/my-ai-assistant/pricing.json。"));
+    void invoke("app_update_open_pricing").catch(() => setStatus("bad", () => translate("pricing.openResourcesMyAiAssistantPricingJson")));
   });
   el("#pricing-body").addEventListener("input", onEdit);
   el("#pricing-body").addEventListener("click", onRemove);
@@ -337,6 +351,6 @@ export async function initPricing() {
     chip.addEventListener("click", openModal);
     checkUpdate(); // 启动时静默检测在线更新，不阻塞初始化
   } catch {
-    chip.textContent = "价格表：不可用";
+    chip.textContent = translate("pricing.pricingUnavailable");
   }
 }

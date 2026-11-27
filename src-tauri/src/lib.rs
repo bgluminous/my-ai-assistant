@@ -34,6 +34,7 @@ mod proxy;
 mod session_scan;
 mod settings;
 mod tray;
+mod ui_language;
 mod usage_archive;
 
 use serde::Serialize;
@@ -273,6 +274,9 @@ pub fn run() {
             backup::backup_import_inspect,
             backup::backup_import_apply,
             app_info,
+            ui_language::ui_language_get,
+            ui_language::ui_language_open_folder,
+            ui_language::ui_language_set,
             ];
             handler(invoke)
         })

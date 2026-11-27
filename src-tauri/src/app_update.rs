@@ -15,31 +15,36 @@ pub struct Preferences { pub enabled: bool }
 impl Default for Preferences { fn default() -> Self { Self { enabled: true } } }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Failure { pub code: String, pub message: String }
+pub struct Failure {
+    pub code: String,
+    pub message: String,
+    #[serde(rename = "recoveryPath", skip_serializing_if = "Option::is_none")]
+    pub recovery_path: Option<String>,
+}
 impl Failure {
     fn new(code: &str) -> Self {
-        let message = match code {
-            "timeout" => "连接超时，请检查网络或代理后重试。",
-            "network" => "无法连接更新源，请检查网络或代理；也可以前往 GitHub Releases。",
-            "not_published" => "该平台尚无可读取的版本索引，请前往 GitHub Releases 查看。",
-            "http" => "更新源暂时无法访问，请稍后重试或前往 GitHub Releases。",
-            "manifest_missing" => "该版本更新清单尚不可用，请稍后重试或前往对应的 GitHub Release。",
-            "stale_index" => "更新源返回了较旧的索引，已保留已知的必需更新。请稍后重试。",
-            "invalid_json" | "index_identity" | "index_version" | "index_url" | "manifest_url" | "manifest_invalid" => "更新信息校验失败，本次不会安装。请重试或前往 GitHub Releases 核对版本。",
-            "signature" => "更新包签名校验失败，已停止安装。请重试或从 GitHub Releases 获取安装包。",
-            "download" => "下载更新包失败，请检查网络或代理后重试。",
-            "install" => "安装更新失败，用户数据保持不变。请重试或前往 GitHub Releases 手动安装。",
-            "update_busy" => "仍有业务操作未完成，已取消安装。请稍后重试。",
-            "manual_only" => "当前运行方式需要手动更新，请前往 GitHub Releases 下载。",
-            "no_update" => "请先检查并选择可用的新版本。",
-            "unsupported_platform" => "当前平台暂不支持在线更新，请前往 GitHub Releases 查看。",
-            "cancelled" => "已取消下载，当前版本保持不变。",
-            "open_failed" => "无法打开浏览器，请复制页面中的 GitHub 地址。",
-            "invalid_link" => "更新日志中的链接无效，仅允许 HTTP 或 HTTPS 网页。",
-            "settings" => "保存更新设置失败，请检查用户数据目录权限。",
-            _ => "更新操作失败，请重试或前往 GitHub Releases。",
+        let key = match code {
+            "timeout" => "update.error.timeout",
+            "network" => "update.error.network",
+            "not_published" => "update.error.notPublished",
+            "http" => "update.error.http",
+            "manifest_missing" => "update.error.manifestMissing",
+            "stale_index" => "update.error.staleIndex",
+            "invalid_json" | "index_identity" | "index_version" | "index_url" | "manifest_url" | "manifest_invalid" => "update.error.invalidJson",
+            "signature" => "update.error.signature",
+            "download" => "update.error.download",
+            "install" => "update.error.install",
+            "update_busy" => "update.error.updateBusy",
+            "manual_only" => "update.error.manualOnly",
+            "no_update" => "update.error.noUpdate",
+            "unsupported_platform" => "update.error.unsupportedPlatform",
+            "cancelled" => "update.error.cancelled",
+            "open_failed" => "update.error.openFailed",
+            "invalid_link" => "update.error.invalidLink",
+            "settings" => "update.error.settings",
+            _ => "native.updateFailedTryAgainOrVisitGithub",
         };
-        Self { code: code.into(), message: message.into() }
+        Self { code: code.into(), message: crate::ui_language::builtin_text(key).to_string(), recovery_path: None }
     }
 }
 
@@ -114,34 +119,34 @@ fn platform() -> Result<&'static str> {
     else { Err(Failure::new("unsupported_platform")) }
 }
 fn install_target() -> std::result::Result<&'static str, &'static str> {
-    if cfg!(debug_assertions) { return Err("开发环境仅检查更新，请使用正式安装版更新。"); }
+    if cfg!(debug_assertions) { return Err("native.developmentBuildsCanCheckForUpdatesUse"); }
     #[cfg(windows)]
     {
         use tauri::utils::{config::BundleType, platform::bundle_type};
         return match bundle_type() {
             Some(BundleType::Nsis) => Ok("windows-x86_64-nsis"),
             Some(BundleType::Msi) => Ok("windows-x86_64-msi"),
-            _ => Err("当前为便携版，请从 GitHub Releases 下载并手动替换程序。"),
+            _ => Err("native.portableBuildDownloadTheNewVersionFrom"),
         };
     }
     #[cfg(target_os = "macos")]
     {
-        let exe = tauri::utils::platform::current_exe().map_err(|_| "无法确定应用安装位置，请手动更新。")?;
+        let exe = tauri::utils::platform::current_exe().map_err(|_| "native.couldNotLocateTheInstallationUpdateManually")?;
         if exe.starts_with("/Volumes") || exe.to_string_lossy().contains("/AppTranslocation/") {
-            return Err("请先将应用移到 Applications 后重新打开，再使用自动更新。");
+            return Err("native.moveTheAppToApplicationsAndReopen");
         }
         let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"))
-            .ok_or("当前不是已安装的 macOS 应用，请手动更新。")?;
-        let parent = bundle.parent().ok_or("应用目录不可写，请手动更新。")?;
-        let name = crate::codex_store::random_id().map_err(|_| "无法检查应用目录，请手动更新。")?;
+            .ok_or("native.thisMacosAppIsNotInstalledUpdate")?;
+        let parent = bundle.parent().ok_or("native.theAppFolderIsReadOnlyUpdate")?;
+        let name = crate::codex_store::random_id().map_err(|_| "native.couldNotCheckTheAppFolderUpdate")?;
         let probe = parent.join(format!(".maa-update-{name}.tmp"));
         std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)
-            .map_err(|_| "应用目录不可写，请从 GitHub Releases 手动安装。")?;
-        std::fs::remove_file(&probe).map_err(|_| "应用目录不可写，请手动更新。")?;
+            .map_err(|_| "native.theAppFolderIsReadOnlyInstall")?;
+        std::fs::remove_file(&probe).map_err(|_| "native.theAppFolderIsReadOnlyUpdate")?;
         return Ok("darwin-aarch64");
     }
     #[allow(unreachable_code)]
-    Err("当前平台需要手动更新。")
+    Err("native.thisPlatformRequiresAManualUpdate")
 }
 fn artifact(version: &str, target: &str) -> String {
     let name = match target {
@@ -167,9 +172,7 @@ fn network_error(e: update_http::Error) -> Failure {
 }
 fn install_error(error: tauri_plugin_updater::Error) -> Failure {
     if let tauri_plugin_updater::Error::PreviousAppNotRestored(path) = error {
-        return Failure { code: "install_restore".into(), message: format!(
-            "安装失败，旧应用保留在 {}。请将其移回原安装位置，或前往 GitHub Releases 手动安装；用户数据保持不变。",
-            path.display()) };
+        return Failure { code: "install_restore".into(), recovery_path: Some(path.display().to_string()), message: crate::ui_language::builtin_text("native.installationFailedThePreviousApplicationIsAt").replace("{0}", &path.display().to_string()) };
     }
     Failure::new("install")
 }
@@ -308,7 +311,7 @@ pub async fn app_update_check(app: AppHandle) -> Result<View> {
         });
         let manual_reason = match install_target() {
             Err(reason) => Some(reason.to_string()),
-            Ok(_) if !release.has_manifest() => Some("该版本未提供自动更新包，请前往 GitHub Releases 手动安装。".into()),
+            Ok(_) if !release.has_manifest() => Some("native.noAutomaticUpdatePackageIsAvailableFor".into()),
             Ok(target) => { prepare(&app, &release, target).await?; None }
         };
         Ok(change(&app, |r| {
@@ -441,7 +444,7 @@ pub fn start(app: AppHandle) {
                 r.view.releases_url = protocol::release_page(Some(&release.version));
                 r.view.changelog = release.changelog.clone().unwrap_or_default();
                 r.view.force_update = true;
-                r.view.manual_reason = Some("此版本需要更新，请检查更新以重新验证安装包，或前往 GitHub Releases。".into());
+                r.view.manual_reason = Some("native.anUpdateIsRequiredCheckForUpdates".into());
                 r.release = Some(release);
             });
         }

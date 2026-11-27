@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import {
   invoke,
   fmtInt,
@@ -78,9 +79,9 @@ function fontFamily() {
 /* ---------- 数据获取（在线 / 磁盘存档 / localStorage 回退） ---------- */
 
 const SOURCE_LABELS = {
-  online: "实时拉取",
-  archive: "本地存档",
-  cache: "本地缓存",
+  get online() { return translate("snapshot.live"); },
+  get archive() { return translate("snapshot.localArchive"); },
+  get cache() { return translate("snapshot.localCache"); },
 };
 
 async function readArchive(account) {
@@ -108,7 +109,7 @@ async function acquireData(account) {
     try {
       return await fetchOnline(account);
     } catch (error) {
-      throw new Error(`账户已失效且没有本地存档，无法生成快照（${resetError(error)}）`);
+      throw new Error(translate("snapshot.thisAccountHasExpiredAndHasNo", resetError(error)));
     }
   }
   try {
@@ -137,8 +138,8 @@ function defaultFileName(account) {
   const d = new Date();
   const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
   // 文件名用账户昵称（与用量页显示同一口径），未命名账户不带名字段
-  const primary = cursorIdentity(account).primary;
-  const name = sanitizeFileName(primary === "未命名账户" ? "" : primary).slice(0, 40);
+  const primary = cursorIdentity(account, "").primary;
+  const name = sanitizeFileName(primary).slice(0, 40);
   return `cursor-usage-${name ? `${name}-` : ""}${stamp}.png`;
 }
 
@@ -316,7 +317,7 @@ function tableRows(agg) {
   const head = models.slice(0, TABLE_MAX_ROWS - 1);
   const rest = models.slice(TABLE_MAX_ROWS - 1);
   const merged = {
-    model: `其他（${rest.length} 个模型）`,
+    model: translate("snapshot.otherModels", rest.length),
     priced: rest.some((m) => m.priced),
     pricedAs: null,
     events: rest.reduce((s, m) => s + (m.events || 0), 0),
@@ -350,13 +351,13 @@ function tableRows(agg) {
 
 // 数值列固定宽；模型列宽在绘制时取「表宽 - 数值列合计」，保证整行恰好占满表宽不越界。
 const TABLE_COLS = [
-  { key: "model", label: "模型", w: 0, align: "left" },
-  { key: "input", label: "输入", w: 118, align: "right" },
-  { key: "cacheRead", label: "缓存读", w: 118, align: "right" },
-  { key: "cacheWrite", label: "缓存写", w: 118, align: "right" },
-  { key: "output", label: "输出", w: 118, align: "right" },
-  { key: "total", label: "合计 Token", w: 118, align: "right" },
-  { key: "equivalent", label: "等价 API 价", w: 130, align: "right" },
+  { key: "model", get label() { return translate("usage.model"); }, w: 0, align: "left" },
+  { key: "input", get label() { return translate("usage.input"); }, w: 118, align: "right" },
+  { key: "cacheRead", get label() { return translate("usage.cacheRead"); }, w: 118, align: "right" },
+  { key: "cacheWrite", get label() { return translate("usage.cacheWrite"); }, w: 118, align: "right" },
+  { key: "output", get label() { return translate("usage.output"); }, w: 118, align: "right" },
+  { key: "total", get label() { return translate("usage.totalTokens2"); }, w: 118, align: "right" },
+  { key: "equivalent", get label() { return translate("usage.equivalentApiCost"); }, w: 130, align: "right" },
 ];
 
 function renderSnapshot(account, data, appInfo) {
@@ -374,17 +375,17 @@ function renderSnapshot(account, data, appInfo) {
 
   // 卡片列表（套餐月费卡片仅在月费已知时出现）
   const cards = [
-    { label: "总等价费用（官方 API 价）", value: fmtUsd(agg.totalEquivalentUsd), accent: true },
+    { label: translate("usage.totalEquivalentCostAtApiRates"), value: fmtUsd(agg.totalEquivalentUsd), accent: true },
     {
-      label: "总 Token",
+      label: translate("usage.totalTokens"),
       value: fmtTokens(agg.totalTokens),
       sub: fmtTokens(agg.totalTokens) !== fmtInt(agg.totalTokens) ? fmtInt(agg.totalTokens) : "",
     },
-    { label: "未定价模型", value: `${agg.unpricedModels} 个`, sub: `${fmtTokens(agg.unpricedTokens)} tok` },
+    { label: translate("usage.unpricedModels"), value: translate("snapshot.items", agg.unpricedModels), sub: `${fmtTokens(agg.unpricedTokens)} tok` },
   ];
   if (price != null) {
     const ratio = price > 0 ? `${(agg.totalEquivalentUsd / price).toFixed(1)}×` : "—";
-    cards.splice(1, 0, { label: "套餐月费 · 等价倍数", value: `$${price} · ${ratio}` });
+    cards.splice(1, 0, { label: translate("usage.monthlyFeesCostRatio"), value: `$${price} · ${ratio}` });
   }
 
   // ---- 布局（先算总高，再建 canvas）----
@@ -419,10 +420,10 @@ function renderSnapshot(account, data, appInfo) {
   let y = PAD;
 
   // ---- 头部 ----
-  text("Cursor 账户用量快照", PAD, y + 20, { size: 22, weight: 700, color: t.textStrong });
-  text(`生成时间 ${fmtDateMs(Date.now())}`, W - PAD, y + 20, { size: 12, color: t.muted, align: "right" });
+  text(translate("snapshot.cursorAccountUsageSnapshot"), PAD, y + 20, { size: 22, weight: 700, color: t.textStrong });
+  text(translate("snapshot.generated", fmtDateMs(Date.now())), W - PAD, y + 20, { size: 12, color: t.muted, align: "right" });
   y += 30;
-  const appLine = `${appInfo && appInfo.version ? `my-ai-assistant v${appInfo.version} · ` : ""}时间范围：全部（全量数据）`;
+  const appLine = translate("snapshot.dateRangeAllTime", appInfo && appInfo.version ? `my-ai-assistant v${appInfo.version} · ` : "");
   text(appLine, PAD, y + 12, { size: 12, color: t.muted });
   y += 24;
   ctx.strokeStyle = t.border;
@@ -434,19 +435,19 @@ function renderSnapshot(account, data, appInfo) {
   y += 16;
 
   // ---- 账户信息（2 行 × 3 列）----
-  const aliveText = status == null ? "未知" : status.alive === false ? "已失效" : "有效";
+  const aliveText = status == null ? translate("proxy.unknown") : status.alive === false ? translate("accounts.expired") : translate("accounts.valid");
   const aliveColor = status == null ? t.muted : status.alive === false ? t.bad : t.ok;
   const sourceText =
-    SOURCE_LABELS[data.source] + (data.fallbackError ? "（在线拉取失败，使用本地数据）" : "");
+    SOURCE_LABELS[data.source] + (data.fallbackError ? translate("snapshot.onlineRefreshFailedUsingLocalData") : "");
   const sourceColor = data.source === "online" ? t.text : t.warn;
-  const planText = planLabel ? (price != null ? `${planLabel} · $${price}/月` : planLabel) : "—";
+  const planText = planLabel ? (price != null ? translate("accountFormat.month", planLabel, price) : planLabel) : "—";
   const infoCells = [
-    { label: "账户", value: cursorIdentity(account).primary },
-    { label: "邮箱", value: (status && status.email) || "—" },
-    { label: "套餐", value: planText },
-    { label: "账户状态", value: aliveText, color: aliveColor },
-    { label: "数据来源", value: sourceText, color: sourceColor },
-    { label: "数据时间", value: fmtDateMs(data.at) },
+    { label: translate("common.account"), value: cursorIdentity(account).primary },
+    { label: translate("snapshot.email"), value: (status && status.email) || "—" },
+    { label: translate("accounts.plan"), value: planText },
+    { label: translate("snapshot.accountStatus"), value: aliveText, color: aliveColor },
+    { label: translate("snapshot.dataSource"), value: sourceText, color: sourceColor },
+    { label: translate("snapshot.dataAsOf"), value: fmtDateMs(data.at) },
   ];
   const colW = INNER_W / 3;
   for (let i = 0; i < infoCells.length; i += 1) {
@@ -490,13 +491,13 @@ function renderSnapshot(account, data, appInfo) {
   // ---- 等价费用构成 ----
   {
     let bx = PAD;
-    text("等价费用构成", bx, y + 16, { size: 12, color: t.muted });
-    bx += ctx.measureText("等价费用构成").width + 20;
+    text(translate("snapshot.equivalentCostBreakdown"), bx, y + 16, { size: 12, color: t.muted });
+    bx += ctx.measureText(translate("snapshot.equivalentCostBreakdown")).width + 20;
     const parts = [
-      ["输入", agg.totalInputUsd],
-      ["缓存读", agg.totalCacheReadUsd],
-      ["缓存写", agg.totalCacheWriteUsd],
-      ["输出", agg.totalOutputUsd],
+      [translate("usage.input"), agg.totalInputUsd],
+      [translate("usage.cacheRead"), agg.totalCacheReadUsd],
+      [translate("usage.cacheWrite"), agg.totalCacheWriteUsd],
+      [translate("usage.output"), agg.totalOutputUsd],
     ];
     for (const [label, usd] of parts) {
       text(label, bx, y + 16, { size: 11.5, color: t.muted });
@@ -509,7 +510,7 @@ function renderSnapshot(account, data, appInfo) {
 
   // ---- 按日 Token 柱图 ----
   surfaceBox(ctx, t, PAD, y, INNER_W, dailyBoxH);
-  text("按日 Token（全部）", PAD + 16, y + 26, { size: 14, weight: 600, color: t.textStrong });
+  text(translate("snapshot.dailyTokensAllTime"), PAD + 16, y + 26, { size: 14, weight: 600, color: t.textStrong });
   {
     const chart = renderChart(dailyChartConfig(agg, data.at, t, font, INNER_W - 32, dailyChartH));
     ctx.drawImage(chart.canvas, PAD + 16, y + 40, INNER_W - 32, dailyChartH);
@@ -535,7 +536,7 @@ function renderSnapshot(account, data, appInfo) {
     );
     const pies = [
       {
-        title: "各模型 Token 数量",
+        title: translate("usage.tokensByModel"),
         config: pieConfig(
           tokenSlices.map((s) => s.label),
           tokenSlices.map((s) => Math.round(s.value)),
@@ -548,7 +549,7 @@ function renderSnapshot(account, data, appInfo) {
         ),
       },
       {
-        title: "各模型等价费用（USD）",
+        title: translate("usage.equivalentCostByModelUsd"),
         config: pieConfig(
           costSlices.map((s) => s.label),
           costSlices.map((s) => Number(s.value.toFixed(4))),
@@ -561,9 +562,9 @@ function renderSnapshot(account, data, appInfo) {
         ),
       },
       {
-        title: "Token 构成",
+        title: translate("usage.tokenBreakdown"),
         config: pieConfig(
-          ["输入", "缓存读", "缓存写", "输出"],
+          [translate("usage.input"), translate("usage.cacheRead"), translate("usage.cacheWrite"), translate("usage.output")],
           [sums.input, sums.cacheRead, sums.cacheWrite, sums.output],
           [colorFor(0), colorFor(2), colorFor(4), colorFor(1)],
           t,
@@ -587,7 +588,7 @@ function renderSnapshot(account, data, appInfo) {
 
   // ---- 按模型明细表 ----
   surfaceBox(ctx, t, PAD, y, INNER_W, tableBoxH);
-  text("按模型明细", PAD + 16, y + 28, { size: 14, weight: 600, color: t.textStrong });
+  text(translate("snapshot.modelDetails"), PAD + 16, y + 28, { size: 14, weight: 600, color: t.textStrong });
   {
     const tableX = PAD + 16;
     const tableW = INNER_W - 32;
@@ -596,7 +597,7 @@ function renderSnapshot(account, data, appInfo) {
     const cols = [{ ...TABLE_COLS[0], w: tableW - numericW }, ...TABLE_COLS.slice(1)];
     let ty = y + 14 + 24 + 8;
     if (!hasModels) {
-      text("该账户没有可统计的用量记录。", tableX, ty + 22, { size: 12.5, color: t.muted });
+      text(translate("snapshot.noUsageRecordsForThisAccount"), tableX, ty + 22, { size: 12.5, color: t.muted });
     } else {
       // 表头
       ctx.fillStyle = t.surface2;
@@ -645,7 +646,7 @@ function renderSnapshot(account, data, appInfo) {
         ctx.font = `600 12.5px ${font}`;
         const name = ellipsize(ctx, m.model, cols[0].w - 24);
         text(name, x + 12, yMid - 7, { size: 12.5, weight: 600, color: t.text, baseline: "middle" });
-        const tag = m.priced ? m.pricedAs || "" : "未定价";
+        const tag = m.priced ? m.pricedAs || "" : translate("rawEvents.unpriced");
         if (tag) {
           ctx.font = `400 10px ${font}`;
           text(ellipsize(ctx, tag, cols[0].w - 24), x + 12, yMid + 9, {
@@ -698,7 +699,7 @@ function renderSnapshot(account, data, appInfo) {
         { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
       );
       let x = tableX;
-      text("合计", x + 12, yMid, { size: 12.5, weight: 700, color: t.textStrong, baseline: "middle" });
+      text(translate("snapshot.total"), x + 12, yMid, { size: 12.5, weight: 700, color: t.textStrong, baseline: "middle" });
       x += cols[0].w;
       const totalCell = (w, value) => {
         text(value, x + w - 12, yMid, {
@@ -722,7 +723,7 @@ function renderSnapshot(account, data, appInfo) {
 
   // ---- 页脚 ----
   text(
-    `等价费用按官方 API 价折算 · 共 ${(agg.models || []).length} 个模型 / ${fmtInt(events)} 次调用 · 由 my-ai-assistant 生成`,
+    translate("snapshot.equivalentCostsAtOfficialApiRatesModels", (agg.models || []).length, fmtInt(events)),
     W / 2,
     y + 14,
     { size: 11, color: t.muted, align: "center" }

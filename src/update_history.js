@@ -1,4 +1,6 @@
+import { translate } from "./i18n.js";
 import { el, invoke } from "./shared.js";
+import { updateErrorText } from "./update_status.js";
 import { renderReleaseNotes } from "./release_notes.js";
 
 let versions = [];
@@ -30,7 +32,7 @@ function renderVersions() {
   select.replaceChildren(...versions.map(({ version }) => {
     const option = document.createElement("option");
     option.value = version;
-    option.textContent = version === currentVersion ? `${version}（当前版本）` : version;
+    option.textContent = version === currentVersion ? translate("updateHistory.current", version) : version;
     option.selected = version === selectedVersion;
     return option;
   }));
@@ -41,24 +43,24 @@ async function loadNotes(version, refresh = false) {
   selectedVersion = version;
   const notes = el("#app-update-history-notes");
   notes.hidden = false;
-  notes.setAttribute("aria-label", `${version} 更新日志`);
+  notes.setAttribute("aria-label", translate("updateHistory.releaseNotes", version));
   el("#app-update-history-retry").hidden = true;
   loadingNotes = true;
   status("");
-  renderReleaseNotes(notes, "正在读取更新日志…");
+  renderReleaseNotes(notes, translate("updateHistory.loadingReleaseNotes"));
   controls();
   try {
     const release = !refresh && cache.has(version) ? cache.get(version) :
       await invoke("app_update_changelog", { version });
-    if (release.version !== version) throw new Error("返回的版本与所选版本不一致，请重试。");
+    if (release.version !== version) throw new Error(translate("updateHistory.theReturnedVersionDoesNotMatchThe"));
     cache.set(version, release);
     // 快速切换版本时，旧请求不得覆盖新选择。
     if (request !== notesRequest) return;
-    renderReleaseNotes(notes, release.changelog?.trim() || "该版本未提供更新日志。");
+    renderReleaseNotes(notes, release.changelog?.trim() || translate("appUpdate.noReleaseNotesWereProvidedForThis"));
   } catch (error) {
     if (request !== notesRequest) return;
     notes.hidden = true;
-    status(`读取 ${version} 更新日志失败。${error?.message || "请稍后重试。"}`, true);
+    status(translate("updateHistory.couldNotLoadReleaseNotesFor", version, updateErrorText(error) || translate("appUpdate.tryAgainLater")), true);
     el("#app-update-history-retry").hidden = false;
   } finally {
     if (request === notesRequest) { loadingNotes = false; controls(); }
@@ -70,11 +72,11 @@ async function loadVersions() {
   loadingNotes = false;
   notesRequest++;
   el("#app-update-history-retry").hidden = true;
-  status("正在读取历史版本列表…");
+  status(translate("updateHistory.loadingReleaseHistory"));
   controls();
   try {
     const history = await invoke("app_update_history");
-    if (!Array.isArray(history)) throw new Error("版本列表格式无效，请重试。");
+    if (!Array.isArray(history)) throw new Error(translate("updateHistory.invalidVersionListTryAgain"));
     versions = history;
     loaded = true;
     selectedVersion = versions.some(v => v.version === selectedVersion) ? selectedVersion : versions[0]?.version || "";
@@ -83,10 +85,10 @@ async function loadVersions() {
     if (selectedVersion) void loadNotes(selectedVersion);
     else {
       el("#app-update-history-notes").hidden = true;
-      status("当前平台暂无已登记的历史版本，可前往 GitHub Releases 查看。");
+      status(translate("updateHistory.noPastVersionsRegisteredForThisPlatform"));
     }
   } catch (error) {
-    status(`历史版本列表获取失败。${error?.message || "请点击“刷新列表”重试。"}`, true);
+    status(translate("updateHistory.couldNotLoadReleaseHistory", updateErrorText(error) || translate("updateHistory.selectRefreshListToTryAgain")), true);
   } finally {
     loadingList = false;
     controls();
@@ -103,13 +105,18 @@ export function updateHistoryState(view, isPaused) {
 }
 
 export function initUpdateHistory() {
+  window.addEventListener("uilanguagechange", () => {
+    renderVersions();
+    const section = el("#app-update-history");
+    el("#app-update-history-toggle").textContent = section.hidden ? translate("updater.releaseHistory") : translate("updateHistory.hideReleaseHistory");
+  });
   el("#app-update-history-toggle").addEventListener("click", () => {
     if (paused) return;
     const section = el("#app-update-history");
     section.hidden = !section.hidden;
     const button = el("#app-update-history-toggle");
     button.setAttribute("aria-expanded", String(!section.hidden));
-    button.textContent = section.hidden ? "历史更新日志" : "收起历史日志";
+    button.textContent = section.hidden ? translate("updater.releaseHistory") : translate("updateHistory.hideReleaseHistory");
     if (!section.hidden && !loaded) void loadVersions();
   });
   el("#app-update-history-refresh").addEventListener("click", () => { void loadVersions(); });

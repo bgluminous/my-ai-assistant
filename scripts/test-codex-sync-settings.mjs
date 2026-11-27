@@ -4,10 +4,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 import { parseHTML } from "linkedom";
 
 const source = await readFile(new URL("../src/usage_sync.js", import.meta.url), "utf8");
-const promptSource = await readFile(new URL("../src/usage_sync_prompt.js", import.meta.url), "utf8");
 const html = await readFile(new URL("../src/index.html", import.meta.url), "utf8");
 const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => `#${m[1]}`));
 async function fixture(state = "idle", configOverrides = {}) {
@@ -43,20 +43,20 @@ async function fixture(state = "idle", configOverrides = {}) {
       throw new Error(`Unexpected command: ${command}`);
     });
     this.setExport("listen", async () => () => {});
-    this.setExport("fillStatus", (node, kind, text) => { node.kind = kind; node.textContent = text; });
+    this.setExport("fillStatus", (node, kind, text) => { node.kind = kind; node.textContent = typeof text === "function" ? text() : text; });
     this.setExport("resetError", (error) => String(error));
     this.setExport("copyText", async () => {});
     this.setExport("toast", () => {});
   }, { context });
-  const prompt = new vm.SourceTextModule(promptSource, { context });
   const errors = new vm.SourceTextModule(await readFile(new URL("../src/sync_errors.js", import.meta.url), "utf8"), { context });
-  await errors.link(() => shared);
+  const language = await i18nFixture(context);
+  await errors.link(path => path === "./i18n.js" ? language : shared);
   const progress = new vm.SourceTextModule(await readFile(new URL("../src/sync_progress.js", import.meta.url), "utf8"), { context });
-  await progress.link((specifier) => specifier === "./shared.js" ? shared : errors);
+  await progress.link((specifier) => specifier === "./i18n.js" ? language : specifier === "./shared.js" ? shared : errors);
   const module = new vm.SourceTextModule(source, { context });
   await module.link((specifier) => {
+    if (specifier === "./i18n.js") return language;
     if (specifier === "./shared.js") return shared;
-    if (specifier === "./usage_sync_prompt.js") return prompt;
     if (specifier === "./sync_errors.js") return errors;
     if (specifier === "./sync_progress.js") return progress;
     throw new Error(`Unexpected import: ${specifier}`);

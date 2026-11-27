@@ -1,3 +1,4 @@
+import { bindText, errorCode, languagePreference, setLanguage, translate } from "./i18n.js";
 import { createModal } from "./modal.js";
 import { el, invoke, listen, getNumberUnit, setNumberUnit, fmtTokens, resetError, fillStatus } from "./shared.js";
 import { getRefreshIntervalMinutes, setRefreshInterval, refreshAccounts } from "./accounts.js";
@@ -107,7 +108,7 @@ function renderUnitSeg() {
 
 /** 刷新间隔文案：不足 1 小时按分钟，整小时按小时（60 → 1 小时，1440 → 24 小时）。 */
 function intervalText(minutes) {
-  return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60} 小时` : `${minutes} 分钟`;
+  return minutes >= 60 && minutes % 60 === 0 ? translate("settings.hr", minutes / 60) : translate("settings.min", minutes);
 }
 
 async function onIntervalChange() {
@@ -120,13 +121,13 @@ async function onIntervalChange() {
     if (!operation.current()) return;
     intervalStatus.set(
       "ok",
-      minutes > 0 ? `全局间隔已设为 ${intervalText(minutes)}，用于未单独设置的账户与共享用量任务。`
-        : "已关闭全局定时刷新，账户的独立间隔仍生效。"
+      () => minutes > 0 ? translate("settings.globalIntervalSetToForSharedUsage", intervalText(minutes))
+        : translate("settings.globalRefreshIsOffIndividualAccountSchedules")
     );
   } catch (error) {
     if (!operation.current()) return;
     select.value = String(previous);
-    intervalStatus.set("bad", `设置定时刷新失败：${resetError(error)}`);
+    intervalStatus.set("bad", () => translate("settings.couldNotSaveTheRefreshInterval", resetError(error)));
   } finally {
     operation.finish();
   }
@@ -150,12 +151,12 @@ async function onLocalSyncChange() {
   try {
     const minutes = await invoke("local_sync_set", { minutes: Number(select.value) });
     if (!operation.current()) return;
-    const text = minutes === 1440 ? "1 天" : intervalText(minutes);
-    localSyncStatus.set("ok", `已设为每 ${text}检查一次本机 auth.json。`);
+    const text = minutes === 1440 ? translate("settings.1Day") : intervalText(minutes);
+    localSyncStatus.set("ok", () => translate("settings.localAuthJsonWillBeCheckedEvery", text));
   } catch (error) {
     if (!operation.current()) return;
     void loadLocalSyncInterval();
-    localSyncStatus.set("bad", `设置同步间隔失败：${resetError(error)}`);
+    localSyncStatus.set("bad", () => translate("settings.couldNotSaveTheSyncInterval", resetError(error)));
   } finally {
     operation.finish();
   }
@@ -190,17 +191,17 @@ async function onAutostartChange() {
     reflectAutostart(!!v.enabled, !!v.silent);
     autostartStatus.set(
       "ok",
-      v.enabled
+      () => v.enabled
         ? v.silent
-          ? "已开启开机自启动，开机时将静默启动到托盘。"
-          : "已开启开机自启动。"
-        : "已关闭开机自启动。"
+          ? translate("settings.launchAtLoginEnabledTheAppWill")
+          : translate("settings.launchAtLoginEnabled")
+        : translate("settings.launchAtLoginDisabled")
     );
   } catch (error) {
     if (!operation.current()) return;
     // 写系统失败时回读真实状态，避免界面与系统不一致
     void loadAutostart();
-    autostartStatus.set("bad", `设置开机启动失败：${resetError(error)}`);
+    autostartStatus.set("bad", () => translate("settings.couldNotChangeLaunchAtLogin", resetError(error)));
   } finally {
     operation.finish();
     if (operation.current()) el("#autostart-silent").disabled = !el("#autostart-enabled").checked;
@@ -232,8 +233,8 @@ function showPasswordRow(mode, path) {
   backupImportPath = path || "";
   const input = el("#backup-password");
   input.value = "";
-  input.placeholder = mode === "export" ? "可选：设置加密密码，留空则明文导出" : "该备份已加密，请输入密码";
-  el("#backup-password-ok").textContent = mode === "export" ? "开始导出" : "解密导入";
+  bindText(input, () => mode === "export" ? translate("settings.optionalPasswordLeaveBlankForAnUnencrypted") : translate("settings.thisBackupIsEncryptedEnterItsPassword"), "placeholder");
+  bindText(el("#backup-password-ok"), () => mode === "export" ? translate("settings.export") : translate("settings.decryptAndImport"));
   el("#backup-password-row").hidden = false;
   input.focus();
 }
@@ -264,16 +265,16 @@ function applyUiPrefs(prefs) {
 async function doExport(password) {
   backupBusy = true;
   updateBackupButtons();
-  backupStatus.set("", "正在导出全部数据…");
+  backupStatus.set("", () => translate("settings.exportingAllData"));
   try {
     const r = await invoke("backup_export", { password: password || null, uiPrefs: collectUiPrefs() });
     if (r && r.cancelled) {
       backupStatus.clear();
       return;
     }
-    backupStatus.set("ok", `已导出全部数据${r.encrypted ? "（已加密）" : ""}：${r.path}`);
+    backupStatus.set("ok", () => translate("settings.exportedAllData", r.encrypted ? translate("settings.encrypted") : "", r.path));
   } catch (error) {
-    backupStatus.set("bad", `导出失败：${resetError(error)}`);
+    backupStatus.set("bad", () => translate("accounts.exportFailed", resetError(error)));
   } finally {
     backupBusy = false;
     updateBackupButtons();
@@ -283,7 +284,7 @@ async function doExport(password) {
 async function doImportApply(path, password) {
   backupBusy = true;
   updateBackupButtons();
-  backupStatus.set("", "正在导入并应用数据…");
+  backupStatus.set("", () => translate("settings.importingDataAndApplyingSettings"));
   try {
     const r = await invoke("backup_import_apply", { path, password: password || null });
     hidePasswordRow();
@@ -292,36 +293,36 @@ async function doImportApply(path, password) {
     void loadAutostart();
     void loadClientPaths();
     void loadSyncSettings();
-    const parts = [`新增 ${Number(r && r.imported) || 0} 个账号`];
+    const parts = [translate("settings.addedAccounts", Number(r && r.imported) || 0)];
     const exists = Number(r && r.skippedExists) || 0;
     const invalid = Number(r && r.skippedInvalid) || 0;
     const usageRestored = Number(r && r.usageRestored) || 0;
-    if (exists > 0) parts.push(`跳过 ${exists} 个已存在`);
-    if (invalid > 0) parts.push(`${invalid} 个无效`);
-    if (usageRestored > 0) parts.push(`恢复 ${usageRestored} 个已删除账户的统计数据`);
-    if (r.opencodeEventsRestored > 0) parts.push(`恢复 ${r.opencodeEventsRestored} 条 OpenCode 请求明细`);
+    if (exists > 0) parts.push(translate("settings.skippedExistingAccounts", exists));
+    if (invalid > 0) parts.push(translate("settings.invalidAccounts", invalid));
+    if (usageRestored > 0) parts.push(translate("settings.restoredUsageForDeletedAccounts", usageRestored));
+    if (r.opencodeEventsRestored > 0) parts.push(translate("settings.restoredOpencodeRequestRecords", r.opencodeEventsRestored));
     if (r.opencodeUsageError) {
       const reason = {
-        opencode_archive_open_failed: "无法打开归档数据库",
-        opencode_archive_read_failed: "无法读取归档数据库",
-        opencode_archive_write_failed: "归档数据库写入失败",
+        opencode_archive_open_failed: translate("settings.couldNotOpenTheArchiveDatabase"),
+        opencode_archive_read_failed: translate("settings.couldNotReadTheArchiveDatabase"),
+        opencode_archive_write_failed: translate("settings.couldNotWriteToTheArchiveDatabase"),
       }[r.opencodeUsageError] || resetError(r.opencodeUsageError);
-      backupStatus.set("warn", `部分恢复完成：${parts.join("，")}；账户和设置已应用。OpenCode 归档未恢复（${reason}），本机原有归档未改变，可重试导入同一备份。`);
+      backupStatus.set("warn", () => translate("settings.partiallyRestoredAccountsAndSettingsWereApplied", parts.join("，"), reason));
     } else {
-      backupStatus.set("ok", `导入完成：${parts.join("，")}；其余设置已应用。`);
+      backupStatus.set("ok", () => translate("settings.importCompletedOtherSettingsWereApplied", parts.join("，")));
     }
     // 新导入的账号后台排队刷新验证，与账户页导入体验一致
     const ids = Array.isArray(r && r.importedIds) ? r.importedIds : [];
     if (ids.length) void refreshAccounts(ids);
   } catch (error) {
-    const msg = resetError(error);
+    const msg = errorCode(error);
     if (msg === "wrong_password") {
-      backupStatus.set("bad", "密码错误，请重试。");
+      backupStatus.set("bad", () => translate("settings.incorrectPasswordTryAgain"));
     } else if (msg === "invalid_format") {
       hidePasswordRow();
-      backupStatus.set("bad", "不是有效的备份文件。");
+      backupStatus.set("bad", () => translate("settings.invalidBackupFile"));
     } else {
-      backupStatus.set("bad", `导入失败：${msg}`);
+      backupStatus.set("bad", () => translate("accounts.importFailed", resetError(msg)));
     }
   } finally {
     backupBusy = false;
@@ -346,8 +347,8 @@ async function onBackupImportClick() {
     const r = await invoke("backup_import_inspect");
     if (r && !r.cancelled) picked = r;
   } catch (error) {
-    const msg = resetError(error);
-    backupStatus.set("bad", msg === "invalid_format" ? "不是有效的备份文件。" : `导入失败：${msg}`);
+    const msg = errorCode(error);
+    backupStatus.set("bad", () => msg === "invalid_format" ? translate("settings.invalidBackupFile") : translate("accounts.importFailed", resetError(msg)));
   } finally {
     backupBusy = false;
     updateBackupButtons();
@@ -370,7 +371,7 @@ function onBackupPasswordOk() {
   }
   if (backupPasswordMode === "import") {
     if (!password) {
-      backupStatus.set("bad", "请输入备份密码。");
+      backupStatus.set("bad", () => translate("settings.enterTheBackupPassword"));
       return;
     }
     // 密码错误时保留输入行以便重试（doImportApply 仅在成功或文件无效时收起）
@@ -434,7 +435,7 @@ async function loadClientPaths() {
 async function onDetect(c) {
   const btn = el(c.detectBtn);
   btn.disabled = true;
-  c.status.set("", `正在搜索本机 ${c.name}…`);
+  c.status.set("", translate("settings.searchingForLocal", c.name));
   try {
     const r = await invoke(c.detect);
     const found = [];
@@ -443,12 +444,12 @@ async function onDetect(c) {
       if (r?.[key]) { el(input).value = r[key]; found.push(r[key]); }
     }
     if (found.length) {
-      c.status.set("ok", `已找到 ${found.length} 个客户端路径。点「完成」保存。`);
+      c.status.set("ok", translate("settings.foundClientPathsClickDoneToSave", found.length));
     } else {
-      c.status.set("warn", `未找到 ${c.name}，请手动填写完整路径。`);
+      c.status.set("warn", translate("settings.couldNotFindEnterTheFullPath", c.name));
     }
   } catch (error) {
-    c.status.set("bad", `搜索失败：${resetError(error)}`);
+    c.status.set("bad", translate("settings.searchFailed", resetError(error)));
   } finally {
     btn.disabled = false;
   }
@@ -468,11 +469,11 @@ function setScanProgress(text) {
     return;
   }
   box.hidden = false;
-  box.textContent = text;
+  bindText(box, text);
 }
 
 function updateScanButton() {
-  el("#cursor-detect").textContent = sessionActive ? "搜索下一个" : "自动搜索";
+  bindText(el("#cursor-detect"), () => sessionActive ? translate("settings.findNext") : translate("settings.findAutomatically"));
 }
 
 // 逐个查找：命中一个即暂停并填入输入框，再点「搜索下一个」从原处继续，直到扫完。
@@ -482,35 +483,35 @@ async function onStep() {
   scanning = true;
   el("#cursor-detect").disabled = true;
   el("#cursor-scan-cancel").hidden = false;
-  cursorPathStatus.set("", restart ? "正在扫描本机 Cursor…" : "继续搜索下一个…");
-  setScanProgress("扫描中…");
+  cursorPathStatus.set("", () => restart ? translate("settings.scanningForCursor") : translate("settings.findingTheNextMatch"));
+  setScanProgress(() => translate("settings.scanning"));
   try {
     // 先挂上进度监听，再触发扫描，避免漏掉早期事件。
     unlistenScan = await listen("cursor-scan-progress", (e) => {
       const p = (e && e.payload) || {};
       const cur = p.current ? `：${p.current}` : "";
-      setScanProgress(`已扫描 ${p.scanned || 0} 个目录（第 ${p.depth || 0} 层）${cur}`);
+      setScanProgress(() => translate("settings.scannedFoldersDepth", p.scanned || 0, p.depth || 0, cur));
     });
     const r = await invoke("cursor_client_scan_step", { restart });
     if (r && r.found) {
       el("#cursor-exe-path").value = r.found;
       if (r.done) {
         sessionActive = false;
-        cursorPathStatus.set("ok", `已填入（这是最后一个）：${r.found}。点「完成」保存。`);
+        cursorPathStatus.set("ok", () => translate("settings.lastMatchClickDoneToSave", r.found));
       } else {
         sessionActive = true;
-        cursorPathStatus.set("ok", `已填入：${r.found}。点「完成」保存，或「搜索下一个」继续。`);
+        cursorPathStatus.set("ok", () => translate("settings.foundClickDoneToSaveOrFind", r.found));
       }
     } else if (r && r.cancelled) {
       sessionActive = false;
-      cursorPathStatus.set("warn", "已取消扫描。");
+      cursorPathStatus.set("warn", () => translate("settings.scanCancelled"));
     } else {
       sessionActive = false;
-      cursorPathStatus.set("warn", restart ? "未找到 Cursor，请手动填写完整路径。" : "已无更多结果。");
+      cursorPathStatus.set("warn", () => restart ? translate("settings.cursorNotFoundEnterTheFullPath") : translate("settings.noFurtherMatches"));
     }
   } catch (error) {
     sessionActive = false;
-    cursorPathStatus.set("bad", `扫描失败：${resetError(error)}`);
+    cursorPathStatus.set("bad", () => translate("settings.scanFailed", resetError(error)));
   } finally {
     if (unlistenScan) {
       try { unlistenScan(); } catch { /* ignore */ }
@@ -525,7 +526,7 @@ async function onStep() {
 }
 
 async function onScanCancel() {
-  setScanProgress("正在取消…");
+  setScanProgress(() => translate("settings.cancelling"));
   try { await invoke("cursor_client_scan_cancel"); } catch { /* ignore */ }
   sessionActive = false;
 }
@@ -550,10 +551,10 @@ async function onDone() {
         if (!operation.current()) return;
       } catch (error) {
         if (!operation.current()) return;
-        if (resetError(error) === c.invalid) {
-          c.status.set("bad", "路径无效或文件不存在，请修正或清空后再完成。");
+        if (errorCode(error) === c.invalid) {
+          c.status.set("bad", translate("settings.thePathIsInvalidOrMissingCorrect"));
         } else {
-          c.status.set("bad", `保存路径失败：${resetError(error)}`);
+          c.status.set("bad", translate("settings.couldNotSavePath", resetError(error)));
         }
         operation.finish();
         selectSettingsSection("clients");
@@ -570,6 +571,24 @@ async function onDone() {
 /* ---------- 初始化 ---------- */
 
 export function initSettings() {
+  window.addEventListener("uilanguagechange", renderUnitSeg);
+  const language = el("#ui-language");
+  el("#ui-language-folder").addEventListener("click", async () => {
+    try { await invoke("ui_language_open_folder"); }
+    catch (error) { fillStatus(el("#ui-language-status"), "bad", () => translate("settings.openLanguageFolderFailed", resetError(error))); }
+  });
+  language.value = languagePreference();
+  language.addEventListener("change", async () => {
+    const operation = getSettingsModal().beginSave([language, el("#settings-done")]);
+    if (!operation) { language.value = languagePreference(); return; }
+    try {
+      await setLanguage(language.value);
+      statusBox("#ui-language-status").clear();
+    } catch (error) {
+      language.value = languagePreference();
+      fillStatus(el("#ui-language-status"), "bad", () => translate("settings.languageSaveFailed", resetError(error)));
+    } finally { operation.finish(); }
+  });
   initSettingsSections();
   initSyncSettings();
   el("#settings-btn").addEventListener("click", () => {

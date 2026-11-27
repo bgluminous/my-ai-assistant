@@ -1,9 +1,10 @@
+import { hasMessage, bindText, errorCode, locale, translate } from "./i18n.js";
 // 通用工具：invoke 封装、格式化、DOM 助手。
 
 export function invoke(cmd, args) {
   const core = window.__TAURI__ && window.__TAURI__.core;
   if (!core || typeof core.invoke !== "function") {
-    return Promise.reject(new Error("需要在应用内运行（Tauri 环境不可用）。"));
+    return Promise.reject(new Error(translate("shared.openThisInTheDesktopAppTauri")));
   }
   return core.invoke(cmd, args);
 }
@@ -12,7 +13,7 @@ export function invoke(cmd, args) {
 export function listen(event, handler) {
   const ev = window.__TAURI__ && window.__TAURI__.event;
   if (!ev || typeof ev.listen !== "function") {
-    return Promise.reject(new Error("需要在应用内运行（Tauri 环境不可用）。"));
+    return Promise.reject(new Error(translate("shared.openThisInTheDesktopAppTauri")));
   }
   return ev.listen(event, handler);
 }
@@ -26,7 +27,7 @@ export function emit(event, payload) {
 
 export function el(selector, root = document) {
   const found = root.querySelector(selector);
-  if (!found) throw new Error(`缺少页面元素：${selector}`);
+  if (!found) throw new Error(translate("shared.missingPageElement", selector));
   return found;
 }
 
@@ -65,7 +66,7 @@ export function iconAction(icon, label) {
 
 export function fmtInt(n) {
   if (n == null || !Number.isFinite(n)) return "—";
-  return Math.round(n).toLocaleString("zh-CN");
+  return Math.round(n).toLocaleString(locale());
 }
 
 /** 拼 innerHTML 时转义用户可控文本（模型名、账户备注等）。 */
@@ -109,9 +110,8 @@ export function setNumberUnit(unit) {
 function scaledNumber(value, divisor, suffix) {
   const v = value / divisor;
   const decimals = Math.abs(v) >= 100 ? 0 : Math.abs(v) >= 10 ? 1 : 2;
-  let text = v.toFixed(decimals);
-  if (decimals > 0) text = text.replace(/\.?0+$/, "");
-  return `${text}${suffix}`;
+  const text = v.toLocaleString(locale(), { maximumFractionDigits: decimals, useGrouping: false });
+  return text + suffix;
 }
 
 /** Token 数量按当前单位偏好显示：完整数字 / K·M·B / 万·亿。 */
@@ -126,8 +126,8 @@ export function fmtTokens(n) {
     return fmtInt(n);
   }
   if (unit === "zh") {
-    if (abs >= 1e8) return scaledNumber(n, 1e8, "亿");
-    if (abs >= 1e4) return scaledNumber(n, 1e4, "万");
+    if (abs >= 1e8) return scaledNumber(n, 1e8, translate("number.hundredMillion"));
+    if (abs >= 1e4) return scaledNumber(n, 1e4, translate("number.tenThousand"));
     return fmtInt(n);
   }
   return fmtInt(n);
@@ -135,8 +135,11 @@ export function fmtTokens(n) {
 
 export function fmtUsd(n) {
   if (n == null || !Number.isFinite(n)) return "—";
-  if (n !== 0 && Math.abs(n) < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
+  const digits = n !== 0 && Math.abs(n) < 0.01 ? 4 : 2;
+  return n.toLocaleString(locale(), {
+    style: "currency", currency: "USD", currencyDisplay: "narrowSymbol", useGrouping: false,
+    minimumFractionDigits: digits, maximumFractionDigits: digits,
+  });
 }
 
 /** 图内标注 / 轴刻度用的紧凑 token 数（独立于单位偏好，绘图空间有限）。 */
@@ -162,48 +165,54 @@ export function fmtDateMs(ms) {
   if (ms == null || !Number.isFinite(ms) || ms <= 0) return "—";
   const value = ms < 1_000_000_000_000 ? ms * 1000 : ms;
   const d = new Date(value);
-  return Number.isFinite(d.getTime()) ? d.toLocaleString("zh-CN", { hour12: false }) : "—";
+  return Number.isFinite(d.getTime()) ? d.toLocaleString(locale(), { hour12: false }) : "—";
 }
 
 export function resetError(err) {
-  const message = typeof err?.message === "string" ? err.message : String(err);
+  const message = errorCode(err);
+  const separator = message.indexOf(":");
+  const key = separator < 0 ? message : message.slice(0, separator);
+  if (key.startsWith("errors.") && hasMessage(key)) {
+    return separator < 0 ? translate(key) : translate(key, message.slice(separator + 1));
+  }
+  if (message === "pricing_shared_flash_rate") return translate("pricing.deepseekFlashVersionsSharePricingEditThe");
   const openCodeErrors = {
-    opencode_auth_required: "请为该工作区完成 OpenCode 独立授权。",
-    opencode_oauth_invalid_response: "OpenCode 授权接口未返回有效的授权地址，请重试。",
-    opencode_http_401: "OpenCode 授权已失效，请重新授权。",
-    opencode_workspace_usage_forbidden: "工作区总用量需要 Owner 或 Admin 授权；成员个人用量不会计入此统计。",
-    opencode_http_403: "当前授权无权读取该工作区数据，请使用有读取权限的账户。",
-    opencode_http_429: "OpenCode 请求过于频繁，请稍后刷新。",
-    opencode_invalid_response: "OpenCode 接口返回了无法识别的数据，已保留缓存。",
-    opencode_invalid_usage: "OpenCode 用量字段不完整或格式有误，未推进同步水位。",
-    opencode_invalid_cursor: "OpenCode 分页游标无效，请重新同步。",
-    opencode_cursor_changed: "OpenCode 分页范围发生变化，请重新同步。",
-    opencode_archive_invalid_backup: "OpenCode 用量备份格式无效，尚未应用备份。",
-    opencode_archive_open_failed: "无法打开 OpenCode 用量归档。",
-    opencode_archive_read_failed: "无法读取 OpenCode 用量归档。",
-    opencode_archive_write_failed: "无法保存 OpenCode 用量归档。",
-    opencode_cli_invalid_response: "OpenCode V2 CLI 返回格式无法识别，请检查版本。",
-    opencode_network_error: "无法连接 OpenCode，已保留缓存。",
-    opencode_workspace_mismatch: "授权工作区不匹配，请选择原工作区。",
-    opencode_choose_workspace: "请在 OpenCode 授权页选择一个工作区后重试。",
-    opencode_oauth_expired: "授权已过期，请重新开始。",
-    opencode_oauth_denied: "授权已被拒绝。",
-    opencode_oauth_cancelled: "授权已取消。",
-    opencode_local_account_not_found: "所选本机账户已不存在，请重新读取账户列表。",
-    opencode_exe_not_found: "未找到 OpenCode CLI，请在设置中配置 V2 可执行文件。",
-    opencode_exe_invalid: "OpenCode CLI 路径无效。",
-    opencode_v2_required: "需要 OpenCode V2，请升级客户端或检查 CLI 路径。",
-    opencode_cli_failed: "OpenCode CLI 操作失败，请确认 V2 客户端可正常使用。",
-    opencode_cli_timeout: "OpenCode CLI 操作超时。",
-    opencode_database_unavailable: "无法读取 OpenCode 数据库，请检查路径与权限。",
-    opencode_client_auth_pending: "已有客户端授权正在进行，请先完成或取消。",
-    opencode_client_auth_failed: "客户端授权未完成，或选择了其它工作区。",
-    opencode_switch_not_confirmed: "未能确认客户端切换结果，请检查 OpenCode 当前登录。",
+    opencode_auth_required: translate("shared.authorizeOpencodeSeparatelyForThisWorkspace"),
+    opencode_oauth_invalid_response: translate("shared.opencodeDidNotReturnAValidAuthorization"),
+    opencode_http_401: translate("shared.opencodeAuthorizationHasExpiredAuthorizeAgain"),
+    opencode_workspace_usage_forbidden: translate("shared.workspaceWideUsageRequiresOwnerOrAdmin"),
+    opencode_http_403: translate("shared.thisAccountCannotReadWorkspaceDataAuthorize"),
+    opencode_http_429: translate("shared.tooManyOpencodeRequestsTryRefreshingLater"),
+    opencode_invalid_response: translate("shared.opencodeReturnedUnrecognizedDataCachedDataWas"),
+    opencode_invalid_usage: translate("shared.opencodeUsageFieldsAreIncompleteOrInvalid"),
+    opencode_invalid_cursor: translate("shared.invalidOpencodePageCursorSyncAgain"),
+    opencode_cursor_changed: translate("shared.opencodePaginationChangedSyncAgain"),
+    opencode_archive_invalid_backup: translate("shared.invalidOpencodeUsageBackupItHasNot"),
+    opencode_archive_open_failed: translate("shared.couldNotOpenTheOpencodeUsageArchive"),
+    opencode_archive_read_failed: translate("shared.couldNotReadTheOpencodeUsageArchive"),
+    opencode_archive_write_failed: translate("shared.couldNotSaveTheOpencodeUsageArchive"),
+    opencode_cli_invalid_response: translate("shared.unrecognizedResponseFromOpencodeV2Cli"),
+    opencode_network_error: translate("shared.couldNotConnectToOpencodeCachedData"),
+    opencode_workspace_mismatch: translate("shared.workspaceMismatchSelectTheOriginalWorkspace"),
+    opencode_choose_workspace: translate("shared.chooseAWorkspaceOnTheOpencodeAuthorization"),
+    opencode_oauth_expired: translate("shared.authorizationExpiredStartAgain"),
+    opencode_oauth_denied: translate("shared.authorizationDenied"),
+    opencode_oauth_cancelled: translate("shared.authorizationCancelled"),
+    opencode_local_account_not_found: translate("shared.theSelectedLocalAccountIsGoneReload"),
+    opencode_exe_not_found: translate("shared.opencodeCliNotFoundConfigureTheV"),
+    opencode_exe_invalid: translate("shared.invalidOpencodeCliPath"),
+    opencode_v2_required: translate("shared.opencodeV2IsRequiredUpdateThe"),
+    opencode_cli_failed: translate("shared.opencodeCliFailedCheckThatTheV"),
+    opencode_cli_timeout: translate("shared.opencodeCliTimedOut"),
+    opencode_database_unavailable: translate("shared.couldNotReadTheOpencodeDatabaseCheck"),
+    opencode_client_auth_pending: translate("shared.clientAuthorizationIsInProgressFinishOr"),
+    opencode_client_auth_failed: translate("shared.clientAuthorizationDidNotFinishOrA"),
+    opencode_switch_not_confirmed: translate("shared.couldNotVerifyTheSwitchCheckThe"),
   };
   if (Object.hasOwn(openCodeErrors, message)) return openCodeErrors[message];
-  if (message === "update_in_progress") return "应用正在准备安装更新，请稍后操作。";
-  if (message === "update_required") return "此版本需要更新，请在「关于」页检查更新或前往 GitHub Releases。";
-  return message;
+  if (message === "update_in_progress") return translate("shared.anUpdateIsBeingPreparedTryAgain");
+  if (message === "update_required") return translate("shared.anUpdateIsRequiredOpenAboutTo");
+  return typeof err?.message === "string" ? err.message : message;
 }
 
 // ---------- 全局提示（toast 与弹窗内状态条） ----------
@@ -228,11 +237,12 @@ function removeToast(node) {
 function statusChildren(text, onClose) {
   const span = document.createElement("span");
   span.className = "status-text";
-  span.textContent = text;
+  bindText(span, text);
   const close = document.createElement("button");
   close.type = "button";
   close.className = "status-close";
-  close.setAttribute("aria-label", "关闭提示");
+  close.setAttribute("data-i18n-aria-label", "shared.dismissMessage");
+  close.setAttribute("aria-label", translate("shared.dismissMessage"));
   close.textContent = "×";
   close.addEventListener("click", onClose);
   return [span, close];
@@ -350,7 +360,7 @@ export function topSlices(models, metric, n) {
   const rest = list.slice(n);
   const slices = top.map((m) => ({ label: m.model, value: m[metric] }));
   if (rest.length) {
-    slices.push({ label: "其他", value: rest.reduce((sum, m) => sum + m[metric], 0) });
+    slices.push({ label: translate("shared.other"), value: rest.reduce((sum, m) => sum + m[metric], 0) });
   }
   return slices;
 }

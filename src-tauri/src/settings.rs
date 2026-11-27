@@ -20,6 +20,9 @@ use crate::proxy::{self, ProxyConfig};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Older backups omit this preference. Such imports retain the local selection.
+    #[serde(default)]
+    pub ui_language: Option<String>,
     #[serde(default)]
     pub app_update: crate::app_update::Preferences,
     /// 已确认的强制更新要求：重启或关闭自动检查不能绕过；备份导入不覆盖本机记录。
@@ -138,6 +141,7 @@ pub(crate) fn sanitize_loaded(mut data: Settings) -> Settings {
 /// 落盘 / 备份导出的形态：有副本的 ChatGPT 账户不再单独写出 token / refresh_token。
 pub(crate) fn persisted_form(data: &Settings) -> Settings {
     let mut copy = data.clone();
+    copy.ui_language.get_or_insert_with(|| "system".to_string());
     crate::accounts::dehydrate_accounts(&mut copy.accounts);
     copy
 }

@@ -730,7 +730,7 @@ pub async fn cursor_switch_local(id: String) -> Result<SwitchResult, String> {
 
     Ok(SwitchResult {
         switched: true,
-        message: "已写入本地登录。".into(),
+        message: "accounts.localLoginWritten".into(),
         exchanged: None,
     })
 }
@@ -752,7 +752,7 @@ pub async fn cursor_logout_local() -> Result<LogoutResult, String> {
     if !was_logged_in {
         return Ok(LogoutResult {
             was_logged_in: false,
-            message: "本机 Cursor 当前未登录，无需退出。".into(),
+            message: "native.cursorIsAlreadySignedOutLocally".into(),
         });
     }
     audit::log(
@@ -762,7 +762,7 @@ pub async fn cursor_logout_local() -> Result<LogoutResult, String> {
     );
     Ok(LogoutResult {
         was_logged_in: true,
-        message: "已退出本机 Cursor 登录，下次启动 Cursor 需重新登录或从本工具切换账户。".into(),
+        message: "native.signedOutOfCursorLocallySignIn".into(),
     })
 }
 

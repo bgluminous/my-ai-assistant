@@ -1,3 +1,4 @@
+import { errorCode, translate } from "./i18n.js";
 import { createModal } from "./modal.js";
 import { el, invoke, copyText, resetError, fillStatus, toast } from "./shared.js";
 
@@ -12,10 +13,10 @@ function getModal() {
 }
 
 function mapError(err) {
-  const code = resetError(err);
-  if (code === "empty_proxy_url") return "请填写自定义代理地址。";
-  if (code === "invalid_proxy_url") return "代理地址无效，示例：socks5://127.0.0.1:1080";
-  return code;
+  const code = errorCode(err);
+  if (code === "empty_proxy_url") return translate("proxy.enterACustomProxyAddress");
+  if (code === "invalid_proxy_url") return translate("proxy.invalidProxyAddressExampleSocks5127");
+  return resetError(code);
 }
 
 function setStatus(kind, text) {
@@ -61,21 +62,21 @@ async function onTest() {
   const result = el("#proxy-test-result");
   btn.disabled = true;
   result.className = "muted small";
-  result.textContent = "测试中…";
+  result.textContent = translate("proxy.testing");
   try {
     const r = await invoke("proxy_test", { config: readForm() });
     if (r.ok) {
       result.className = "small test-ok";
       result.textContent =
-        `已连通 · IP：${r.ip || "未知"} · 地区：${r.region || "未知"} · ISP：${r.isp || "未知"} · ${r.ms}ms`;
+        translate("proxy.connectedIpRegionIspMs", r.ip || translate("proxy.unknown"), r.region || translate("proxy.unknown"), r.isp || translate("proxy.unknown"), r.ms);
     } else {
       result.className = "small test-bad";
-      const reason = r.error ? r.error : r.status ? `HTTP ${r.status}` : "无响应";
-      result.textContent = `连接失败：${reason} · ${r.ms}ms`;
+      const reason = r.error ? r.error : r.status ? `HTTP ${r.status}` : translate("proxy.noResponse");
+      result.textContent = translate("proxy.connectionFailedMs", reason, r.ms);
     }
   } catch (err) {
     result.className = "small test-bad";
-    result.textContent = `测试失败：${mapError(err)}`;
+    result.textContent = translate("proxy.testFailed", mapError(err));
   } finally {
     btn.disabled = false;
   }
@@ -85,7 +86,7 @@ async function onSave() {
   const btn = el("#proxy-save");
   const operation = getModal().beginSave([btn]);
   if (!operation) return;
-  setStatus("", "保存中…");
+  setStatus("", () => translate("accounts.saving"));
   try {
     const view = await invoke("proxy_set", { config: readForm() });
     if (!operation.current()) return;
@@ -94,12 +95,12 @@ async function onSave() {
     state.path = view.path;
     render();
     // 保存成功即关闭弹窗，结果用右上角 toast 提示；失败时保留弹窗与状态条
-    const label = state.mode === "custom" ? state.url : state.mode === "direct" ? "直连" : "跟随系统";
+    const label = state.mode === "custom" ? state.url : state.mode === "direct" ? translate("proxy.direct") : translate("settings.followSystem");
     closeModal();
-    toast("ok", `代理已保存（${label}），后续请求立即生效。`, { key: "proxy" });
+    toast("ok", () => translate("proxy.proxySavedNewRequestsUseItImmediately", label), { key: "proxy" });
   } catch (err) {
     if (!operation.current()) return;
-    setStatus("bad", `保存失败：${mapError(err)}`);
+    setStatus("bad", () => translate("accounts.saveFailed", mapError(err)));
   } finally {
     operation.finish();
   }
@@ -110,10 +111,10 @@ async function onCopyPath() {
   const btn = el("#proxy-copy-path");
   try {
     await copyText(state.path);
-    btn.textContent = "已复制";
-    setTimeout(() => (btn.textContent = "复制配置路径"), 1200);
+    btn.textContent = translate("pricing.copied");
+    setTimeout(() => (btn.textContent = translate("proxy.copyConfigurationPath")), 1200);
   } catch {
-    setStatus("bad", "复制失败，无法写入剪贴板。");
+    setStatus("bad", () => translate("pricing.couldNotWriteToTheClipboard"));
   }
 }
 
@@ -146,6 +147,6 @@ export async function initProxy() {
     button.addEventListener("click", openModal);
   } catch {
     button.disabled = true;
-    button.title = "需在应用内使用";
+    button.title = translate("proxy.availableInTheDesktopApp");
   }
 }

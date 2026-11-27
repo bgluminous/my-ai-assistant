@@ -553,9 +553,9 @@ pub fn merge_subscription(status: &mut Value, context: &Value, subscription: &Va
 pub fn quota_windows(value: &Value) -> Result<Value, String> {
     let mut windows = Vec::new();
     for (key, label) in [
-        ("rolling", "5 小时"),
-        ("weekly", "每周"),
-        ("monthly", "每月"),
+        ("rolling", "quota.fiveHours"),
+        ("weekly", "quota.weekly"),
+        ("monthly", "quota.monthly"),
     ] {
         let meter = value
             .pointer(&format!("/usage/{key}"))

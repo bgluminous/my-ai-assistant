@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 
 const sources = Object.fromEntries(await Promise.all(
   ["accounts", "usage", "tray_panel", "usage_data", "account_order", "account_refresh"].map(async name =>
@@ -125,6 +126,7 @@ async function fixture(name, { sync, ipc, accounts = [], globalMinutes = 0, sync
         : key === "updatePresentation" ? () => ({}) : hooks.noop);
     }, { context }));
   }
+  modules.set("./i18n.js", await i18nFixture(context));
   const order = new vm.SourceTextModule(sources.account_order, { context });
   await order.link(path => modules.get(path)); await order.evaluate();
   modules.set("./account_order.js", order);

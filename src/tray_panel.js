@@ -1,9 +1,10 @@
+import { bindText, errorCode, locale, translate } from "./i18n.js";
 import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
 import { refreshByProvider } from "./account_refresh.js";
 import { switchLocalClients, startSwitchResultCountdown } from "./linked_client_ui.js";
 import { switchOpenCode } from "./opencode_ui.js";
 import { el, invoke, listen, resetError, fmtInt, fmtTokens, fmtUsd, compactTokens, fmtShare, colorFor, chartAnimMs, setChartHoverHit, bindChartHoverLeave, pieSliceLabelsPlugin, setupDesktopGuards, kindLabel } from "./shared.js";
-import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, accountDateInfo, quotaResetInfo, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
+import { accountPlanInfo, relativeFromUnixSeconds, relativeFromMs, accountDateInfo, quotaResetInfo, quotaWindowLabel, remainInfo, onDemandBrief, creditsBrief, resetCreditsBrief, maskToken, cursorIdentity } from "./account_format.js";
 import { updatePresentation } from "./update_status.js";
 import { syncError } from "./usage_sync.js";
 import { mountSyncProgress, refreshSyncStatus } from "./sync_progress.js";
@@ -46,14 +47,14 @@ let accounts = [];
 const accountOrder = trackAccountOrder();
 let lastInterval = null;
 let rowOrder;
-let updateRevision = -1;
+let lastUpdateView = null;
 function updateNotice(view) {
-  if (!view || view.revision < updateRevision) return;
-  updateRevision = view.revision;
+  if (!view || (lastUpdateView && view.revision < lastUpdateView.revision)) return;
+  lastUpdateView = view;
   const ui = updatePresentation(view);
   const notice = el("#tray-update-notice");
   notice.hidden = !ui.failed && !view.latestVersion && !ui.paused;
-  notice.textContent = view.forceUpdate ? "需要更新 · 打开主窗口处理" : ui.paused ? "正在准备安装更新" : ui.failed ? "更新失败 · 打开主窗口重试" : `新版本 ${view.latestVersion} · 查看`;
+  notice.textContent = view.forceUpdate ? translate("trayPanel.updateRequiredOpenMainWindow") : ui.paused ? translate("trayPanel.preparingToInstallTheUpdate") : ui.failed ? translate("trayPanel.updateFailedOpenMainWindowToRetry") : translate("trayPanel.versionView", view.latestVersion);
   notice.title = ui.text;
   for (const node of document.querySelectorAll(".tray-tabs, #tray-list, #tray-overview, #tray-modal")) node.inert = view.forceUpdate || ui.paused;
   el("#tray-refresh").disabled = view.forceUpdate || ui.paused;
@@ -97,7 +98,7 @@ function dayScope() {
   const past = dayIsPast();
   const yesterday = start === dayStartMs(-1);
   const d = new Date(start);
-  const word = !past ? "今日" : yesterday ? "昨日" : `${d.getMonth() + 1}月${d.getDate()}日`;
+  const word = !past ? translate("trayPanel.today") : yesterday ? translate("trayPanel.yesterday") : d.toLocaleDateString(locale(), { month: "short", day: "numeric" });
   return {
     past,
     start,
@@ -105,7 +106,7 @@ function dayScope() {
     ymd,
     aggKey: past ? dayRangeKey(ymd) : todayRangeKey(ymd),
     word,
-    tipWord: !past ? "今天" : yesterday ? "昨天" : word,
+    tipWord: !past ? translate("usage.today") : yesterday ? translate("trayPanel.yesterday2") : word,
   };
 }
 
@@ -131,7 +132,7 @@ function iconAction(icon, label) {
  */
 function trayIdentity(account) {
   const note = String((account && account.note) || "").trim();
-  if (!account || account.kind !== "cursor") return { label: note || "未命名账户", email: "" };
+  if (!account || account.kind !== "cursor") return { label: note || translate("accounts.unnamedAccount"), email: "" };
   const { primary, email } = cursorIdentity(account);
   const looksLikeCredential = primary.startsWith("user_") || primary.includes("::") || primary.split(".").length === 3;
   return { label: looksLikeCredential ? maskToken(primary) : primary, email };
@@ -149,7 +150,7 @@ function deletedAccountLabel(record) {
     noteAuto: record.noteAuto !== false,
     status: { name: record.name, email: record.email },
   });
-  return `${label}（已删除）`;
+  return translate("trayPanel.deleted", label);
 }
 
 function syncHeaderRefresh() {
@@ -175,7 +176,7 @@ function syncHeaderRefresh() {
 function syncOverviewLoading() {
   const busy = trayTab === "overview" && overviewLoading;
   el("#tray-ov-loading").hidden = !busy;
-  if (busy) el("#tray-ov-loading-text").textContent = overviewDom ? "更新中…" : "统计中…";
+  if (busy) el("#tray-ov-loading-text").textContent = overviewDom ? translate("trayPanel.updating") : translate("usage.calculating");
 }
 
 /** 总览头部的数据时间：「更新于 HH:MM」，超过缓存有效期加「（缓存）」；无数据时隐藏。 */
@@ -186,9 +187,9 @@ function setOverviewUpdated(statAtMs) {
     node.textContent = "";
     return;
   }
-  const time = new Date(statAtMs).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
-  node.textContent = `更新于 ${time}${isUsageCacheFresh(statAtMs) ? "" : "（缓存）"}`;
-  node.title = new Date(statAtMs).toLocaleString("zh-CN", { hour12: false });
+  const time = new Date(statAtMs).toLocaleTimeString(locale(), { hour12: false, hour: "2-digit", minute: "2-digit" });
+  node.textContent = translate("trayPanel.updated", time, isUsageCacheFresh(statAtMs) ? "" : translate("accountFormat.cached"));
+  node.title = new Date(statAtMs).toLocaleString(locale(), { hour12: false });
   node.hidden = false;
 }
 
@@ -238,15 +239,16 @@ function setStatus(kind, text) {
   const box = el("#tray-status");
   const msg = document.createElement("span");
   msg.className = "tray-status-text";
-  msg.textContent = text;
+  bindText(msg, text);
   const close = document.createElement("button");
   close.type = "button";
   close.className = "tray-status-close";
-  close.setAttribute("aria-label", "关闭提示");
+  close.setAttribute("data-i18n-aria-label", "shared.dismissMessage");
+  close.setAttribute("aria-label", translate("shared.dismissMessage"));
   close.textContent = "×";
   close.addEventListener("click", () => clearStatus());
   box.className = `tray-status ${kind}`;
-  box.title = text;
+  bindText(box, text, "title");
   box.replaceChildren(msg, close);
   box.hidden = false;
 }
@@ -273,7 +275,7 @@ function miniBar(label, usedPercent, reset) {
   const remaining = Math.min(100, Math.max(0, 100 - used));
   const wrap = document.createElement("span");
   wrap.className = `tray-bar ${tierClass(remaining)}`;
-  wrap.title = `${label} 剩余 ${Math.round(remaining)}%`;
+  wrap.title = translate("trayPanel.left", label, Math.round(remaining));
   if (reset) wrap.title += `\n${reset.title}`;
   const name = document.createElement("span");
   name.className = "tray-bar-label";
@@ -300,7 +302,7 @@ function barsFor(account) {
     for (const w of windows.slice(0, account.kind === "opencode" ? 3 : 2)) {
       if (!w) continue;
       const reset = quotaResetInfo(w.resetAt, w.resetsInSeconds, account.lastRefreshAt);
-      const bar = miniBar(w.label || "窗口", w.usedPercent, reset);
+      const bar = miniBar(quotaWindowLabel(w, translate("trayPanel.window")), w.usedPercent, reset);
       if (bar) bars.push(bar);
     }
   } else {
@@ -362,9 +364,9 @@ function accountRow(account) {
   const titles = [];
   if (plan) parts.push(plan);
   if (account.kind === "opencode") {
-    if (account.opencodeAuthorized) titles.push("额度窗口属于当前成员，用量与余额按工作区统计");
-    else parts.push("待独立授权");
-    if (status?.stale) parts.push("部分数据为缓存");
+    if (account.opencodeAuthorized) titles.push(translate("trayPanel.quotasArePerMemberUsageAndBalance"));
+    else parts.push(translate("trayPanel.authorizationNeeded"));
+    if (status?.stale) parts.push(translate("trayPanel.someDataIsCached"));
   }
   // 有效期与主窗口套餐列口径一致：Cursor = 本期计费周期截止，Codex = 套餐订阅到期；
   // Claude 接口不提供订阅起止，不展示有效期
@@ -373,15 +375,15 @@ function accountRow(account) {
     : null;
   if (end) {
     const exp = remainInfo(end.ms);
-    parts.push(exp.expired ? "已到期" : `有效期 ${exp.text}`);
+    parts.push(exp.expired ? translate("accountFormat.expired") : translate("trayPanel.expiresIn", exp.text));
     const renewHint = (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === true
-      ? "（到期自动续期）"
+      ? translate("accounts.renewsAutomatically")
       : (account.kind === "codex" || account.kind === "opencode") && status.planWillRenew === false
-      ? "（到期不续期）"
+      ? translate("accounts.doesNotRenew")
       : "";
     titles.push(account.kind === "codex" || account.kind === "opencode"
-      ? `订阅至 ${end.text}${renewHint}`
-      : `本期计费周期截止 ${end.text}（到期自动续期，额度重置）`);
+      ? translate("accounts.subscribedUntil", end.text, renewHint)
+      : translate("trayPanel.billingPeriodEndsAutoRenewalAndQuota", end.text));
   }
   const extra = account.kind === "codex" || account.kind === "opencode"
     ? creditsBrief(status)
@@ -398,12 +400,12 @@ function accountRow(account) {
     parts.push(resets.text);
     titles.push(resets.title);
   }
-  parts.push(`刷新于 ${relativeFromUnixSeconds(account.lastRefreshAt)}`);
+  parts.push(translate("trayPanel.refreshed", relativeFromUnixSeconds(account.lastRefreshAt)));
   // ChatGPT：凭据组最后换新时间（来自账户保存的 auth.json 副本）
   const credAt = Number(account.codexAuthRefreshedAt);
   if (account.kind === "codex" && Number.isFinite(credAt) && credAt > 0) {
-    parts.push(`凭据 ${relativeFromMs(credAt)}`);
-    titles.push(`凭据组（access / refresh token）最后换新：${new Date(credAt).toLocaleString("zh-CN", { hour12: false })}`);
+    parts.push(translate("accounts.credentials", relativeFromMs(credAt)));
+    titles.push(translate("accounts.accessAndRefreshTokensLastRenewed", new Date(credAt).toLocaleString(locale(), { hour12: false })));
   }
   const info = document.createElement("span");
   info.textContent = parts.join(" · ");
@@ -412,7 +414,7 @@ function accountRow(account) {
   if (alive === false) {
     const bad = document.createElement("span");
     bad.className = "q-low";
-    bad.textContent = "已失效";
+    bad.textContent = translate("accounts.expired");
     sub.append(bad);
   }
   main.append(sub);
@@ -433,30 +435,30 @@ function accountRow(account) {
   const refreshBusy = isRefreshing(account.id);
   const rowBusy = batchRefreshingProviders.has(account.kind) || switching || refreshBusy;
 
-  const refreshBtn = iconAction("refresh", refreshBusy ? "刷新中…" : "刷新");
+  const refreshBtn = iconAction("refresh", refreshBusy ? translate("accounts.refreshing") : translate("usage.refresh"));
   refreshBtn.classList.toggle("busy", refreshBusy);
   refreshBtn.disabled = rowBusy;
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
 
   // Claude Desktop 的独立登录由后端校验；CLI 失败不阻止已绑定的 Desktop。
   const aliveOk = alive === true;
-  const switchBtn = iconAction("switch", "切换");
+  const switchBtn = iconAction("switch", translate("tray.switch"));
   if (account.kind === "opencode") {
     switchBtn.disabled = rowBusy;
-    switchBtn.title = "切换 OpenCode V2 客户端";
+    switchBtn.title = translate("trayPanel.switchOpencodeV2Clients");
   } else if (account.kind === "codex" || account.kind === "claude") {
     const hasRt = !!String(account.refreshToken || "").trim();
     const isClaude = account.kind === "claude";
     switchBtn.disabled = rowBusy || (!isClaude && (!aliveOk || !hasRt));
-    switchBtn.title = isClaude ? "切换本机 Claude CLI / Desktop 账户" : !aliveOk
-      ? "请先刷新验证该账户"
+    switchBtn.title = isClaude ? translate("accounts.switchLocalClaudeCliDesktopAccount") : !aliveOk
+      ? translate("trayPanel.refreshToVerifyThisAccountFirst")
       : !hasRt
-      ? "该账户没有 Refresh Token，无法切换"
-      : "切换本机 GPT / Codex 账户";
+      ? translate("trayPanel.switchingRequiresARefreshToken")
+      : translate("accounts.switchLocalGptCodexAccount");
     switchBtn.setAttribute("aria-label", switchBtn.title);
   } else {
     switchBtn.disabled = rowBusy || !aliveOk;
-    switchBtn.title = aliveOk ? "切换本机 Cursor 到该账户（会关闭正在运行的 Cursor）" : "请先刷新验证该账户";
+    switchBtn.title = aliveOk ? translate("trayPanel.switchLocalCursorToThisAccountCloses") : translate("trayPanel.refreshToVerifyThisAccountFirst");
     switchBtn.setAttribute("aria-label", switchBtn.title);
   }
   switchBtn.addEventListener("click", () => {
@@ -476,7 +478,7 @@ function render() {
     if (!rows.length) {
       const empty = document.createElement("div");
       empty.className = "tray-empty";
-      empty.textContent = "点击右上角的「＋」添加第一个账户。";
+      empty.textContent = translate("accounts.useTheButtonAboveToAddYour");
       list.append(empty);
     }
   }
@@ -500,7 +502,7 @@ async function refreshDeletedRecords() {
   try {
     list = await listDeletedUsage();
   } catch (error) {
-    console.error("读取已删除账户统计数据列表失败：", error);
+    console.error(translate("trayPanel.couldNotReadRetainedStatisticsForDeleted"), error);
     return;
   }
   const next = Array.isArray(list) ? list : [];
@@ -525,7 +527,7 @@ async function load({ viewing = true } = {}) {
     render();
     if (trayTab === "overview") void loadOverview({ viewing });
   } catch (error) {
-    setStatus("bad", `加载失败：${resetError(error)}`);
+    setStatus("bad", () => translate("trayPanel.loadFailed", resetError(error)));
   }
 }
 
@@ -542,7 +544,7 @@ async function refreshOne(id) {
     }
     return true;
   } catch (error) {
-    setStatus("bad", `刷新失败：${resetError(error)}`);
+    setStatus("bad", () => translate("trayPanel.refreshFailed", resetError(error)));
     return false;
   } finally {
     refreshingIds.delete(id);
@@ -559,21 +561,21 @@ async function refreshAll() {
   // 供应商之间并行，组内顺序与主窗口一致；只快照身份，后端出队后读取最新凭据。
   const batch = accountOrder.rows(accounts);
   try {
-    setStatus("", `正在刷新账户 0/${batch.length}…`);
+    setStatus("", () => translate("trayPanel.refreshingAccounts0", batch.length));
     const failures = await refreshByProvider(batch, async id => {
       if (!accounts.some(account => account.id === id) || isRefreshing(id)) return;
       refreshingIds.add(id);
       render();
       try { await invoke("account_refresh", { id }); }
       finally { refreshingIds.delete(id); render(); }
-    }, (completed, total) => setStatus("", `正在刷新账户 ${completed}/${total}…`), (kind, active) => {
+    }, (completed, total) => setStatus("", () => translate("trayPanel.refreshingAccounts", completed, total)), (kind, active) => {
       if (active) batchRefreshingProviders.add(kind); else batchRefreshingProviders.delete(kind);
       render();
     });
     await overview;
     await load({ viewing: false });
-    if (failures.length > 0) setStatus("bad", `刷新完成，${failures.length} 个账户失败。`);
-    else setStatus("ok", "已刷新账户与用量。");
+    if (failures.length > 0) setStatus("bad", () => translate("trayPanel.refreshCompletedFailedAccounts", failures.length));
+    else setStatus("ok", () => translate("trayPanel.accountsAndUsageRefreshed"));
   } finally {
     refreshing = false;
     render();
@@ -599,14 +601,14 @@ function overviewTip(text, statAtMs = 0) {
  */
 function applyDayHead() {
   const scope = dayScope();
-  el("#tray-ov-label").textContent = `${scope.word}已用`;
+  el("#tray-ov-label").textContent = translate("trayPanel.usage", scope.word);
   const d = new Date(scope.start);
   const label = el("#tray-day-label");
   label.textContent = !scope.past
-    ? "今天"
+    ? translate("usage.today")
     : scope.start === dayStartMs(-1)
-    ? "昨天"
-    : `${scope.ymd.slice(5)} 周${"日一二三四五六"[d.getDay()]}`;
+    ? translate("trayPanel.yesterday2")
+    : d.toLocaleDateString(locale(), { month: "short", day: "numeric", weekday: "short" });
   label.title = scope.ymd;
   el("#tray-day-next").disabled = !scope.past;
 }
@@ -841,7 +843,7 @@ function mergeModelTotals(lists) {
   const map = new Map();
   for (const list of lists || []) {
     for (const m of list || []) {
-      const key = m.model || "未知模型";
+      const key = m.model || translate("trayPanel.unknownModel");
       const cur = map.get(key) || { model: key, tokens: 0, usd: 0 };
       cur.tokens += Number(m.tokens) || 0;
       cur.usd += Number(m.usd) || 0;
@@ -862,7 +864,7 @@ function topModelShares(all, metric) {
   const top = list.slice(0, 5);
   const rest = list.slice(5);
   top.push({
-    model: "其他",
+    model: translate("shared.other"),
     tokens: rest.reduce((s, m) => s + m.tokens, 0),
     usd: rest.reduce((s, m) => s + m.usd, 0),
   });
@@ -990,7 +992,7 @@ const TOKEN_PIE_CFG = {
   valueOf: (r) => Math.round(r.tokens),
   titleOf: (r) => r.model,
   fmtValue: (v) => fmtTokens(v),
-  afterOf: (r) => (r.usd > 0 ? `等价 ${fmtUsd(r.usd)}` : ""),
+  afterOf: (r) => (r.usd > 0 ? translate("trayPanel.equivalent", fmtUsd(r.usd)) : ""),
 };
 const COST_PIE_CFG = {
   labelOf: (r) => shortModel(r.model),
@@ -1004,7 +1006,7 @@ const SOURCE_PIE_CFG = {
   valueOf: (r) => Math.round(r.tokens),
   titleOf: (r) => r.name,
   fmtValue: (v) => fmtTokens(v),
-  afterOf: (r) => (Number.isFinite(r.usd) ? `等价 ${fmtUsd(r.usd)}` : ""),
+  afterOf: (r) => (Number.isFinite(r.usd) ? translate("trayPanel.equivalent", fmtUsd(r.usd)) : ""),
 };
 
 /** 所选日 24 小时 Token 堆叠柱：每账户一段，0:00 → 23:00 从左到右，与统计页单日视图一致。 */
@@ -1033,7 +1035,7 @@ function makeHourlyStack(canvas, labels, datasets) {
               if (!items.length) return "";
               const chart = items[0].chart;
               const h = parseInt(chart.data.labels[items[0].dataIndex], 10);
-              return Number.isFinite(h) ? `${chart.$dayWord || "今天"} ${h}:00 – ${h + 1}:00` : "";
+              return Number.isFinite(h) ? `${chart.$dayWord || translate("usage.today")} ${h}:00 – ${h + 1}:00` : "";
             },
             label(ctx) {
               if (ctx.raw == null) return null;
@@ -1047,7 +1049,7 @@ function makeHourlyStack(canvas, labels, datasets) {
                 const v = ds.data[idx];
                 if (typeof v === "number") sum += v;
               }
-              return `该小时合计 ${fmtTokens(sum)}`;
+              return translate("trayPanel.hourlyTotal", fmtTokens(sum));
             },
           },
         },
@@ -1088,7 +1090,7 @@ function makeHourlyStack(canvas, labels, datasets) {
 function syncHourlyStack(sources, scope) {
   const wrap = overviewDom.bar.wrap;
   const ymd = scope.ymd;
-  overviewDom.bar.label.textContent = `${scope.word} Token（按小时）`;
+  overviewDom.bar.label.textContent = translate("trayPanel.tokensByHour", scope.word);
   const hours = [];
   for (let h = 0; h <= 23; h += 1) hours.push(h);
   const labels = hours.map((h) => `${h}:00`);
@@ -1150,13 +1152,13 @@ function ensureOverviewDom() {
   total.append(tokens, usd);
   // 图表顺序与统计页一致：24 小时柱在上（图例横排在图下），下方三个饼图三等分并排（各带竖排图例）；
   // 柱图标题随所选日更新
-  const bar = chartSection("今日 Token（按小时）", 128, { legendRow: true });
+  const bar = chartSection(translate("trayPanel.todaySTokensByHour"), 128, { legendRow: true });
   bar.wrap.hidden = true;
-  const tokenPie = chartSection("模型 Token", 104);
+  const tokenPie = chartSection(translate("trayPanel.tokensByModel"), 104);
   tokenPie.wrap.hidden = true;
-  const costPie = chartSection("模型费用", 104);
+  const costPie = chartSection(translate("trayPanel.costByModel"), 104);
   costPie.wrap.hidden = true;
-  const sourcePie = chartSection("来源", 104);
+  const sourcePie = chartSection(translate("pricing.source"), 104);
   sourcePie.wrap.hidden = true;
   const pieRow = document.createElement("div");
   pieRow.className = "tray-pie-row";
@@ -1172,7 +1174,7 @@ function renderOverview(data, statAtMs, scope) {
     || (data.modelTokenShares || []).some((m) => m && m.tokens > 0)
     || (data.modelCostShares || []).some((m) => m && m.usd > 0);
   if (!data.rows.length && !hasChart) {
-    overviewTip("暂无用量数据", statAtMs);
+    overviewTip(translate("trayPanel.noUsageData"), statAtMs);
     return;
   }
   ensureOverviewDom();
@@ -1189,7 +1191,7 @@ function renderOverview(data, statAtMs, scope) {
     syncMiniPie("modelCost", overviewDom.costPie, data.modelCostShares || [], COST_PIE_CFG);
     syncMiniPie("source", overviewDom.sourcePie, shares, SOURCE_PIE_CFG);
   } catch (error) {
-    console.error("托盘图表渲染失败，已重置实例：", error);
+    console.error(translate("trayPanel.trayChartRenderingFailedResettingChart"), error);
     destroyCharts();
   }
   // 三个饼图全空时整行收起，避免残留空隙
@@ -1349,7 +1351,7 @@ function buildOverviewData(scope, fetchErrors = new Map()) {
     });
   };
   pushScanEntry("local", "ChatGPT", peek.scan(""), peek.scanSeries(""));
-  pushScanEntry("local-claude", "本地 Claude", peek.claude(""), peek.claudeSeries(""));
+  pushScanEntry("local-claude", translate("trayPanel.localClaude"), peek.claude(""), peek.claudeSeries(""));
 
   entries.sort((a, b) => b.row.tokens - a.row.tokens);
   const modelTotals = mergeModelTotals(entries.map((e) => e.modelSource.models));
@@ -1373,7 +1375,7 @@ function applyOverviewErrors(data, fetchErrors, cursorAccounts) {
     ...cursorAccounts.map((a) => [a.id, trayAccountLabel(a)]),
     ...deletedRecords.map((record) => [record.accountId, deletedAccountLabel(record)]),
     ["local", "ChatGPT"],
-    ["local-claude", "本地 Claude"],
+    ["local-claude", translate("trayPanel.localClaude")],
   ];
   for (const [id, name] of sources) {
     if (!fetchErrors.has(id)) continue;
@@ -1491,12 +1493,12 @@ async function loadOverviewInner({ force = false, viewing = false } = {}) {
 
   applyOverviewErrors(cached.data, fetchErrors, cursorAccounts);
   if (cached.data.rows.length) renderOverview(cached.data, cached.at, scope);
-  else if (!jobs.length) overviewTip("暂无用量数据", cached.at);
+  else if (!jobs.length) overviewTip(translate("trayPanel.noUsageData"), cached.at);
 
   if (!jobs.length) return;
   overviewLoading = true;
   syncHeaderRefresh();
-  if (!cached.data.rows.length && !overviewDom) overviewTip(`正在统计${scope.word}用量…`, cached.at);
+  if (!cached.data.rows.length && !overviewDom) overviewTip(translate("trayPanel.calculatingUsageFor", scope.word), cached.at);
   try {
     // 各来源完成后分别重绘，本机统计不必等其它来源或服务器网络请求。
     await Promise.allSettled(jobs.map((job) => job.finally(() => {
@@ -1550,25 +1552,25 @@ function reloadCodexOverview() {
 /* ---------- 切换账户（弹窗内确认 + 分步进度 + 结果） ---------- */
 
 const SWITCH_ERRORS = {
-  account_not_verified: "账户未验证，请先在主窗口刷新。",
-  cursor_running: "Cursor 仍在运行，请关闭后重试。",
-  cursor_exe_not_found: "未找到 Cursor，请在主窗口设置路径。",
-  cursor_exe_invalid: "Cursor 路径无效，请在主窗口设置。",
-  state_db_not_found: "未找到 Cursor 认证库，请先启动过一次 Cursor。",
-  invalid_session_token: "Token 已失效，请在主窗口更新。",
-  poll_timeout: "未能换取登录凭证，请重试。",
-  session_exchange_failed: "换取登录凭证失败，请检查网络。",
-  not_codex_account: "该账户不是 ChatGPT 账户。",
-  codex_running: "ChatGPT 仍在运行，请关闭后重试。",
-  codex_exe_not_found: "未找到 ChatGPT，请在主窗口设置路径。",
-  codex_exe_invalid: "ChatGPT 路径无效，请在主窗口设置。",
-  codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
+  account_not_verified: "trayPanel.verifyThisAccountByRefreshingItIn",
+  cursor_running: "accounts.cursorIsStillRunningCloseItAnd",
+  cursor_exe_not_found: "trayPanel.cursorNotFoundSetItsPathIn",
+  cursor_exe_invalid: "trayPanel.invalidCursorPathCorrectItInThe",
+  state_db_not_found: "trayPanel.cursorAuthenticationDatabaseNotFoundStartCursor",
+  invalid_session_token: "trayPanel.tokenExpiredUpdateItInTheMain",
+  poll_timeout: "accounts.couldNotObtainLoginCredentialsTryAgain",
+  session_exchange_failed: "trayPanel.couldNotObtainLoginCredentialsCheckThe",
+  not_codex_account: "accounts.thisIsNotAChatgptAccount",
+  codex_running: "accounts.chatgptIsStillRunningCloseItAnd",
+  codex_exe_not_found: "trayPanel.chatgptNotFoundSetItsPathIn",
+  codex_exe_invalid: "trayPanel.invalidChatgptPathCorrectItInThe",
+  codex_no_refresh_token: "accounts.thisAccountHasNoRefreshTokenFor",
   // codex_refresh_denied 带归类后缀，见 switchErrorText
-  codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
-  not_claude_account: "该账户不是 Claude 账户。",
-  claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
-  claude_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
-  claude_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
+  codex_id_token_missing: "accounts.couldNotObtainTheIdTokenRequired",
+  not_claude_account: "accounts.thisIsNotAClaudeAccount",
+  claude_running: "accounts.claudeDesktopIsStillRunningCloseIt",
+  claude_no_refresh_token: "accounts.thisAccountHasNoRefreshTokenFor",
+  claude_refresh_denied: "accounts.theRefreshTokenIsInvalidUpdateIt",
 };
 
 // 切换弹窗：busy（检测中）→ confirm（可取消）→ steps（进行中，禁止关闭）→ result（仅「关闭」）
@@ -1623,7 +1625,7 @@ const trayModal = (() => {
     result.hidden = true;
     foot.hidden = false;
     btnCancel.hidden = false;
-    btnOk.textContent = confirmText || "切换";
+    btnOk.textContent = confirmText || translate("tray.switch");
     btnOk.classList.toggle("danger", !!danger);
     return new Promise((resolve) => { confirmResolve = resolve; });
   }
@@ -1681,7 +1683,7 @@ const trayModal = (() => {
     result.textContent = message;
     foot.hidden = false;
     btnCancel.hidden = true;
-    btnOk.textContent = "关闭";
+    btnOk.textContent = translate("common.close");
     btnOk.classList.remove("danger");
     stopAutoClose();
     if (ok) cancelAutoClose = startSwitchResultCountdown(btnOk, close);
@@ -1728,28 +1730,28 @@ async function doSwitch(id) {
       await switchLocalClients(account, load);
       return;
     }
-    trayModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
+    trayModal.openBusy(translate("accounts.switchLocalCursorLogin"), translate("accounts.detectingLocalCursorInstallation"));
     const st = await invoke("cursor_client_status");
     if (!st.exeConfigured) {
-      trayModal.finish(false, "未找到 Cursor 可执行文件，请到主窗口设置。");
+      trayModal.finish(false, translate("trayPanel.cursorExecutableNotFoundConfigureItIn"));
       return;
     }
     const agreed = await trayModal.toConfirm(st.running
-      ? { body: "Cursor 正在运行，切换将先关闭它，未保存内容可能丢失。确定继续？", confirmText: "关闭并切换", danger: true }
-      : { body: "将把该账户写入本机 Cursor 登录并启动 Cursor。确定继续？", confirmText: "切换" });
+      ? { body: translate("trayPanel.cursorIsRunningSwitchingWillCloseIt"), confirmText: translate("accounts.closeAndSwitch"), danger: true }
+      : { body: translate("accounts.useThisAccountForTheLocalLogin"), confirmText: translate("tray.switch") });
     if (!agreed) {
       trayModal.close();
       return;
     }
     trayModal.toSteps(st.running
-      ? ["关闭 Cursor", "换取登录凭证并写入", "启动 Cursor"]
-      : ["换取登录凭证并写入", "启动 Cursor"]);
+      ? [translate("accounts.closeCursor"), translate("accounts.obtainAndSaveLoginCredentials"), translate("accounts.startCursor")]
+      : [translate("accounts.obtainAndSaveLoginCredentials"), translate("accounts.startCursor")]);
     if (st.running) {
       trayModal.stepStart();
       const c = await invoke("cursor_client_close");
       if (!c.closed) {
         trayModal.stepFail();
-        trayModal.finish(false, "未能完全关闭 Cursor，请手动关闭后重试。");
+        trayModal.finish(false, translate("accounts.cursorDidNotFullyCloseCloseIt"));
         return;
       }
       trayModal.stepDone();
@@ -1760,25 +1762,25 @@ async function doSwitch(id) {
     trayModal.stepStart();
     const l = await invoke("cursor_client_launch");
     trayModal.stepDone();
-    trayModal.finish(true, l.launched ? "已切换账户并启动 Cursor。" : "已切换，请手动启动 Cursor。");
+    trayModal.finish(true, l.launched ? translate("accounts.accountSwitchedAndCursorStarted") : translate("trayPanel.accountSwitchedStartCursorManually"));
   } catch (error) {
-    const code = resetError(error);
+    const code = errorCode(error);
     // 写登录文件失败的错误码带冒号细节（codex_auth_write_failed:…），按前缀匹配
     const deniedWhy = {
-      expired: "Refresh Token 已过期",
-      reused: "Refresh Token 已被使用过（已被别处轮换）",
-      revoked: "Refresh Token 已被吊销",
-      invalid: "Refresh Token 已失效",
+      expired: translate("accounts.theRefreshTokenHasExpired"),
+      reused: translate("trayPanel.theRefreshTokenWasAlreadyRotatedElsewhere"),
+      revoked: translate("trayPanel.theRefreshTokenWasRevoked"),
+      invalid: translate("accounts.theRefreshTokenIsInvalid"),
     };
     const text = code.startsWith("codex_auth_write_failed")
-      ? "写入本机 ChatGPT 登录文件失败，请检查文件权限后重试。"
+      ? translate("accounts.couldNotWriteTheLocalChatgptLogin")
       : code.startsWith("claude_creds_write_failed")
-      ? "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。"
+      ? translate("accounts.couldNotWriteLocalClaudeCodeCredentials")
       : code.startsWith("codex_refresh_denied")
-      ? `${deniedWhy[code.split(":")[1]] || deniedWhy.invalid}，请在主窗口编辑账户更新凭据，或用「强制写入并启动」。`
-      : SWITCH_ERRORS[code] || code;
+      ? translate("trayPanel.editTheAccountSCredentialsInThe", deniedWhy[code.split(":")[1]] || deniedWhy.invalid)
+      : (SWITCH_ERRORS[code] && translate(SWITCH_ERRORS[code])) || code;
     trayModal.stepFail();
-    trayModal.finish(false, `切换失败：${text}`);
+    trayModal.finish(false, translate("accounts.switchFailed", text));
   } finally {
     switching = false;
     render();
@@ -1795,7 +1797,7 @@ rowOrder = initRowOrder(el("#tray-list"), {
   ids: () => accountOrder.rows(accounts).map(a => a.id),
   scrollBox: el("#tray-list"), render,
   save: accountOrder.move,
-  onError: () => setStatus("bad", "账户顺序未保存，请重试。"),
+  onError: () => setStatus("bad", () => translate("accounts.accountOrderCouldNotBeSavedTry")),
 });
 el("#tray-add").addEventListener("click", () => { void invoke("tray_open_main", { addAccount: true }); });
 el("#tray-refresh").addEventListener("click", refreshAll);
@@ -1891,6 +1893,19 @@ function scheduleOverviewFromCache(key) {
   clearTimeout(usageCacheTimer);
   usageCacheTimer = setTimeout(() => { void loadOverview(); }, 250);
 }
+window.addEventListener("uilanguagechange", () => {
+  render();
+  applyDayHead();
+  syncHeaderRefresh();
+  updateNotice(lastUpdateView);
+  if (trayTab === "overview") {
+    teardownOverview();
+    const scope = dayScope();
+    const next = buildOverviewData(scope, overviewErrors);
+    applyOverviewErrors(next.data, overviewErrors, accounts.filter((a) => a.kind === "cursor" || a.kind === "opencode"));
+    renderOverview(next.data, next.at, scope);
+  }
+});
 window.addEventListener("storage", (event) => {
   if (!event.key || !event.key.startsWith(USAGE_CACHE_PREFIX)) return;
   scheduleOverviewFromCache(event.key);

@@ -1,3 +1,4 @@
+import { hasMessage, translate } from "./i18n.js";
 import { el, invoke, fmtDateMs, resetError, toast, dismissToast } from "./shared.js";
 import { onAccountsChanged } from "./accounts.js";
 
@@ -7,18 +8,18 @@ import { onAccountsChanged } from "./accounts.js";
 // 这里只维护级别与分类的展示文案，并按两者筛选。
 
 const LEVEL_META = {
-  info: { label: "信息", cls: "" },
-  warn: { label: "警告", cls: "warn" },
-  error: { label: "错误", cls: "bad" },
+  info: { get label() { return translate("audit.info"); }, cls: "" },
+  warn: { get label() { return translate("audit.warning"); }, cls: "warn" },
+  error: { get label() { return translate("audit.error"); }, cls: "bad" },
 };
 
 // 与 index.html 里 #audit-category 的选项一致
 const CATEGORY_LABELS = {
-  account: "账户管理",
-  state: "状态与刷新",
-  credential: "凭据与同步",
-  usage: "用量数据",
-  settings: "设置与系统",
+  account: "app.accounts",
+  state: "audit.statusAndRefresh",
+  credential: "audit.credentialsAndSync",
+  usage: "audit.usageData",
+  settings: "audit.settingsAndSystem",
 };
 
 let entries = [];
@@ -60,10 +61,11 @@ function render() {
       levelTd.append(tag);
       const categoryTd = document.createElement("td");
       categoryTd.className = "audit-category";
-      categoryTd.textContent = CATEGORY_LABELS[entry.category] || entry.category || "";
+      categoryTd.textContent = (CATEGORY_LABELS[entry.category] && translate(CATEGORY_LABELS[entry.category])) || entry.category || "";
       const eventTd = document.createElement("td");
       eventTd.className = "audit-event";
-      eventTd.textContent = entry.label || entry.event || "事件";
+      const eventKey = "audit.event." + entry.event;
+      eventTd.textContent = hasMessage(eventKey) ? translate(eventKey) : entry.label || entry.event || translate("audit.event");
       const msgTd = document.createElement("td");
       msgTd.className = "audit-message";
       msgTd.textContent = entry.message || "";
@@ -72,9 +74,9 @@ function render() {
     })
   );
   el("#audit-empty").hidden = rows.length > 0;
-  const filtered = rows.length !== entries.length ? ` · 筛选后 ${rows.length} 条` : "";
-  const capped = total > entries.length ? `（显示最近 ${entries.length} 条）` : "";
-  el("#audit-count").textContent = total ? `共 ${total} 条${filtered}${capped}` : "";
+  const filtered = rows.length !== entries.length ? translate("audit.filtered", rows.length) : "";
+  const capped = total > entries.length ? translate("audit.showingTheLatest", entries.length) : "";
+  el("#audit-count").textContent = total ? translate("audit.entries", total, filtered, capped) : "";
 }
 
 async function load() {
@@ -87,7 +89,7 @@ async function load() {
     clearStatus();
     render();
   } catch (error) {
-    setStatus("bad", `加载审计日志失败：${resetError(error)}`);
+    setStatus("bad", () => translate("audit.couldNotLoadTheAuditLog", resetError(error)));
   } finally {
     loading = false;
   }
@@ -99,7 +101,7 @@ function disarmClear() {
     clearArmed = null;
   }
   const btn = el("#audit-clear");
-  btn.textContent = "清空日志";
+  btn.textContent = translate("audit.clearLog");
   btn.classList.remove("danger");
 }
 
@@ -111,19 +113,23 @@ async function onClearClick() {
       entries = [];
       total = 0;
       render();
-      setStatus("ok", "审计日志已清空。");
+      setStatus("ok", () => translate("audit.auditLogCleared"));
     } catch (error) {
-      setStatus("bad", `清空失败：${resetError(error)}`);
+      setStatus("bad", () => translate("audit.couldNotClearTheLog", resetError(error)));
     }
     return;
   }
   const btn = el("#audit-clear");
-  btn.textContent = "确认清空？";
+  btn.textContent = translate("audit.confirmClear");
   btn.classList.add("danger");
   clearArmed = setTimeout(disarmClear, 3000);
 }
 
 export function initAudit() {
+  window.addEventListener("uilanguagechange", () => {
+    render();
+    el("#audit-clear").textContent = clearArmed == null ? translate("audit.clearLog") : translate("audit.confirmClear");
+  });
   el("#audit-refresh").addEventListener("click", () => {
     void load();
   });

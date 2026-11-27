@@ -538,7 +538,7 @@ pub async fn claude_desktop_binding_start(
         let empty = Snapshot {version:1,owner:before.owner.clone(),identity:None,auth:BTreeMap::new(),files:BTreeMap::new()};
         let prepared = apply(&root,&empty).and_then(|_| if claude_local::launch_desktop() {Ok(())} else {Err("client_launch_failed".into())});
         if let Err(error) = prepared { rollback(&journal)?; return Err(error); }
-        Ok(json!({"state":"pending","id":journal.id,"instructions":"请在 Claude Desktop 登录此账户，完成后点击「完成绑定」。"}))
+        Ok(json!({"state":"pending","id":journal.id,"instructionsKey":"clients.finishClaudeBinding"}))
     }).await.map_err(|_| "claude_desktop_binding_failed")??;
     if let Some(id) = result["id"].as_str() {
         *pending().lock().map_err(|_| "state_lock_poisoned")? = Some((id.into(), operation));

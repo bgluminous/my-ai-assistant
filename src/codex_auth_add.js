@@ -1,3 +1,4 @@
+import { bindText, translate } from "./i18n.js";
 import { el, invoke, fillStatus } from "./shared.js";
 import { codexAuthErrorMessage } from "./codex_auth_editor.js";
 
@@ -63,9 +64,9 @@ export function createCodexAuthAdder({ isSaving, clearStatus }) {
       if (!active || !selected) return;
       file = selected;
       name.textContent = file.name;
-      fillStatus(fileStatus, "ok", "文件校验通过，点击保存添加账户。");
+      fillStatus(fileStatus, "ok", () => translate("codexAuthAdd.fileValidatedSelectSaveToAddThe"));
     } catch (error) {
-      if (active && !showError(error)) fillStatus(status, "bad", "无法载入 Auth 文件，请重试。");
+      if (active && !showError(error)) fillStatus(status, "bad", () => translate("codexAuthAdd.couldNotLoadTheAuthFileTry"));
     } finally {
       if (active) { busy = false; restoreControls(); }
     }
@@ -104,7 +105,7 @@ export function createCodexAuthAdder({ isSaving, clearStatus }) {
       }
       raw.value = "";
       file = null;
-      name.textContent = "尚未选择文件";
+      bindText(name, () => translate("account.noFileSelected"));
       fileStatus.hidden = true;
       fileStatus.textContent = "";
       clear();

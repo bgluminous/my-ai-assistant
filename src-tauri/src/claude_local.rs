@@ -594,7 +594,7 @@ pub(crate) async fn switch_credentials(app: AppHandle, id: String) -> Result<Swi
 
     Ok(SwitchResult {
         switched: true,
-        message: "已写入本地登录。".into(),
+        message: "accounts.localLoginWritten".into(),
         exchanged: None,
     })
 }
@@ -655,7 +655,7 @@ pub async fn claude_logout_local() -> Result<LogoutResult, String> {
     if !was_logged_in {
         return Ok(LogoutResult {
             was_logged_in: false,
-            message: "本机 Claude Code 当前未登录，无需退出。".into(),
+            message: "native.claudeCodeIsAlreadySignedOutLocally".into(),
         });
     }
     audit::log(
@@ -665,7 +665,7 @@ pub async fn claude_logout_local() -> Result<LogoutResult, String> {
     );
     Ok(LogoutResult {
         was_logged_in: true,
-        message: "已退出本机 Claude Code 登录，下次使用需重新登录或从本工具切换账户。".into(),
+        message: "native.signedOutOfClaudeCodeLocallySign".into(),
     })
 }
 

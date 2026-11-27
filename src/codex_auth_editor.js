@@ -1,22 +1,23 @@
+import { errorCode, translate } from "./i18n.js";
 import { el, invoke, resetError, fillStatus } from "./shared.js";
 
 export function codexAuthErrorMessage(error) {
-  const code = resetError(error);
+  const code = errorCode(error);
   const pos = /^codex_auth_json:(\d+):(\d+)$/.exec(code);
   const messages = {
-    codex_auth_conflict: "此账户的凭据已更新。草稿已保留，重新载入会替换凭据草稿。",
-    codex_auth_object: "完整 Auth 必须是 JSON 对象。",
-    codex_auth_access_token: "请填写有效的 tokens.access_token。",
-    codex_auth_refresh_token: "tokens.refresh_token 应为字符串或 null。",
-    codex_auth_unreadable: "无法读取此账户的 Auth 副本。",
-    codex_auth_missing: "此账户还没有可读取的 Auth 凭据。",
-    codex_auth_file_read: "无法读取所选文件，请检查文件内容和读取权限。",
-    codex_auth_file_missing: "请选择 auth.json 文件。",
-    codex_auth_text_missing: "请粘贴完整的 auth.json 内容。",
-    duplicate_account: "该账号已存在，请检查凭据所属的账户。",
-    not_found: "此账户已被删除。",
+    codex_auth_conflict: translate("codexAuthEditor.credentialsChangedYourDraftIsKeptReloading"),
+    codex_auth_object: translate("codexAuthEditor.fullAuthMustBeAJsonObject"),
+    codex_auth_access_token: translate("codexAuthEditor.enterAValidTokensAccessToken"),
+    codex_auth_refresh_token: translate("codexAuthEditor.tokensRefreshTokenMustBeAString"),
+    codex_auth_unreadable: translate("codexAuthEditor.couldNotReadTheSavedAuthCopy"),
+    codex_auth_missing: translate("codexAuthEditor.noAuthCredentialsAreAvailableForThis"),
+    codex_auth_file_read: translate("codexAuthEditor.couldNotReadTheSelectedFileCheck"),
+    codex_auth_file_missing: translate("codexAuthEditor.selectAnAuthJsonFile"),
+    codex_auth_text_missing: translate("codexAuthEditor.pasteTheCompleteAuthJsonFileContents"),
+    duplicate_account: translate("codexAuthEditor.accountAlreadyExistsCheckWhichAccountOwns"),
+    not_found: translate("accounts.thisAccountWasDeleted"),
   };
-  return pos ? `JSON 格式错误，第 ${pos[1]} 行，第 ${pos[2]} 列。` : messages[code];
+  return pos ? translate("codexAuthEditor.invalidJsonAtLineColumn", pos[1], pos[2]) : messages[code];
 }
 
 // 一个编辑会话只持有当前账户的草稿。关闭后到达的 IPC 回复不得再写入表单。
@@ -48,7 +49,7 @@ export function createCodexAuthEditor({ id, codexAuthRevision }) {
     return current.accessToken === projected.accessToken && current.refreshToken === projected.refreshToken ? null : current;
   }
   function showError(error) {
-    const code = resetError(error);
+    const code = errorCode(error);
     const message = codexAuthErrorMessage(error);
     if (!message) return false;
     fillStatus(status, "bad", message);
@@ -107,7 +108,7 @@ export function createCodexAuthEditor({ id, codexAuthRevision }) {
       switched = true;
     } catch (error) {
       if (active && !showError(error)) {
-        fillStatus(status, "bad", "无法载入或转换 Auth，请重试。");
+        fillStatus(status, "bad", () => translate("codexAuthEditor.couldNotLoadOrConvertAuthTry"));
       }
       if (active && discard) reload.hidden = false;
     } finally {

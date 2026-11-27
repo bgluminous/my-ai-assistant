@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 import { parseHTML } from "linkedom";
 
 const code = await readFile(new URL("../src/sync_progress.js", import.meta.url), "utf8");
@@ -33,9 +34,10 @@ async function fixture(initial = snapshot(1), delayed = null) {
     this.setExport("resetError", error => String(error).replace(/^Error: /, ""));
   }, { context });
   const errorModule = new vm.SourceTextModule(errors, { context });
-  await errorModule.link(() => shared);
+  const language = await i18nFixture(context);
+  await errorModule.link(path => path === "./i18n.js" ? language : shared);
   const module = new vm.SourceTextModule(code, { context });
-  await module.link(path => path === "./shared.js" ? shared : errorModule);
+  await module.link(path => path === "./i18n.js" ? language : path === "./shared.js" ? shared : errorModule);
   await module.evaluate();
   const api = module.namespace;
   const node = id => document.getElementById(id);

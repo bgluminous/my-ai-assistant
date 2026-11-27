@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 import { parseHTML } from "linkedom";
 
 const source = await readFile(new URL("../src/app_update.js", import.meta.url), "utf8");
@@ -34,7 +35,7 @@ async function fixture(initial = defaults, responses = {}) {
   const context = vm.createContext({ console, URL, document, setTimeout, clearTimeout,
     requestAnimationFrame: callback => { const id = ++frameId; frames.set(id, callback); return id; },
     cancelAnimationFrame: id => frames.delete(id),
-    window: { __TAURI__: { core: {}, window: { getCurrentWindow: () => ({ show() { shown++; }, setFocus() { shown++; } }) } } },
+    window: { addEventListener() {}, __TAURI__: { core: {}, window: { getCurrentWindow: () => ({ show() { shown++; }, setFocus() { shown++; } }) } } },
   });
   const invoke = async (command, args) => {
     calls.push({ command, args });
@@ -55,7 +56,7 @@ async function fixture(initial = defaults, responses = {}) {
   const history = new vm.SourceTextModule(historySource, { context });
   const marked = new vm.SourceTextModule(markedSource, { context });
   const module = new vm.SourceTextModule(source, { context });
-  const modules = { "./shared.js": shared, "./update_status.js": status, "./release_notes.js": notes,
+  const modules = { "./i18n.js": await i18nFixture(context), "./shared.js": shared, "./update_status.js": status, "./release_notes.js": notes,
     "./update_history.js": history, "./vendor/marked.esm.js": marked, "./modal.js": new vm.SourceTextModule(modalSource, { context }) };
   await module.link(name => { assert(modules[name], `Unknown import ${name}`); return modules[name]; });
   await module.evaluate();
@@ -268,7 +269,7 @@ test("current notes failures retain cached text without blocking the new version
   assert.equal(f.nodes.get("#app-update-install").hidden, false);
   assert.equal(f.nodes.get("#app-update-install").disabled, false);
   f.emit({ revision: 2, phase: "available", latestVersion: "1.4.0", currentChangelogError });
-  assert.match(f.nodes.get("#app-update-current-notes").textContent, /获取失败.*请重试/);
+  assert.match(f.nodes.get("#app-update-current-notes").textContent, /获取失败.*无法连接更新源/);
   assert.equal(f.nodes.get("#app-update-current-notes-status").hidden, true);
 });
 test("progress, cancellation, stale events and required updates remain visible", async () => {

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI 助手 · 用量与费用</title>
+    <title data-i18n="app.title"></title>
     <script>
       // 在样式解析前恢复主题偏好，避免闪烁。
       (function () {
@@ -23,42 +23,42 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"><img src="app-icon.png" alt="" /></span>
           <div>
-            <h1>AI 助手 · 用量与费用</h1>
-            <p class="subtitle">账户额度、Token 用量与按官方 API 价格折算的等价费用。</p>
+            <h1 data-i18n="app.title"></h1>
+            <p class="subtitle" data-i18n="app.accountQuotasTokenUsageAndEquivalentCosts"></p>
           </div>
         </div>
         <div class="header-actions">
-          <button id="app-update-chip" class="chip" type="button" hidden>检查更新</button>
-          <button id="pricing-chip" class="chip" type="button" title="点击复制价格表路径">价格表：—</button>
-          <button id="proxy-btn" class="icon-btn" type="button" title="代理设置" aria-label="代理设置">
+          <button id="app-update-chip" class="chip" type="button" hidden data-i18n="updater.checkForUpdates"></button>
+          <button id="pricing-chip" class="chip" type="button" data-i18n-title="app.copyThePricingFilePath" data-i18n="pricing.placeholder"></button>
+          <button id="proxy-btn" class="icon-btn" type="button" data-i18n-title="app.proxySettings" data-i18n-aria-label="app.proxySettings">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="3" y1="12" x2="21" y2="12"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
           </button>
-          <button id="settings-btn" class="icon-btn" type="button" title="设置" aria-label="设置">
+          <button id="settings-btn" class="icon-btn" type="button" data-i18n-title="common.settings" data-i18n-aria-label="common.settings">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
-          <button id="theme-toggle" class="icon-btn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
+          <button id="theme-toggle" class="icon-btn" type="button" data-i18n-title="app.switchBetweenDarkAndLightMode" data-i18n-aria-label="app.toggleTheme">
             <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
             <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
         </div>
       </header>
 
-      <nav class="tabs" role="tablist" aria-label="功能">
+      <nav class="tabs" role="tablist" data-i18n-aria-label="app.navigation">
         <button class="tab" role="tab" data-panel="accounts-panel" aria-selected="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          <span>账户管理</span>
+          <span data-i18n="app.accounts"></span>
         </button>
         <button class="tab" role="tab" data-panel="usage-panel" aria-selected="false" tabindex="-1">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          <span>用量统计</span>
+          <span data-i18n="app.usage"></span>
         </button>
         <button class="tab" role="tab" data-panel="audit-panel" aria-selected="false" tabindex="-1">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          <span>审计日志</span>
+          <span data-i18n="app.auditLog"></span>
         </button>
         <button class="tab" role="tab" data-panel="about-panel" aria-selected="false" tabindex="-1">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-          <span>关于</span>
+          <span data-i18n="app.about"></span>
         </button>
       </nav>
 
@@ -66,22 +66,22 @@
       <section id="accounts-panel" class="panel" role="tabpanel">
         <div class="surface">
           <div class="section-heading">
-            <h3>我的账户</h3>
+            <h3 data-i18n="accounts.myAccounts"></h3>
             <div class="heading-side">
               <span id="accounts-count" class="muted small"></span>
-              <button id="accounts-refresh" class="icon-action" type="button" title="刷新全部账户" aria-label="刷新全部账户">
+              <button id="accounts-refresh" class="icon-action" type="button" data-i18n-title="accounts.refreshAllAccounts" data-i18n-aria-label="accounts.refreshAllAccounts">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
               </button>
-              <button id="accounts-import" class="icon-action" type="button" title="导入账户" aria-label="导入账户">
+              <button id="accounts-import" class="icon-action" type="button" data-i18n-title="dialog.importAccounts" data-i18n-aria-label="dialog.importAccounts">
                 <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
               </button>
-              <button id="accounts-export" class="icon-action" type="button" title="导出全部" aria-label="导出全部">
+              <button id="accounts-export" class="icon-action" type="button" data-i18n-title="accounts.exportAll" data-i18n-aria-label="accounts.exportAll">
                 <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m-5 5 5-5 5 5M4 16v4h16v-4"/></svg>
               </button>
-              <button id="accounts-logout" class="icon-action" type="button" title="退出本机登录" aria-label="退出本机登录" aria-haspopup="dialog">
+              <button id="accounts-logout" class="icon-action" type="button" aria-haspopup="dialog" data-i18n-title="accounts.signOutLocally" data-i18n-aria-label="accounts.signOutLocally">
                 <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v16h5m5-13 5 5-5 5m-6-5h11"/></svg>
               </button>
-              <button id="accounts-add" class="icon-action" type="button" title="添加账户" aria-label="添加账户" aria-haspopup="dialog">
+              <button id="accounts-add" class="icon-action" type="button" aria-haspopup="dialog" data-i18n-title="accounts.add" data-i18n-aria-label="accounts.add">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               </button>
             </div>
@@ -92,12 +92,12 @@
                 <col class="col-grip" /><col /><col class="col-state" /><col class="col-plan" /><col /><col class="col-ondemand" /><col class="col-time" /><col class="col-actions" />
               </colgroup>
               <thead><tr>
-                <th aria-label="排序"></th><th>账户</th><th>状态</th><th>套餐</th><th>用量摘要</th>
-                <th>超额 / 余额</th><th>上次刷新</th><th>操作</th>
+                <th data-i18n-aria-label="accounts.order"></th><th data-i18n="common.account"></th><th data-i18n="accounts.status"></th><th data-i18n="accounts.plan"></th><th data-i18n="accounts.usageSummary"></th>
+                <th data-i18n="accounts.overageBalance"></th><th data-i18n="accounts.lastRefreshed"></th><th data-i18n="accounts.actions"></th>
               </tr></thead>
               <tbody id="accounts-body"></tbody>
             </table>
-            <p id="accounts-empty" class="muted empty">点击右上角的「＋」添加第一个账户。</p>
+            <p id="accounts-empty" class="muted empty" data-i18n="accounts.useTheButtonAboveToAddYour"></p>
           </div>
         </div>
       </section>
@@ -107,50 +107,50 @@
         <!-- 统计进行中提示：窗口顶部居中悬浮（fixed，不占布局、不挡点击），随本面板一起隐藏；
              文案由 usage.js 按有无已渲染数据切换「统计中… / 更新中…」 -->
         <div id="usage-loading" class="loading-float" role="status" hidden>
-          <span class="spinner" aria-hidden="true"></span><span id="usage-loading-text">统计中…</span>
+          <span class="spinner" aria-hidden="true"></span><span id="usage-loading-text" data-i18n="usage.calculating"></span>
         </div>
         <!-- 筛选工具栏：统计对象 / 时间跨度两组，右侧刷新与数据更新时间 -->
         <div class="surface usage-toolbar">
           <div class="toolbar-group">
-            <span class="toolbar-label">统计对象</span>
-            <div id="usage-sources" class="chip-row" role="group" aria-label="统计对象"></div>
+            <span class="toolbar-label" data-i18n="usage.usageSource"></span>
+            <div id="usage-sources" class="chip-row" role="group" data-i18n-aria-label="usage.usageSource"></div>
           </div>
           <div class="toolbar-group">
-            <span class="toolbar-label">时间范围</span>
+            <span class="toolbar-label" data-i18n="usage.dateRange"></span>
             <!-- 周期：日 / 周 / 月 / 全部 / 自定义；默认「日」= 今天。所有视图共用 -->
-            <div id="usage-period" class="span-tabs" role="tablist" aria-label="时间周期">
-              <button type="button" class="seg active" role="tab" aria-selected="true" data-period="day">日</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-period="week">周</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-period="month">月</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-period="all">全部</button>
-              <button type="button" class="seg" role="tab" aria-selected="false" data-period="custom">自定义</button>
+            <div id="usage-period" class="span-tabs" role="tablist" data-i18n-aria-label="usage.period">
+              <button type="button" class="seg active" role="tab" aria-selected="true" data-period="day" data-i18n="usage.day"></button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="week" data-i18n="usage.week"></button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="month" data-i18n="usage.month"></button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="all" data-i18n="usage.allTime"></button>
+              <button type="button" class="seg" role="tab" aria-selected="false" data-period="custom" data-i18n="usage.custom"></button>
             </div>
             <!-- 区间导航：左右滑动一个周期（自定义按区间长度平移），不越过今天；「全部」时隐藏 -->
             <div id="usage-range-nav" class="range-nav">
-              <button id="usage-range-prev" class="icon-action" type="button" title="上一个周期" aria-label="上一个周期">
+              <button id="usage-range-prev" class="icon-action" type="button" data-i18n-title="usage.previousPeriod" data-i18n-aria-label="usage.previousPeriod">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
               </button>
-              <span id="usage-range-label" class="range-label">今天</span>
-              <button id="usage-range-next" class="icon-action" type="button" title="下一个周期" aria-label="下一个周期" disabled>
+              <span id="usage-range-label" class="range-label" data-i18n="usage.today"></span>
+              <button id="usage-range-next" class="icon-action" type="button" disabled data-i18n-title="usage.nextPeriod" data-i18n-aria-label="usage.nextPeriod">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
               </button>
             </div>
             <!-- 自定义起止日期（含首末日，末日不晚于今天） -->
             <div id="usage-range-custom" class="range-custom" hidden>
-              <input id="usage-range-start" type="date" aria-label="开始日期" />
+              <input id="usage-range-start" type="date" data-i18n-aria-label="usage.startDate" />
               <span class="muted small">～</span>
-              <input id="usage-range-end" type="date" aria-label="结束日期" />
-              <button id="usage-range-apply" class="secondary compact" type="button">查询</button>
+              <input id="usage-range-end" type="date" data-i18n-aria-label="usage.endDate" />
+              <button id="usage-range-apply" class="secondary compact" type="button" data-i18n="usage.runQuery"></button>
             </div>
             <div class="toolbar-side">
               <span id="usage-updated" class="muted small"></span>
-              <button id="usage-raw" class="icon-action" type="button" title="查看该账户在当前时间范围内的原始账单（逐笔用量事件，来自本机事件库）" aria-label="查看原始账单" hidden>
+              <button id="usage-raw" class="icon-action" type="button" hidden data-i18n-title="usage.viewIndividualUsageEventsForThisAccount" data-i18n-aria-label="usage.viewUsageEvents">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
               </button>
-              <button id="usage-snapshot" class="icon-action" type="button" title="生成该账户的全量用量快照图片（账户失效后使用本地存档数据）" aria-label="生成用量快照" hidden>
+              <button id="usage-snapshot" class="icon-action" type="button" hidden data-i18n-title="usage.saveAnAllTimeUsageSnapshotFor" data-i18n-aria-label="usage.saveUsageSnapshot">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
               </button>
-              <button id="usage-refresh" class="icon-action" type="button" title="重新统计当前视图，并刷新相关账户状态" aria-label="刷新">
+              <button id="usage-refresh" class="icon-action" type="button" data-i18n-title="usage.recalculateThisViewAndRefreshTheAssociated" data-i18n-aria-label="usage.refresh">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
               </button>
             </div>
@@ -163,15 +163,15 @@
         <div id="usage-local-form" class="surface" hidden>
           <div class="row wrap">
             <label class="inline">CODEX_HOME
-              <input id="usage-codex-home" type="text" readonly title="在设置中的 GPT 用量同步内修改采集目录" placeholder="默认目录（在设置中修改）" />
+              <input id="usage-codex-home" type="text" readonly data-i18n-title="usage.changeTheCollectionFolderInSettingsUnder" data-i18n-placeholder="usage.defaultFolderChangeInSettings" />
             </label>
-            <button id="usage-codex-scan" class="secondary" type="button">重新扫描</button>
-            <label class="inline">设备
-              <select id="usage-codex-device"><option value="">全部设备</option></select>
+            <button id="usage-codex-scan" class="secondary" type="button" data-i18n="usage.rescan"></button>
+            <label class="inline"><span data-i18n="usage.device"></span>
+              <select id="usage-codex-device"><option value="" data-i18n="usage.allDevices"></option></select>
             </label>
-            <button id="usage-codex-clear" class="secondary" type="button" disabled>清理此设备缓存</button>
+            <button id="usage-codex-clear" class="secondary" type="button" disabled data-i18n="usage.clearThisDeviceSCache"></button>
           </div>
-          <p class="muted small">汇总 GPT 用量存档，按当前价格表折算费用。配置同步后包含其他设备，复制的日志在总计中去重；日志没有账户归属。设备表示采集来源，各设备单独统计可能重叠。</p>
+          <p class="muted small" data-i18n="usage.includesArchivedGptUsageAtCurrentApi"></p>
           <p id="usage-codex-device-error" class="status bad" role="status" hidden></p>
         </div>
 
@@ -179,11 +179,11 @@
         <div id="usage-claude-form" class="surface" hidden>
           <div class="row wrap">
             <label class="inline">CLAUDE_CONFIG_DIR
-              <input id="usage-claude-home" type="text" spellcheck="false" placeholder="留空使用默认 ~/.claude（支持逗号分隔多个目录）" />
+              <input id="usage-claude-home" type="text" spellcheck="false" data-i18n-placeholder="usage.leaveBlankToUseClaudeSeparateFolders" />
             </label>
-            <button id="usage-claude-scan" class="secondary" type="button">重新扫描</button>
+            <button id="usage-claude-scan" class="secondary" type="button" data-i18n="usage.rescan"></button>
           </div>
-          <p class="muted small">统计本机 Claude Code 会话日志的 token 用量并按官方 API 价折算，为本机所有 Claude 登录的合并结果（日志不含账户标识）；统计范围随上方时间跨度；账户额度窗口见「账户管理」。</p>
+          <p class="muted small" data-i18n="usage.tokenUsageAndEquivalentApiCostsFrom"></p>
         </div>
 
         <!-- 加载骨架：新视图 / 新跨度无缓存可即时渲染时占位，首个结果渲染后隐藏；
@@ -214,54 +214,54 @@
         <section id="usage-results" class="usage-results" hidden>
           <div class="cards">
             <div class="card highlight">
-              <span class="card-label">总等价费用（官方 API 价）</span>
+              <span class="card-label" data-i18n="usage.totalEquivalentCostAtApiRates"></span>
               <span id="sum-equivalent" class="card-value">—</span>
             </div>
             <div class="card" id="card-plan" hidden>
-              <span class="card-label">套餐月费 · 等价倍数</span>
+              <span class="card-label" data-i18n="usage.monthlyFeesCostRatio"></span>
               <span id="sum-plan" class="card-value">—</span>
             </div>
             <div class="card">
-              <span class="card-label">总 Token</span>
+              <span class="card-label" data-i18n="usage.totalTokens"></span>
               <span id="sum-tokens" class="card-value">—</span>
             </div>
             <div class="card">
-              <span class="card-label">未定价模型</span>
+              <span class="card-label" data-i18n="usage.unpricedModels"></span>
               <span id="sum-unpriced" class="card-value">—</span>
             </div>
           </div>
           <div id="usage-meta" class="muted small"></div>
           <div id="usage-breakdown" class="cost-breakdown" hidden></div>
           <div class="charts">
-            <div class="chart-box chart-box-wide"><h4 id="chart-daily-title">按日 Token</h4><div class="chart-canvas"><canvas id="chart-daily"></canvas></div></div>
+            <div class="chart-box chart-box-wide"><h4 id="chart-daily-title" data-i18n="usage.dailyTokens"></h4><div class="chart-canvas"><canvas id="chart-daily"></canvas></div></div>
             <!-- 环形图的图例放在画布外的定宽列表里：四张图的画布尺寸一致、圆环同大，
                  过长的模型名按省略号截断（悬停看全名），点击图例项隐藏 / 恢复对应扇区 -->
-            <div class="chart-box"><h4>各模型 Token 数量</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div><ul id="legend-tokens" class="pie-legend" aria-label="图例"></ul></div></div>
-            <div class="chart-box"><h4>各模型等价费用（USD）</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-models"></canvas></div><ul id="legend-models" class="pie-legend" aria-label="图例"></ul></div></div>
-            <div class="chart-box"><h4>Token 构成</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div><ul id="legend-doughnut" class="pie-legend" aria-label="图例"></ul></div></div>
-            <div class="chart-box"><h4>账号 / 来源 Token 构成</h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-sources"></canvas></div><ul id="legend-sources" class="pie-legend" aria-label="图例"></ul></div></div>
+            <div class="chart-box"><h4 data-i18n="usage.tokensByModel"></h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-tokens"></canvas></div><ul id="legend-tokens" class="pie-legend" data-i18n-aria-label="usage.legend"></ul></div></div>
+            <div class="chart-box"><h4 data-i18n="usage.equivalentCostByModelUsd"></h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-models"></canvas></div><ul id="legend-models" class="pie-legend" data-i18n-aria-label="usage.legend"></ul></div></div>
+            <div class="chart-box"><h4 data-i18n="usage.tokenBreakdown"></h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-doughnut"></canvas></div><ul id="legend-doughnut" class="pie-legend" data-i18n-aria-label="usage.legend"></ul></div></div>
+            <div class="chart-box"><h4 data-i18n="usage.tokensByAccountOrSource"></h4><div class="pie-layout"><div class="chart-canvas"><canvas id="chart-sources"></canvas></div><ul id="legend-sources" class="pie-legend" data-i18n-aria-label="usage.legend"></ul></div></div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>模型</th><th class="num">输入</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="num">输出</th><th class="num">合计 Token</th><th class="num">等价 API 价</th>
+                  <th data-i18n="usage.model"></th><th class="num" data-i18n="usage.input"></th><th class="num" data-i18n="usage.cacheRead"></th><th class="num" data-i18n="usage.cacheWrite"></th><th class="num" data-i18n="usage.output"></th><th class="num" data-i18n="usage.totalTokens2"></th><th class="num" data-i18n="usage.equivalentApiCost"></th>
                 </tr>
               </thead>
               <tbody id="usage-body"></tbody>
             </table>
           </div>
-          <p class="muted small usage-legend">明细表中每个 token 数下方为该项按官方价折算的等价费用，缓存读 / 缓存写费用单独列示。</p>
+          <p class="muted small usage-legend" data-i18n="usage.underEachTokenCountIsItsEquivalent"></p>
         </section>
 
         <!-- 总览：各来源（Cursor 账户含已删除账户保留的数据 + 本地 Codex / Claude 分析）账单小计，按总 Token 降序；置于图表之后 -->
         <section id="usage-overview" class="surface" hidden>
-          <div class="section-heading"><h3>各来源账单</h3><span class="muted small">等价费用按官方 API 价折算；倍数 = 全部等价费用 ÷ 已知账户套餐月费之和；ChatGPT 为全部设备用量存档，Claude 为本机日志分析；标「已删除」的为已删除账户保留的统计数据</span></div>
+          <div class="section-heading"><h3 data-i18n="usage.usageBySource"></h3><span class="muted small" data-i18n="usage.equivalentCostUsesOfficialApiRatesThe"></span></div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>账户</th><th>状态</th><th>数据更新</th><th>套餐月费</th><th class="num">总 Token</th><th class="num">等价费用</th><th class="num">倍数</th>
+                  <th data-i18n="common.account"></th><th data-i18n="accounts.status"></th><th data-i18n="usage.dataUpdated"></th><th data-i18n="usage.monthlyFee"></th><th class="num" data-i18n="usage.totalTokens"></th><th class="num" data-i18n="usage.equivalentCost"></th><th class="num" data-i18n="usage.ratio"></th>
                 </tr>
               </thead>
               <tbody id="usage-overview-body"></tbody>
@@ -274,26 +274,26 @@
       <section id="audit-panel" class="panel" role="tabpanel" hidden>
         <div class="surface">
           <div class="row wrap">
-            <label class="inline">级别
+            <label class="inline"><span data-i18n="audit.level"></span>
               <select id="audit-level">
-                <option value="all" selected>全部</option>
-                <option value="info">信息</option>
-                <option value="warn">警告</option>
-                <option value="error">错误</option>
+                <option value="all" selected data-i18n="usage.allTime"></option>
+                <option value="info" data-i18n="audit.info"></option>
+                <option value="warn" data-i18n="audit.warning"></option>
+                <option value="error" data-i18n="audit.error"></option>
               </select>
             </label>
-            <label class="inline">分类
+            <label class="inline"><span data-i18n="audit.category"></span>
               <select id="audit-category">
-                <option value="all" selected>全部</option>
-                <option value="account">账户管理</option>
-                <option value="state">状态与刷新</option>
-                <option value="credential">凭据与同步</option>
-                <option value="usage">用量数据</option>
-                <option value="settings">设置与系统</option>
+                <option value="all" selected data-i18n="usage.allTime"></option>
+                <option value="account" data-i18n="app.accounts"></option>
+                <option value="state" data-i18n="audit.statusAndRefresh"></option>
+                <option value="credential" data-i18n="audit.credentialsAndSync"></option>
+                <option value="usage" data-i18n="audit.usageData"></option>
+                <option value="settings" data-i18n="audit.settingsAndSystem"></option>
               </select>
             </label>
-            <button id="audit-refresh" class="secondary" type="button">刷新</button>
-            <button id="audit-clear" class="secondary" type="button">清空日志</button>
+            <button id="audit-refresh" class="secondary" type="button" data-i18n="usage.refresh"></button>
+            <button id="audit-clear" class="secondary" type="button" data-i18n="audit.clearLog"></button>
             <span id="audit-count" class="muted small"></span>
           </div>
         </div>
@@ -302,11 +302,11 @@
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th>时间</th><th>级别</th><th>分类</th><th>事件</th><th>内容</th></tr>
+                <tr><th data-i18n="common.time"></th><th data-i18n="audit.level"></th><th data-i18n="audit.category"></th><th data-i18n="audit.event"></th><th data-i18n="audit.details"></th></tr>
               </thead>
               <tbody id="audit-body"></tbody>
             </table>
-            <p id="audit-empty" class="muted empty" hidden>暂无日志记录。</p>
+            <p id="audit-empty" class="muted empty" hidden data-i18n="audit.noLogEntries"></p>
           </div>
         </div>
       </section>
@@ -317,26 +317,26 @@
           <div class="about-hero">
             <span class="brand-mark" aria-hidden="true"><img src="app-icon.png" alt="" /></span>
             <div>
-              <h3>AI 助手 · 用量与费用</h3>
-              <p class="muted">个人用的桌面应用，用于管理 Cursor / ChatGPT / Claude 账户、统计用量与费用。</p>
+              <h3 data-i18n="app.title"></h3>
+              <p class="muted" data-i18n="about.aDesktopAppForManagingCursorChatgpt"></p>
             </div>
           </div>
           <dl class="about-meta">
             <div>
-              <dt>版本</dt>
+              <dt data-i18n="about.version"></dt>
               <dd id="about-version">—</dd>
             </div>
             <div>
-              <dt>作者</dt>
+              <dt data-i18n="about.author"></dt>
               <dd id="about-authors">—</dd>
             </div>
             <div>
-              <dt>许可证</dt>
+              <dt data-i18n="about.license"></dt>
               <dd>GNU GPLv3</dd>
             </div>
             <div>
-              <dt>技术栈</dt>
-              <dd>Tauri v2 / Rust / 原生 HTML·CSS·JS / Chart.js</dd>
+              <dt data-i18n="about.technology"></dt>
+              <dd data-i18n="about.tauriV2RustNativeHtmlCss"></dd>
             </div>
           </dl>
         </div>
@@ -344,111 +344,112 @@
         <div class="surface app-update-card">
           <div class="app-update-heading">
             <div class="app-update-summary">
-              <h3>应用更新</h3>
-              <p id="app-update-meta" class="muted small">当前版本：—</p>
-              <p id="app-update-status" class="app-update-state" role="status" aria-live="polite">尚未检查更新</p>
+              <h3 data-i18n="about.appUpdates"></h3>
+              <p id="app-update-meta" class="muted small" data-i18n="updater.currentVersion"></p>
+              <p id="app-update-status" class="app-update-state" role="status" aria-live="polite" data-i18n="updater.notCheckedYet"></p>
             </div>
             <div class="app-update-primary-actions">
-              <button id="app-update-check" class="primary" type="button">检查更新</button>
-              <button id="app-update-install" class="primary" type="button" hidden>下载并安装</button>
-              <button id="app-update-cancel" class="secondary" type="button" hidden>取消下载</button>
+              <button id="app-update-check" class="primary" type="button" data-i18n="updater.checkForUpdates"></button>
+              <button id="app-update-install" class="primary" type="button" hidden data-i18n="updater.downloadAndInstall"></button>
+              <button id="app-update-cancel" class="secondary" type="button" hidden data-i18n="updater.cancelDownload"></button>
             </div>
           </div>
-          <p id="app-update-required" class="status bad" hidden>此版本要求更新。请完成更新后继续使用；可先在设置中导出备份。</p>
+          <p id="app-update-required" class="status bad" hidden data-i18n="updater.thisVersionRequiresAnUpdateYouCan"></p>
           <p id="app-update-manual" class="muted small app-update-message" hidden></p>
           <section id="app-update-new-notes" class="app-update-notes-section" aria-labelledby="app-update-notes-title" hidden>
-            <h4 id="app-update-notes-title">新版本更新日志</h4>
+            <h4 id="app-update-notes-title" data-i18n="updater.newReleaseNotes"></h4>
             <div id="app-update-notes" class="update-notes" tabindex="0" aria-labelledby="app-update-notes-title"></div>
           </section>
           <section class="app-update-notes-section" aria-labelledby="app-update-current-notes-title">
-            <h4 id="app-update-current-notes-title">当前版本更新日志</h4>
+            <h4 id="app-update-current-notes-title" data-i18n="updater.currentReleaseNotes"></h4>
             <p id="app-update-current-notes-status" class="muted small" role="status" hidden></p>
-            <div id="app-update-current-notes" class="update-notes" tabindex="0" aria-labelledby="app-update-current-notes-title">检查更新后显示当前版本的更新日志。</div>
+            <div id="app-update-current-notes" class="update-notes" tabindex="0" aria-labelledby="app-update-current-notes-title" data-i18n="updater.checkForUpdatesToViewTheCurrent"></div>
           </section>
           <section id="app-update-history" class="app-update-notes-section" aria-labelledby="app-update-history-title" hidden>
             <div class="app-update-history-heading">
-              <h4 id="app-update-history-title">历史更新日志</h4>
-              <button id="app-update-history-refresh" class="secondary compact" type="button">刷新列表</button>
+              <h4 id="app-update-history-title" data-i18n="updater.releaseHistory"></h4>
+              <button id="app-update-history-refresh" class="secondary compact" type="button" data-i18n="updater.refreshList"></button>
             </div>
             <div class="app-update-history-controls">
-              <label for="app-update-history-version">版本</label>
+              <label for="app-update-history-version" data-i18n="about.version"></label>
               <select id="app-update-history-version" disabled></select>
-              <button id="app-update-history-retry" class="secondary compact" type="button" hidden>重试日志</button>
+              <button id="app-update-history-retry" class="secondary compact" type="button" hidden data-i18n="updater.retryLoadingNotes"></button>
             </div>
             <p id="app-update-history-status" class="muted small" role="status" hidden></p>
-            <div id="app-update-history-notes" class="update-notes" tabindex="0" aria-label="历史版本更新日志" hidden></div>
-            <p class="muted small">显示当前平台已登记的版本；更早版本可前往 GitHub Releases 查看。</p>
+            <div id="app-update-history-notes" class="update-notes" tabindex="0" hidden data-i18n-aria-label="updater.pastReleaseNotes"></div>
+            <p class="muted small" data-i18n="updater.registeredVersionsForThisPlatformEarlierReleases"></p>
           </section>
           <div id="app-update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-               aria-label="更新下载进度" aria-describedby="app-update-progress-text" hidden>
+               aria-describedby="app-update-progress-text" hidden data-i18n-aria-label="updater.updateDownloadProgress">
             <span class="app-update-progress-fill" aria-hidden="true"></span>
           </div>
           <p id="app-update-progress-text" class="muted small" aria-live="polite" hidden></p>
           <div class="app-update-footer">
             <div class="app-update-links">
-              <button id="app-update-history-toggle" type="button" aria-expanded="false" aria-controls="app-update-history">历史更新日志</button>
+              <button id="app-update-history-toggle" type="button" aria-expanded="false" aria-controls="app-update-history" data-i18n="updater.releaseHistory"></button>
               <button id="app-update-releases" class="secondary compact" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
                 GitHub Releases
               </button>
-              <button id="app-update-copy-link" class="secondary compact" type="button" title="复制 GitHub Releases 地址">
+              <button id="app-update-copy-link" class="secondary compact" type="button" data-i18n-title="updater.copyTheGithubReleasesUrl">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
-                复制地址
+                <span data-i18n="updater.copyUrl"></span>
               </button>
             </div>
-            <button id="app-update-proxy" class="secondary compact" type="button">代理设置</button>
+            <button id="app-update-proxy" class="secondary compact" type="button" data-i18n="app.proxySettings"></button>
           </div>
         </div>
 
         <div class="surface">
           <div class="section-heading">
-            <h3>开源依赖与许可证</h3>
+            <h3 data-i18n="about.openSourceDependenciesAndLicenses"></h3>
           </div>
           <div class="table-wrap">
             <table class="about-deps">
               <thead>
-                <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
+                <tr><th data-i18n="about.dependency"></th><th data-i18n="about.version"></th><th data-i18n="about.purpose"></th><th data-i18n="about.license"></th></tr>
               </thead>
               <tbody>
-                <tr><td>tauri</td><td>2.12.2</td><td>桌面壳 / WebView</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>tauri-plugin-updater</td><td>2.13.3</td><td>更新包签名校验与安装</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>reqwest（更新器）</td><td>0.13.4</td><td>版本索引与更新包下载</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>tauri-plugin-single-instance</td><td>2.4.3</td><td>单实例</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>tauri-plugin-dialog</td><td>2.7.3</td><td>系统文件对话框</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>tauri-plugin-autostart</td><td>2.5.1</td><td>开机自启动</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>serde</td><td>1.0.229</td><td>序列化</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>tauri</td><td>2.12.2</td><td data-i18n="about.desktopShellWebview"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-updater</td><td>2.13.3</td><td data-i18n="about.updateSignatureVerificationAndInstallation"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td data-i18n="about.reqwestUpdater"></td><td>0.13.4</td><td data-i18n="about.versionIndexAndUpdateDownloads"></td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>sys-locale</td><td>0.3.2</td><td data-i18n="about.systemLanguages"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-single-instance</td><td>2.4.3</td><td data-i18n="about.singleInstanceSupport"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-dialog</td><td>2.7.3</td><td data-i18n="about.systemFileDialogs"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>tauri-plugin-autostart</td><td>2.5.1</td><td data-i18n="about.launchAtLogin"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>serde</td><td>1.0.229</td><td data-i18n="about.serialization"></td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>serde_json</td><td>1.0.151</td><td>JSON</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>reqwest</td><td>0.12.28</td><td>HTTP 客户端</td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>reqwest</td><td>0.12.28</td><td data-i18n="about.httpClient"></td><td>MIT OR Apache-2.0</td></tr>
                 <tr><td>base64</td><td>0.22.1</td><td>Base64</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>chrono</td><td>0.4.45</td><td>日期时间</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>walkdir</td><td>2.5.0</td><td>扫描本机会话目录</td><td>Unlicense OR MIT</td></tr>
-                <tr><td>rusqlite</td><td>0.40.2</td><td>SQLite 绑定</td><td>MIT</td></tr>
-                <tr><td>libsqlite3-sys</td><td>0.38.2</td><td>SQLite FFI（rusqlite 直接带入）</td><td>MIT</td></tr>
-                <tr><td>SQLite</td><td>bundled</td><td>rusqlite bundled 静态嵌入</td><td>公共领域</td></tr>
+                <tr><td>chrono</td><td>0.4.45</td><td data-i18n="about.dateAndTime"></td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>walkdir</td><td>2.5.0</td><td data-i18n="about.scanLocalSessionFolders"></td><td>Unlicense OR MIT</td></tr>
+                <tr><td>rusqlite</td><td>0.40.2</td><td data-i18n="about.sqliteBindings"></td><td>MIT</td></tr>
+                <tr><td>libsqlite3-sys</td><td>0.38.2</td><td data-i18n="about.sqliteFfiViaRusqlite"></td><td>MIT</td></tr>
+                <tr><td>SQLite</td><td>bundled</td><td data-i18n="about.staticallyLinkedViaRusqliteBundled"></td><td data-i18n="about.publicDomain"></td></tr>
                 <tr><td>sha2</td><td>0.10.9</td><td>SHA-2</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>getrandom</td><td>0.2.17</td><td>系统随机数</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>aes-gcm</td><td>0.10.3</td><td>备份文件加密（AES-256-GCM）</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>pbkdf2</td><td>0.12.2</td><td>备份密码派生密钥</td><td>MIT OR Apache-2.0</td></tr>
-                <tr><td>tokio</td><td>1.53.1</td><td>异步运行时</td><td>MIT</td></tr>
-                <tr><td>chart.js</td><td>4.5.1</td><td>用量图表</td><td>MIT</td></tr>
-                <tr><td>marked</td><td>18.1.1</td><td>更新日志 Markdown 解析</td><td>MIT</td></tr>
-                <tr><td>@kurkle/color</td><td>0.3.4</td><td>Chart.js 颜色（随 UMD 打进 vendor）</td><td>MIT</td></tr>
+                <tr><td>getrandom</td><td>0.2.17</td><td data-i18n="about.systemRandomNumbers"></td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>aes-gcm</td><td>0.10.3</td><td data-i18n="about.backupEncryptionAes256Gcm"></td><td>Apache-2.0 OR MIT</td></tr>
+                <tr><td>pbkdf2</td><td>0.12.2</td><td data-i18n="about.backupPasswordKeyDerivation"></td><td>MIT OR Apache-2.0</td></tr>
+                <tr><td>tokio</td><td>1.53.1</td><td data-i18n="about.asyncRuntime"></td><td>MIT</td></tr>
+                <tr><td>chart.js</td><td>4.5.1</td><td data-i18n="about.usageCharts"></td><td>MIT</td></tr>
+                <tr><td>marked</td><td>18.1.1</td><td data-i18n="about.releaseNotesMarkdownParser"></td><td>MIT</td></tr>
+                <tr><td>@kurkle/color</td><td>0.3.4</td><td data-i18n="about.chartJsColorsBundledInTheVendor"></td><td>MIT</td></tr>
               </tbody>
             </table>
           </div>
-          <p class="muted small">仅列直接依赖与随包嵌入组件，不含传递依赖。版本取自当前 lockfile，升级依赖后需同步更新本表。</p>
+          <p class="muted small" data-i18n="about.listsDirectDependenciesAndEmbeddedComponentsVersions"></p>
 
-          <h4 class="about-dev-heading">构建 / 开发依赖</h4>
-          <p class="muted small about-dev-note">下列工具仅用于构建，不随安装包分发。</p>
+          <h4 class="about-dev-heading" data-i18n="about.buildAndDevelopmentDependencies"></h4>
+          <p class="muted small about-dev-note" data-i18n="about.theseToolsAreUsedDuringDevelopmentAnd"></p>
           <div class="table-wrap">
             <table class="about-deps">
               <thead>
-                <tr><th>依赖</th><th>版本</th><th>用途</th><th>许可证</th></tr>
+                <tr><th data-i18n="about.dependency"></th><th data-i18n="about.version"></th><th data-i18n="about.purpose"></th><th data-i18n="about.license"></th></tr>
               </thead>
               <tbody>
                 <tr><td>tauri-build</td><td>2.7.2</td><td>Cargo build.rs</td><td>Apache-2.0 OR MIT</td></tr>
                 <tr><td>@tauri-apps/cli</td><td>2.11.4</td><td>npm run tauri</td><td>Apache-2.0 OR MIT</td></tr>
-                <tr><td>linkedom</td><td>0.18.13</td><td>更新界面 DOM 回归测试</td><td>ISC</td></tr>
+                <tr><td>linkedom</td><td>0.18.13</td><td data-i18n="about.updaterUiDomRegressionTests"></td><td>ISC</td></tr>
               </tbody>
             </table>
           </div>
@@ -462,73 +463,73 @@
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pricing-modal-title">
         <div class="modal-head">
           <div>
-            <h3 id="pricing-modal-title">价格表 · 官方 API 单价</h3>
-            <p class="muted small">单价单位：美元 / 每百万 (1M) token。每个模型都可编辑 输入 / 输出 / 缓存读 / 缓存写。</p>
+            <h3 id="pricing-modal-title" data-i18n="pricing.pricingOfficialApiRates"></h3>
+            <p class="muted small" data-i18n="pricing.pricesAreInUsdPerMillionTokens"></p>
           </div>
-          <button id="pricing-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+          <button id="pricing-close" class="icon-btn" type="button" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
         <div class="modal-toolbar">
-          <input id="pricing-search" type="search" placeholder="搜索模型名" />
+          <input id="pricing-search" type="search" data-i18n-placeholder="pricing.searchModelNames" />
           <span id="pricing-count" class="muted small"></span>
-          <button id="pricing-copy-path" class="secondary compact" type="button" title="复制 settings.json 路径">复制路径</button>
+          <button id="pricing-copy-path" class="secondary compact" type="button" data-i18n-title="pricing.copyTheSettingsJsonPath" data-i18n="pricing.copyPath"></button>
         </div>
 
         <div class="table-wrap pricing-table-wrap">
           <table class="pricing-table">
             <thead>
               <tr>
-                <th>模型</th>
-                <th class="num">输入</th>
-                <th class="num">输出</th>
-                <th class="num">缓存读</th>
-                <th class="num">缓存写</th>
-                <th>来源</th>
+                <th data-i18n="usage.model"></th>
+                <th class="num" data-i18n="usage.input"></th>
+                <th class="num" data-i18n="usage.output"></th>
+                <th class="num" data-i18n="usage.cacheRead"></th>
+                <th class="num" data-i18n="usage.cacheWrite"></th>
+                <th data-i18n="pricing.source"></th>
                 <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody id="pricing-body"></tbody>
           </table>
-          <p id="pricing-empty" class="muted empty" hidden>没有匹配的模型。</p>
+          <p id="pricing-empty" class="muted empty" hidden data-i18n="pricing.noMatchingModels"></p>
         </div>
 
         <div class="pricing-add">
-          <span class="pricing-add-title">新增模型</span>
+          <span class="pricing-add-title" data-i18n="pricing.addModel"></span>
           <div class="pricing-add-grid">
-            <input id="add-key" type="text" spellcheck="false" placeholder="模型名，如 claude-sonnet-5" />
-            <input id="add-input" type="number" min="0" step="any" placeholder="输入" />
-            <input id="add-output" type="number" min="0" step="any" placeholder="输出" />
-            <input id="add-cacheRead" type="number" min="0" step="any" placeholder="缓存读" />
-            <input id="add-cacheWrite" type="number" min="0" step="any" placeholder="缓存写" />
-            <button id="pricing-add-btn" class="secondary compact" type="button">添加</button>
+            <input id="add-key" type="text" spellcheck="false" data-i18n-placeholder="pricing.modelNameEGClaudeSonnet5" />
+            <input id="add-input" type="number" min="0" step="any" data-i18n-placeholder="usage.input" />
+            <input id="add-output" type="number" min="0" step="any" data-i18n-placeholder="usage.output" />
+            <input id="add-cacheRead" type="number" min="0" step="any" data-i18n-placeholder="usage.cacheRead" />
+            <input id="add-cacheWrite" type="number" min="0" step="any" data-i18n-placeholder="usage.cacheWrite" />
+            <button id="pricing-add-btn" class="secondary compact" type="button" data-i18n="pricing.add"></button>
           </div>
         </div>
 
         <div class="pricing-update">
-          <span class="pricing-add-title">在线更新</span>
+          <span class="pricing-add-title" data-i18n="pricing.onlineUpdates"></span>
           <div class="pricing-update-grid">
             <input id="pricing-update-url" type="text" spellcheck="false" />
-            <button id="pricing-update-btn" class="secondary compact" type="button">在线更新</button>
+            <button id="pricing-update-btn" class="secondary compact" type="button" data-i18n="pricing.onlineUpdates"></button>
           </div>
           <p id="pricing-update-meta" class="muted small"></p>
           <p id="pricing-update-hint" class="update-hint" hidden></p>
           <p id="pricing-update-error" class="status bad" role="status" hidden></p>
           <div class="update-actions">
-            <button id="pricing-update-retry" class="secondary compact" type="button">重新检查</button>
-            <button id="pricing-update-proxy" class="secondary compact" type="button">代理设置</button>
-            <button id="pricing-update-source" class="secondary compact" type="button">打开公共价格表</button>
+            <button id="pricing-update-retry" class="secondary compact" type="button" data-i18n="pricing.checkAgain"></button>
+            <button id="pricing-update-proxy" class="secondary compact" type="button" data-i18n="app.proxySettings"></button>
+            <button id="pricing-update-source" class="secondary compact" type="button" data-i18n="pricing.openPublicPricing"></button>
           </div>
         </div>
 
         <p id="pricing-status" class="status" hidden></p>
 
         <div class="modal-foot">
-          <button id="pricing-reset" class="secondary" type="button">重置为默认</button>
+          <button id="pricing-reset" class="secondary" type="button" data-i18n="pricing.restoreDefaults"></button>
           <div class="modal-actions">
-            <button id="pricing-cancel" class="secondary" type="button" data-close>关闭</button>
-            <button id="pricing-save" class="primary" type="button">保存</button>
+            <button id="pricing-cancel" class="secondary" type="button" data-close data-i18n="common.close"></button>
+            <button id="pricing-save" class="primary" type="button" data-i18n="common.save"></button>
           </div>
         </div>
       </div>
@@ -540,50 +541,50 @@
       <div class="modal-card modal-card-lg" role="dialog" aria-modal="true" aria-labelledby="raw-modal-title">
         <div class="modal-head">
           <div>
-            <h3 id="raw-modal-title">原始账单</h3>
+            <h3 id="raw-modal-title" data-i18n="raw.usageEvents"></h3>
             <p id="raw-modal-sub" class="muted small"></p>
           </div>
-          <button id="raw-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+          <button id="raw-close" class="icon-btn" type="button" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
         <div class="modal-toolbar raw-toolbar">
-          <input id="raw-search" type="search" placeholder="按模型名筛选（原始名或归一名）" />
+          <input id="raw-search" type="search" data-i18n-placeholder="raw.filterByOriginalOrNormalizedModelName" />
           <span id="raw-count" class="muted small"></span>
-          <button id="raw-export" class="secondary compact" type="button" title="把当前列出的事件导出为 CSV（UTF-8，Excel 可直接打开）">导出 CSV</button>
+          <button id="raw-export" class="secondary compact" type="button" data-i18n-title="raw.exportTheListedEventsAsAUtf" data-i18n="raw.exportCsv"></button>
         </div>
 
         <div class="table-wrap raw-table-wrap">
           <table class="raw-table">
             <thead>
               <tr>
-                <th id="raw-time-heading">时间</th>
-                <th id="raw-model-heading">模型（原始上报名）</th>
-                <th>计价</th>
-                <th class="num">输入</th>
-                <th class="num">缓存读</th>
-                <th class="num">缓存写</th>
-                <th class="num">输出</th>
-                <th class="num">合计 Token</th>
-                <th id="raw-cost-heading" class="num">实扣</th>
-                <th class="num">等价 API 价</th>
+                <th id="raw-time-heading" data-i18n="common.time"></th>
+                <th id="raw-model-heading" data-i18n="raw.modelAsReported"></th>
+                <th data-i18n="raw.pricing"></th>
+                <th class="num" data-i18n="usage.input"></th>
+                <th class="num" data-i18n="usage.cacheRead"></th>
+                <th class="num" data-i18n="usage.cacheWrite"></th>
+                <th class="num" data-i18n="usage.output"></th>
+                <th class="num" data-i18n="usage.totalTokens2"></th>
+                <th id="raw-cost-heading" class="num" data-i18n="raw.actualCharge"></th>
+                <th class="num" data-i18n="usage.equivalentApiCost"></th>
               </tr>
             </thead>
             <tbody id="raw-body"></tbody>
           </table>
           <p id="raw-empty" class="muted empty" hidden></p>
           <div id="raw-more-wrap" class="raw-more" hidden>
-            <button id="raw-more" class="secondary compact" type="button">显示更多</button>
+            <button id="raw-more" class="secondary compact" type="button" data-i18n="raw.showMore"></button>
           </div>
         </div>
 
         <p id="raw-status" class="status" hidden></p>
 
         <div class="modal-foot">
-          <button id="raw-clear" class="secondary danger" type="button" title="删除该账户在本机的用量事件库与统计缓存（账户与 Token 保留），下次刷新重新全量拉取">清除本地数据</button>
+          <button id="raw-clear" class="secondary danger" type="button" data-i18n-title="raw.clearThisAccountSLocalUsageEvents" data-i18n="raw.clearLocalData"></button>
           <div class="modal-actions">
-            <button id="raw-cancel" class="secondary" type="button" data-close>关闭</button>
+            <button id="raw-cancel" class="secondary" type="button" data-close data-i18n="common.close"></button>
           </div>
         </div>
       </div>
@@ -595,246 +596,254 @@
       <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
         <div class="modal-head">
           <div>
-            <h3 id="settings-modal-title">设置</h3>
-            <p class="muted small">按需调整，让应用更合你的习惯。</p>
+            <h3 id="settings-modal-title" data-i18n="common.settings"></h3>
+            <p class="muted small" data-i18n="settings.adjustTheAppToYourPreferences"></p>
           </div>
-          <button id="settings-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+          <button id="settings-close" class="icon-btn" type="button" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
         <div class="settings-layout">
-          <nav id="settings-nav" class="settings-nav" role="tablist" aria-label="设置分类" aria-orientation="vertical">
+          <nav id="settings-nav" class="settings-nav" role="tablist" aria-orientation="vertical" data-i18n-aria-label="settings.settingsCategories">
             <button id="settings-tab-general" class="settings-tab" type="button" role="tab" data-settings-section="general" aria-controls="settings-general" aria-selected="true">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-              <span>通用</span>
+              <span data-i18n="settings.general"></span>
             </button>
             <button id="settings-tab-accounts" class="settings-tab" type="button" role="tab" data-settings-section="accounts" aria-controls="settings-accounts" aria-selected="false" tabindex="-1">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21v-2a7 7 0 0 1 12-5M16 16h5v-5M21 16a6 6 0 0 0-5-6M21 20a6 6 0 0 1-6 1"/></svg>
-              <span>账户与刷新</span>
+              <span data-i18n="settings.accountsAndRefresh"></span>
             </button>
             <button id="settings-tab-sync" class="settings-tab" type="button" role="tab" data-settings-section="sync" aria-controls="settings-sync" aria-selected="false" tabindex="-1">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-7M20 7V0M4 17h7M4 17v7M4.5 8a8 8 0 0 1 13-3L20 7M4 17l2.5 2a8 8 0 0 0 13-3"/></svg>
-              <span>GPT 用量同步</span>
+              <span data-i18n="settings.gptUsageSync"></span>
             </button>
             <button id="settings-tab-clients" class="settings-tab" type="button" role="tab" data-settings-section="clients" aria-controls="settings-clients" aria-selected="false" tabindex="-1">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 8h18M8 12l3 3-3 3M14 18h3"/></svg>
-              <span>客户端</span>
+              <span data-i18n="settings.clients"></span>
             </button>
             <button id="settings-tab-backup" class="settings-tab" type="button" role="tab" data-settings-section="backup" aria-controls="settings-backup" aria-selected="false" tabindex="-1">
               <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>
-              <span>数据备份</span>
+              <span data-i18n="settings.dataBackup"></span>
             </button>
           </nav>
 
           <div id="settings-content" class="settings-content">
             <section id="settings-general" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-general" tabindex="0">
               <div class="settings-panel-head">
-                <h3>通用</h3>
-                <p>显示偏好、启动方式与应用更新，更改即时生效。</p>
+                <h3 data-i18n="settings.general"></h3>
+                <p data-i18n="settings.displayStartupAndUpdatePreferencesTakeEffect"></p>
               </div>
+              <section class="settings-group" aria-labelledby="settings-language-title">
+                <h4 id="settings-language-title"><label for="ui-language" data-i18n="settings.interfaceLanguage"></label></h4>
+                <select id="ui-language" class="compact-select">
+                  <option value="system" data-i18n="settings.followSystem"></option>
+                </select>
+                <div id="ui-language-status" class="status" hidden></div>
+                <button id="ui-language-folder" class="secondary" type="button" data-i18n="settings.openLanguageFolder"></button>
+              </section>
               <section class="settings-group" aria-labelledby="settings-display-title">
-                <h4 id="settings-display-title">数字显示</h4>
-                <label id="unit-mode-label">Token 数量单位</label>
+                <h4 id="settings-display-title" data-i18n="settings.numberDisplay"></h4>
+                <label id="unit-mode-label" data-i18n="settings.tokenCountUnits"></label>
                 <div id="unit-mode" class="segmented segmented-full" role="group" aria-labelledby="unit-mode-label">
-                  <button class="seg" type="button" data-unit="full">完整数字</button>
+                  <button class="seg" type="button" data-unit="full" data-i18n="settings.fullNumbers"></button>
                   <button class="seg" type="button" data-unit="en">K / M / B</button>
-                  <button class="seg" type="button" data-unit="zh">万 / 亿</button>
+                  <button class="seg" type="button" data-unit="zh" data-i18n="settings.10K100M"></button>
                 </div>
-                <p class="muted small">示例：<span id="unit-sample"></span>；缩写时悬停可查看完整值。</p>
+                <p class="muted small"><span data-i18n="settings.example"></span><span id="unit-sample"></span><span data-i18n="settings.hoverOverAnAbbreviatedNumberToSee"></span></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-startup-title">
-                <h4 id="settings-startup-title">启动方式</h4>
+                <h4 id="settings-startup-title" data-i18n="settings.startup"></h4>
                 <div class="toggle-group">
                   <label class="toggle">
                     <input id="autostart-enabled" type="checkbox" />
                     <span class="toggle-track" aria-hidden="true"></span>
-                    <span class="toggle-text">开机自启动</span>
+                    <span class="toggle-text" data-i18n="about.launchAtLogin"></span>
                   </label>
                   <label class="toggle">
                     <input id="autostart-silent" type="checkbox" />
                     <span class="toggle-track" aria-hidden="true"></span>
-                    <span class="toggle-text">静默启动，仅在托盘运行</span>
+                    <span class="toggle-text" data-i18n="settings.startSilentlyInTheTray"></span>
                   </label>
                 </div>
-                <p class="muted small">随系统登录自动运行。静默启动时不弹出主窗口，双击托盘图标即可打开。</p>
+                <p class="muted small" data-i18n="settings.startWhenYouSignInWithSilent"></p>
                 <p id="autostart-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-update-title">
-                <h4 id="settings-update-title">应用更新</h4>
+                <h4 id="settings-update-title" data-i18n="about.appUpdates"></h4>
                 <label class="toggle">
                   <input id="app-update-auto" type="checkbox" checked />
                   <span class="toggle-track" aria-hidden="true"></span>
-                  <span class="toggle-text">自动检查新版本</span>
+                  <span class="toggle-text" data-i18n="settings.automaticallyCheckForUpdates"></span>
                 </label>
-                <p class="muted small">启动 30 秒后检查，此后每 24 小时检查一次。下载、安装和重启前需要确认。</p>
+                <p class="muted small" data-i18n="settings.check30SecondsAfterStartupThenEvery"></p>
               </section>
             </section>
 
             <section id="settings-accounts" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-accounts" tabindex="0" hidden>
               <div class="settings-panel-head">
-                <h3>账户与刷新</h3>
-                <p>管理账户状态与本机凭据的更新频率，更改即时生效。</p>
+                <h3 data-i18n="settings.accountsAndRefresh"></h3>
+                <p data-i18n="settings.changesToTheAccountAndLocalCredential"></p>
               </div>
               <section class="settings-group" aria-labelledby="settings-refresh-title">
-                <h4 id="settings-refresh-title">账户状态与用量</h4>
-                <label for="accounts-interval">定时刷新</label>
+                <h4 id="settings-refresh-title" data-i18n="settings.accountStatusAndUsage"></h4>
+                <label for="accounts-interval" data-i18n="settings.scheduledRefresh"></label>
                 <select id="accounts-interval" class="compact-select">
-                  <option value="0" selected>关闭</option>
-                  <option value="5">5 分钟</option>
-                  <option value="15">15 分钟</option>
-                  <option value="30">30 分钟</option>
-                  <option value="60">1 小时</option>
-                  <option value="360">6 小时</option>
-                  <option value="720">12 小时</option>
-                  <option value="1440">24 小时</option>
+                  <option value="0" selected data-i18n="common.close"></option>
+                  <option value="5" data-i18n="settings.5Minutes"></option>
+                  <option value="15" data-i18n="settings.15Minutes"></option>
+                  <option value="30" data-i18n="settings.30Minutes"></option>
+                  <option value="60" data-i18n="settings.1Hour"></option>
+                  <option value="360" data-i18n="settings.6Hours"></option>
+                  <option value="720" data-i18n="settings.12Hours"></option>
+                  <option value="1440" data-i18n="settings.24Hours"></option>
                 </select>
-                <p class="muted small">未单独设置同步间隔的账户与共享用量任务使用此间隔。可在各账户的编辑窗口覆盖；关闭全局后，账户的独立间隔仍生效。</p>
+                <p class="muted small" data-i18n="settings.accountsWithoutTheirOwnIntervalAndShared"></p>
                 <p id="interval-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-credentials-title">
-                <h4 id="settings-credentials-title">本机 ChatGPT 凭据</h4>
-                <label for="local-sync-interval">同步间隔</label>
+                <h4 id="settings-credentials-title" data-i18n="settings.localChatgptCredentials"></h4>
+                <label for="local-sync-interval" data-i18n="settings.syncInterval"></label>
                 <select id="local-sync-interval" class="compact-select">
-                  <option value="1">1 分钟</option>
-                  <option value="5" selected>5 分钟</option>
-                  <option value="10">10 分钟</option>
-                  <option value="30">30 分钟</option>
-                  <option value="60">1 小时</option>
-                  <option value="360">6 小时</option>
-                  <option value="1440">1 天</option>
+                  <option value="1" data-i18n="settings.1Minute"></option>
+                  <option value="5" selected data-i18n="settings.5Minutes"></option>
+                  <option value="10" data-i18n="settings.10Minutes"></option>
+                  <option value="30" data-i18n="settings.30Minutes"></option>
+                  <option value="60" data-i18n="settings.1Hour"></option>
+                  <option value="360" data-i18n="settings.6Hours"></option>
+                  <option value="1440" data-i18n="settings.1Day"></option>
                 </select>
-                <p class="muted small">ChatGPT Desktop / Codex CLI 续期后，按此间隔检查本机 auth.json 的变化，更新同账号的凭据副本。此过程不联网。</p>
+                <p class="muted small" data-i18n="settings.afterChatgptDesktopOrCodexCliRenews"></p>
                 <p id="local-sync-status" class="status" hidden></p>
               </section>
             </section>
 
             <section id="settings-sync" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-sync" tabindex="0" hidden>
               <div class="settings-panel-head">
-                <h3>GPT 用量同步</h3>
-                <p>在多台设备之间同步用量明细，未配置服务器时不联网。</p>
+                <h3 data-i18n="settings.gptUsageSync"></h3>
+                <p data-i18n="settings.syncUsageRecordsAcrossDevicesSyncStays"></p>
               </div>
               <div id="gpt-sync-progress" hidden></div>
               <section class="settings-group" aria-labelledby="settings-server-title">
-                <h4 id="settings-server-title">服务器连接</h4>
+                <h4 id="settings-server-title" data-i18n="settings.serverConnection"></h4>
                 <label class="toggle">
                   <input id="gpt-sync-use-proxy" type="checkbox" checked aria-describedby="gpt-sync-proxy-hint" />
                   <span class="toggle-track" aria-hidden="true"></span>
-                  <span class="toggle-text">使用代理</span>
+                  <span class="toggle-text" data-i18n="settings.useProxy"></span>
                 </label>
-                <p id="gpt-sync-proxy-hint" class="muted small">开启时跟随全局代理设置，关闭时直接连接同步服务器。</p>
-                <label for="gpt-sync-url">中心服务器地址（留空停用）</label>
+                <p id="gpt-sync-proxy-hint" class="muted small" data-i18n="settings.whenEnabledUseTheGlobalProxySettings"></p>
+                <label for="gpt-sync-url" data-i18n="settings.serverUrlLeaveBlankToDisable"></label>
                 <input id="gpt-sync-url" type="url" spellcheck="false" placeholder="https://sync.example.com" />
-                <label for="gpt-sync-key">账户同步密钥</label>
+                <label for="gpt-sync-key" data-i18n="settings.accountSyncKey"></label>
                 <input id="gpt-sync-key" type="password" autocomplete="new-password" spellcheck="false" />
-                <label class="inline settings-key-clear"><input id="gpt-sync-clear-key" type="checkbox" />清除已保存的同步密钥</label>
-                <p class="muted small">由服务端管理后台生成，同一账户的所有机器填写同一个密钥。与 OpenAI API Key 或 GPT 登录凭据无关；重置后需更新所有机器，服务端历史保留。</p>
+                <label class="inline settings-key-clear"><input id="gpt-sync-clear-key" type="checkbox" /><span data-i18n="settings.clearSavedSyncKey"></span></label>
+                <p class="muted small" data-i18n="settings.generateThisKeyInTheServerAdmin"></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-device-title">
-                <h4 id="settings-device-title">本机采集</h4>
-                <label for="gpt-sync-device-name">本机设备名称</label>
+                <h4 id="settings-device-title" data-i18n="settings.localCollection"></h4>
+                <label for="gpt-sync-device-name" data-i18n="settings.deviceName"></label>
                 <input id="gpt-sync-device-name" type="text" maxlength="128" />
-                <label for="gpt-sync-home">本机采集目录（CODEX_HOME）</label>
-                <input id="gpt-sync-home" type="text" spellcheck="false" placeholder="留空沿用环境变量和默认 ~/.codex" />
+                <label for="gpt-sync-home" data-i18n="settings.localCollectionFolderCodexHome"></label>
+                <input id="gpt-sync-home" type="text" spellcheck="false" data-i18n-placeholder="settings.leaveBlankToUseTheEnvironmentSetting" />
               </section>
               <div class="settings-group">
-                <button id="gpt-sync-test" class="secondary" type="button">测试连接</button>
-                <p class="muted small">仅传模型、时间、Token 数与会话标识，不传对话正文或 GPT 登录凭据。点击「完成」保存配置后同步一次；之后跟随定时刷新、Tray 和统计页刷新。打开 Tray 总览或切换日期时，超过 5 分钟未成功同步会自动补拉。测试连接只验证账户。</p>
+                <button id="gpt-sync-test" class="secondary" type="button" data-i18n="settings.testConnection"></button>
+                <p class="muted small" data-i18n="settings.syncSendsOnlyTheModelTimeToken"></p>
                 <p id="gpt-sync-result" class="status" tabindex="-1" aria-live="polite" hidden></p>
               </div>
               <section class="sync-setup" aria-labelledby="gpt-sync-setup-title">
                 <div class="sync-setup-text">
-                  <h4 id="gpt-sync-setup-title">自行搭建同步服务端</h4>
-                  <p class="muted small">复制搭建文档交给你的 agent，完成后将它提供的服务器地址和同步密钥填入上方。</p>
+                  <h4 id="gpt-sync-setup-title" data-i18n="settings.selfHostASyncServer"></h4>
+                  <p class="muted small" data-i18n="settings.copyTheSetupInstructionsForYourAgent"></p>
                 </div>
-                <button id="gpt-sync-copy-prompt" class="secondary compact" type="button">复制提示词</button>
+                <button id="gpt-sync-copy-prompt" class="secondary compact" type="button" data-i18n="settings.copySetupPrompt"></button>
               </section>
             </section>
 
             <section id="settings-clients" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-clients" tabindex="0" hidden>
               <div class="settings-panel-head">
-                <h3>客户端</h3>
-                <p>设置切换账户后启动的客户端，留空时自动检测安装位置。</p>
+                <h3 data-i18n="settings.clients"></h3>
+                <p data-i18n="settings.chooseWhichClientsToStartAfterSwitching"></p>
               </div>
               <section class="settings-group" aria-labelledby="settings-cursor-title">
                 <h4 id="settings-cursor-title">Cursor</h4>
-                <label for="cursor-exe-path">客户端路径</label>
+                <label for="cursor-exe-path" data-i18n="settings.clientPath"></label>
                 <div class="row settings-path-row">
-                  <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" placeholder="Cursor.exe / Cursor.app 完整路径" />
-                  <button id="cursor-detect" class="secondary compact" type="button">自动搜索</button>
-                  <button id="cursor-scan-cancel" class="secondary compact" type="button" hidden>取消</button>
+                  <input id="cursor-exe-path" class="grow" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToCursorExeOrCursor" />
+                  <button id="cursor-detect" class="secondary compact" type="button" data-i18n="settings.findAutomatically"></button>
+                  <button id="cursor-scan-cancel" class="secondary compact" type="button" hidden data-i18n="common.cancel"></button>
                 </div>
-                <p class="muted small">自动搜索会遍历磁盘目录，找到后填入路径，可继续搜索下一个或随时取消。</p>
+                <p class="muted small" data-i18n="settings.searchInstalledFoldersAndFillInThe"></p>
                 <p id="cursor-scan-progress" class="muted small scan-progress" hidden></p>
                 <p id="cursor-path-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-codex-title">
                 <h4 id="settings-codex-title">ChatGPT</h4>
-                <label for="codex-exe-path">Desktop 路径</label>
+                <label for="codex-exe-path" data-i18n="settings.desktopPath"></label>
                 <div class="row settings-path-row">
-                  <input id="codex-exe-path" class="grow" type="text" spellcheck="false" placeholder="ChatGPT.exe / ChatGPT.app / Codex.app 完整路径" />
-                  <button id="codex-detect" class="secondary compact" type="button">自动搜索</button>
+                  <input id="codex-exe-path" class="grow" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToChatgptExeChatgptApp" />
+                  <button id="codex-detect" class="secondary compact" type="button" data-i18n="settings.findAutomatically"></button>
                 </div>
-                <p class="muted small">自动检测 Microsoft Store 与常见安装位置。</p>
-                <label for="codex-cli-exe-path">CLI 路径（选填）</label>
-                <input id="codex-cli-exe-path" type="text" spellcheck="false" placeholder="Codex CLI 完整路径，留空自动探测" />
+                <p class="muted small" data-i18n="settings.detectMicrosoftStoreAndCommonInstallationLocations"></p>
+                <label for="codex-cli-exe-path" data-i18n="settings.cliPathOptional"></label>
+                <input id="codex-cli-exe-path" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToCodexCliOrLeave" />
                 <p id="codex-path-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-claude-title">
                 <h4 id="settings-claude-title">Claude Desktop</h4>
-                <label for="claude-exe-path">Desktop 路径</label>
+                <label for="claude-exe-path" data-i18n="settings.desktopPath"></label>
                 <div class="row settings-path-row">
-                  <input id="claude-exe-path" class="grow" type="text" spellcheck="false" placeholder="claude.exe / Claude.app 完整路径" />
-                  <button id="claude-detect" class="secondary compact" type="button">自动搜索</button>
+                  <input id="claude-exe-path" class="grow" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToClaudeExeOrClaude" />
+                  <button id="claude-detect" class="secondary compact" type="button" data-i18n="settings.findAutomatically"></button>
                 </div>
-                <label for="claude-cli-exe-path">CLI 路径（选填）</label>
-                <input id="claude-cli-exe-path" type="text" spellcheck="false" placeholder="Claude Code 完整路径，留空自动探测" />
-                <label for="claude-desktop-data-path">Desktop 数据目录（选填）</label>
-                <input id="claude-desktop-data-path" type="text" spellcheck="false" placeholder="留空自动识别；检测到多个目录时指定" />
-                <p class="muted small">两端已安装时一起切换；Desktop 需在账户编辑中首次绑定登录。</p>
+                <label for="claude-cli-exe-path" data-i18n="settings.cliPathOptional"></label>
+                <input id="claude-cli-exe-path" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToClaudeCodeOrLeave" />
+                <label for="claude-desktop-data-path" data-i18n="settings.desktopDataFolderOptional"></label>
+                <input id="claude-desktop-data-path" type="text" spellcheck="false" data-i18n-placeholder="settings.leaveBlankToDetectChooseAFolder" />
+                <p class="muted small" data-i18n="settings.switchBothInstalledClientsTogetherLinkThe"></p>
                 <p id="claude-path-status" class="status" hidden></p>
               </section>
               <section class="settings-group" aria-labelledby="settings-opencode-title">
                 <h4 id="settings-opencode-title">OpenCode V2</h4>
-                <label for="opencode-exe-path">CLI 可执行文件</label>
+                <label for="opencode-exe-path" data-i18n="settings.cliExecutable"></label>
                 <div class="row">
-                  <input id="opencode-exe-path" class="grow" type="text" spellcheck="false" placeholder="OpenCode V2 CLI 完整路径，留空自动探测" />
-                  <button id="opencode-detect" class="secondary compact" type="button">自动搜索</button>
+                  <input id="opencode-exe-path" class="grow" type="text" spellcheck="false" data-i18n-placeholder="settings.fullPathToOpencodeV2Cli" />
+                  <button id="opencode-detect" class="secondary compact" type="button" data-i18n="settings.findAutomatically"></button>
                 </div>
-                <label for="opencode-desktop-exe-path">Desktop 路径（选填）</label>
-                <input id="opencode-desktop-exe-path" type="text" spellcheck="false" placeholder="OpenCode.exe / OpenCode.app，留空自动探测" />
-                <label for="opencode-desktop-db-path">Desktop 数据库（选填）</label>
-                <input id="opencode-desktop-db-path" type="text" spellcheck="false" placeholder="留空使用 Desktop 内置 CLI 的数据库" />
-                <label for="opencode-db-path">CLI 数据库（选填）</label>
-                <input id="opencode-db-path" type="text" spellcheck="false" placeholder="留空沿用 OpenCode CLI 的数据库路径" />
-                <p class="muted small">用于关联和切换本机登录；套餐和用量使用本应用的独立授权。</p>
+                <label for="opencode-desktop-exe-path" data-i18n="settings.desktopPathOptional"></label>
+                <input id="opencode-desktop-exe-path" type="text" spellcheck="false" data-i18n-placeholder="settings.opencodeExeOrOpencodeAppOrLeave" />
+                <label for="opencode-desktop-db-path" data-i18n="settings.desktopDatabaseOptional"></label>
+                <input id="opencode-desktop-db-path" type="text" spellcheck="false" data-i18n-placeholder="settings.leaveBlankToUseTheDatabaseOf" />
+                <label for="opencode-db-path" data-i18n="settings.cliDatabaseOptional"></label>
+                <input id="opencode-db-path" type="text" spellcheck="false" data-i18n-placeholder="settings.leaveBlankToUseTheOpencodeCli" />
+                <p class="muted small" data-i18n="settings.usedToLinkAndSwitchLocalLogins"></p>
                 <p id="opencode-path-status" class="status" hidden></p>
               </section>
             </section>
 
             <section id="settings-backup" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-backup" tabindex="0" hidden>
               <div class="settings-panel-head">
-                <h3>数据备份</h3>
-                <p>将本机数据保存为备份，或从已有备份恢复。</p>
+                <h3 data-i18n="settings.dataBackup"></h3>
+                <p data-i18n="settings.backUpLocalDataOrRestoreA"></p>
               </div>
               <section class="settings-group" aria-labelledby="settings-export-title">
-                <h4 id="settings-export-title">导出备份</h4>
-                <p class="muted small">保存为单个 JSON 文件，包含全部设置、账号与 Token、界面偏好，以及已删除 Cursor 账户保留的统计数据。可设置密码加密。</p>
+                <h4 id="settings-export-title" data-i18n="settings.exportBackup"></h4>
+                <p class="muted small" data-i18n="settings.saveSettingsAccountsAndTokensDisplayPreferences"></p>
                 <div class="row">
-                  <button id="backup-export" class="secondary" type="button">导出全部数据…</button>
+                  <button id="backup-export" class="secondary" type="button" data-i18n="settings.exportAllData"></button>
                 </div>
               </section>
               <section class="settings-group" aria-labelledby="settings-import-title">
-                <h4 id="settings-import-title">导入备份</h4>
-                <p class="muted small">账号去重后合并，已删除账户的统计数据按账号身份合并。其余设置以备份文件为准，导入后立即生效。</p>
+                <h4 id="settings-import-title" data-i18n="settings.importBackup"></h4>
+                <p class="muted small" data-i18n="settings.accountsAreMergedByIdentityIncludingRetained"></p>
                 <div class="row">
-                  <button id="backup-import" class="secondary" type="button">导入全部数据…</button>
+                  <button id="backup-import" class="secondary" type="button" data-i18n="settings.importAllData"></button>
                 </div>
               </section>
               <div id="backup-password-row" class="row settings-password-row" hidden>
-                <input id="backup-password" class="grow" type="password" spellcheck="false" autocomplete="off" aria-label="备份密码" placeholder="" />
-                <button id="backup-password-ok" class="secondary compact" type="button">确认</button>
-                <button id="backup-password-cancel" class="secondary compact" type="button">取消</button>
+                <input id="backup-password" class="grow" type="password" spellcheck="false" autocomplete="off" placeholder="" data-i18n-aria-label="settings.backupPassword" />
+                <button id="backup-password-ok" class="secondary compact" type="button" data-i18n="common.confirm"></button>
+                <button id="backup-password-cancel" class="secondary compact" type="button" data-i18n="common.cancel"></button>
               </div>
               <p id="backup-status" class="status" hidden></p>
             </section>
@@ -842,9 +851,9 @@
         </div>
 
         <div class="modal-foot">
-          <p class="muted small settings-save-note">同步配置与客户端路径需点「完成」保存。</p>
+          <p class="muted small settings-save-note" data-i18n="settings.clickDoneToSaveSyncSettingsAnd"></p>
           <div class="modal-actions">
-            <button id="settings-done" class="primary" type="button">完成</button>
+            <button id="settings-done" class="primary" type="button" data-i18n="settings.done"></button>
           </div>
         </div>
       </div>
@@ -856,28 +865,28 @@
       <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="proxy-modal-title">
         <div class="modal-head">
           <div>
-            <h3 id="proxy-modal-title">代理设置</h3>
-            <p class="muted small">配置所有对 Cursor / OpenAI / Anthropic 请求所走的网络代理，保存后立即生效。</p>
+            <h3 id="proxy-modal-title" data-i18n="app.proxySettings"></h3>
+            <p class="muted small" data-i18n="proxy.setTheNetworkProxyForCursorOpenai"></p>
           </div>
-          <button id="proxy-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+          <button id="proxy-close" class="icon-btn" type="button" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
         <div class="modal-body">
-          <label>代理模式</label>
-          <div id="proxy-mode" class="segmented segmented-full" role="group" aria-label="代理模式">
-            <button class="seg" type="button" data-mode="system">跟随系统</button>
-            <button class="seg" type="button" data-mode="direct">直连</button>
-            <button class="seg" type="button" data-mode="custom">自定义</button>
+          <label data-i18n="proxy.proxyMode"></label>
+          <div id="proxy-mode" class="segmented segmented-full" role="group" data-i18n-aria-label="proxy.proxyMode">
+            <button class="seg" type="button" data-mode="system" data-i18n="settings.followSystem"></button>
+            <button class="seg" type="button" data-mode="direct" data-i18n="proxy.direct"></button>
+            <button class="seg" type="button" data-mode="custom" data-i18n="usage.custom"></button>
           </div>
 
-          <label for="proxy-url">代理地址</label>
-          <input id="proxy-url" type="text" spellcheck="false" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
-          <p class="muted small">支持 http / https / socks5；需账号密码时用 <code>scheme://user:pass@host:port</code>。</p>
+          <label for="proxy-url" data-i18n="proxy.proxyAddress"></label>
+          <input id="proxy-url" type="text" spellcheck="false" data-i18n-placeholder="proxy.http1270017890Or" />
+          <p class="muted small"><span data-i18n="proxy.supportsHttpHttpsAndSocks5For"></span> <code>scheme://user:pass@host:port</code>。</p>
 
           <div class="proxy-test-row">
-            <button id="proxy-test" class="secondary compact" type="button">测试连接</button>
+            <button id="proxy-test" class="secondary compact" type="button" data-i18n="settings.testConnection"></button>
             <span id="proxy-test-result" class="muted small"></span>
           </div>
 
@@ -885,10 +894,10 @@
         </div>
 
         <div class="modal-foot">
-          <button id="proxy-copy-path" class="secondary compact" type="button" title="复制 settings.json 路径">复制配置路径</button>
+          <button id="proxy-copy-path" class="secondary compact" type="button" data-i18n-title="pricing.copyTheSettingsJsonPath" data-i18n="proxy.copyConfigurationPath"></button>
           <div class="modal-actions">
-            <button id="proxy-cancel" class="secondary" type="button" data-close>关闭</button>
-            <button id="proxy-save" class="primary" type="button">保存</button>
+            <button id="proxy-cancel" class="secondary" type="button" data-close data-i18n="common.close"></button>
+            <button id="proxy-save" class="primary" type="button" data-i18n="common.save"></button>
           </div>
         </div>
       </div>
@@ -899,8 +908,8 @@
       <div class="modal-backdrop" data-close></div>
       <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="account-type-title">
         <div class="modal-head">
-          <h3 id="account-type-title">选择账户类型</h3>
-          <button type="button" class="icon-btn" aria-label="关闭" data-close>
+          <h3 id="account-type-title" data-i18n="account.chooseAnAccountType"></h3>
+          <button type="button" class="icon-btn" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
@@ -918,80 +927,80 @@
       <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
         <div class="modal-head">
           <div>
-            <h3 id="account-modal-title">添加账户</h3>
-            <p id="account-modal-description" class="muted small">Token 仅保存在本地配置文件，用于查询账户状态与用量。</p>
+            <h3 id="account-modal-title" data-i18n="accounts.add"></h3>
+            <p id="account-modal-description" class="muted small" data-i18n="account.tokensAreStoredInYourLocalConfiguration"></p>
           </div>
-          <button id="account-close" class="icon-btn" type="button" aria-label="关闭" data-close>
+          <button id="account-close" class="icon-btn" type="button" data-close data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
 
         <div class="modal-body">
-          <div id="account-add-mode" class="segmented segmented-full" role="tablist" aria-label="ChatGPT 添加方式" hidden>
+          <div id="account-add-mode" class="segmented segmented-full" role="tablist" hidden data-i18n-aria-label="account.howToAddChatgpt">
             <button id="account-add-mode-token" class="seg active" type="button" role="tab" aria-selected="true" aria-controls="account-token-fields" data-mode="token">Token</button>
-            <button id="account-add-mode-file" class="seg" type="button" role="tab" aria-selected="false" aria-controls="account-auth-file-field" tabindex="-1" data-mode="file">auth.json 文件</button>
+            <button id="account-add-mode-file" class="seg" type="button" role="tab" aria-selected="false" aria-controls="account-auth-file-field" tabindex="-1" data-mode="file" data-i18n="account.authJsonFile"></button>
             <button id="account-add-mode-json" class="seg" type="button" role="tab" aria-selected="false" aria-controls="account-auth-field" tabindex="-1" data-mode="json">JSON</button>
           </div>
 
           <!-- Claude 专属：浏览器 OAuth 授权，登录后粘贴回调页展示的授权码即可自动填好凭据 -->
           <div id="account-oauth-field" hidden>
-            <label for="account-oauth-code">OAuth 授权（推荐）</label>
+            <label for="account-oauth-code" data-i18n="account.oauthRecommended"></label>
             <div class="row">
-              <button id="account-oauth-open" class="secondary compact" type="button">浏览器授权</button>
-              <input id="account-oauth-code" class="grow" type="text" spellcheck="false" placeholder="登录后把页面展示的授权码粘贴到这里" />
-              <button id="account-oauth-finish" class="secondary compact" type="button">完成授权</button>
+              <button id="account-oauth-open" class="secondary compact" type="button" data-i18n="account.authorizeInBrowser"></button>
+              <input id="account-oauth-code" class="grow" type="text" spellcheck="false" data-i18n-placeholder="account.afterSigningInPasteTheAuthorizationCode" />
+              <button id="account-oauth-finish" class="secondary compact" type="button" data-i18n="account.finishAuthorization"></button>
             </div>
-            <p class="muted small">点「浏览器授权」用 claude.ai 账号登录并授权，完成后页面会展示一串授权码；粘贴到上方并点「完成授权」即可添加账户（无需手动填 Token）。</p>
+            <p class="muted small" data-i18n="account.selectAuthorizeInBrowserAndSignIn"></p>
             <hr class="modal-divider" />
           </div>
 
-          <label for="account-note">备注</label>
-          <input id="account-note" type="text" spellcheck="false" placeholder="给账户起个名字，便于区分（选填）" />
+          <label for="account-note" data-i18n="account.note"></label>
+          <input id="account-note" type="text" spellcheck="false" data-i18n-placeholder="account.optionalNameToIdentifyThisAccount" />
 
           <div id="account-interval-field" class="account-interval-field" hidden>
-            <label for="account-refresh-interval">同步间隔</label>
+            <label for="account-refresh-interval" data-i18n="settings.syncInterval"></label>
             <select id="account-refresh-interval">
-              <option value="">跟随全局</option>
-              <option value="0">关闭</option>
-              <option value="5">5 分钟</option>
-              <option value="15">15 分钟</option>
-              <option value="30">30 分钟</option>
-              <option value="60">1 小时</option>
-              <option value="360">6 小时</option>
-              <option value="720">12 小时</option>
-              <option value="1440">24 小时</option>
+              <option value="" data-i18n="account.useGlobalSetting"></option>
+              <option value="0" data-i18n="common.close"></option>
+              <option value="5" data-i18n="settings.5Minutes"></option>
+              <option value="15" data-i18n="settings.15Minutes"></option>
+              <option value="30" data-i18n="settings.30Minutes"></option>
+              <option value="60" data-i18n="settings.1Hour"></option>
+              <option value="360" data-i18n="settings.6Hours"></option>
+              <option value="720" data-i18n="settings.12Hours"></option>
+              <option value="1440" data-i18n="settings.24Hours"></option>
             </select>
-            <p class="muted small">独立间隔覆盖全局，仅控制此账户的定时刷新；ChatGPT / Claude 共享日志仍使用全局间隔。</p>
+            <p class="muted small" data-i18n="account.thisIntervalOverridesTheGlobalScheduleFor"></p>
           </div>
 
           <div id="account-auto-refresh-field" class="toggle-group account-auto-refresh-field" hidden>
             <label class="toggle">
               <input id="account-auto-refresh-token" type="checkbox" role="switch" />
               <span class="toggle-track" aria-hidden="true"></span>
-              <span class="toggle-text">自动续期 Token</span>
+              <span class="toggle-text" data-i18n="account.automaticallyRenewToken"></span>
             </label>
-            <p class="muted small">关闭后，自动和手动查询仅使用现有 Token；主动切换账户、修改凭据或重新授权仍可能续期。</p>
+            <p class="muted small" data-i18n="account.whenOffScheduledAndManualChecksUse"></p>
           </div>
 
           <div id="account-desktop-binding-field" class="account-interval-field" hidden>
-            <label>Desktop 登录</label>
+            <label data-i18n="account.desktopLogin"></label>
             <p id="account-desktop-binding-status" class="muted small" role="status"></p>
-            <button id="account-desktop-bind" class="secondary compact" type="button">绑定 Desktop 登录</button>
-            <p class="muted small">首次绑定后可与 CLI 一起切换。桌面登录快照仅保存在本机。</p>
+            <button id="account-desktop-bind" class="secondary compact" type="button" data-i18n="account.linkDesktopLogin"></button>
+            <p class="muted small" data-i18n="account.onceLinkedDesktopCanSwitchWithThe"></p>
           </div>
 
           <div id="account-credential-fields">
-            <div id="account-auth-mode" class="segmented" role="group" aria-label="凭据编辑模式" hidden>
+            <div id="account-auth-mode" class="segmented" role="group" hidden data-i18n-aria-label="account.credentialEditingMode">
               <button id="account-mode-token" class="seg active" type="button" aria-pressed="true">Token</button>
-              <button id="account-mode-auth" class="seg" type="button" aria-pressed="false">完整 Auth</button>
+              <button id="account-mode-auth" class="seg" type="button" aria-pressed="false" data-i18n="account.fullAuth"></button>
             </div>
             <div id="account-token-fields">
               <label id="account-token-label" for="account-token">Token</label>
-              <textarea id="account-token" rows="3" spellcheck="false" placeholder="user_xxx::eyJ... 或 WorkosCursorSessionToken"></textarea>
+              <textarea id="account-token" rows="3" spellcheck="false" data-i18n-placeholder="account.userXxxEyjOrWorkoscursorsessiontoken"></textarea>
 
               <div id="account-refresh-field" hidden>
-                <label for="account-refresh-token">Refresh Token（选填）</label>
-                <textarea id="account-refresh-token" rows="3" spellcheck="false" placeholder="~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期"></textarea>
+                <label for="account-refresh-token" data-i18n="account.refreshTokenOptional"></label>
+                <textarea id="account-refresh-token" rows="3" spellcheck="false" data-i18n-placeholder="account.tokensRefreshTokenFromCodexAuthJson"></textarea>
               </div>
             </div>
             <div id="account-auth-field" hidden>
@@ -999,37 +1008,37 @@
               <textarea id="account-auth-json" rows="8" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
             </div>
             <div id="account-auth-file-field" hidden>
-              <label>auth.json 文件</label>
+              <label data-i18n="account.authJsonFile"></label>
               <div class="account-auth-file-row">
-                <button id="account-auth-pick" class="secondary compact" type="button">选择文件</button>
-                <span id="account-auth-file-name" class="muted small">尚未选择文件</span>
+                <button id="account-auth-pick" class="secondary compact" type="button" data-i18n="account.chooseFile"></button>
+                <span id="account-auth-file-name" class="muted small" data-i18n="account.noFileSelected"></span>
               </div>
               <p id="account-auth-file-status" class="status" role="status" hidden></p>
             </div>
             <p id="account-auth-status" class="status" role="status" hidden></p>
-            <button id="account-auth-reload" class="secondary compact" type="button" hidden>重新载入 Auth</button>
+            <button id="account-auth-reload" class="secondary compact" type="button" hidden data-i18n="account.reloadAuth"></button>
           </div>
 
           <div id="account-api-field" class="toggle-group" hidden>
             <label class="toggle">
               <input id="account-ignore-api-models" type="checkbox" role="switch" />
               <span class="toggle-track" aria-hidden="true"></span>
-              <span class="toggle-text">不记录 API 额度用量</span>
+              <span class="toggle-text" data-i18n="account.excludeApiQuotaUsage"></span>
             </label>
-            <p class="muted small">排除套餐内 API 额度用量和超额按量付费记录。开启并保存后清除对应明细及统计，后续同步也不再保存。旧账单需要联网补齐计费信息；关闭后不会还原已清除的数据，再次同步时可能重新获取。</p>
-            <p class="muted small">自有模型临时转扣 API 额度的记录暂无法精确识别。</p>
+            <p class="muted small" data-i18n="account.excludeIncludedApiQuotaAndPayAs"></p>
+            <p class="muted small" data-i18n="account.chargesTemporarilyRedirectedFromFirstPartyModels"></p>
           </div>
 
           <p id="account-modal-status" class="status" hidden></p>
         </div>
 
         <div class="modal-foot">
-          <button id="account-import-local" class="secondary" type="button">从本机导入 Cursor</button>
+          <button id="account-import-local" class="secondary" type="button" data-i18n="account.importLocalCursorAccount"></button>
           <!-- 编辑 Cursor 账户时的危险操作：删除本机事件库与统计缓存，账户与 Token 保留 -->
-          <button id="account-clear-usage" class="secondary danger" type="button" title="删除该账户在本机的用量事件库与统计缓存（账户与 Token 保留），下次刷新用量时重新全量拉取" hidden>清除本地数据</button>
+          <button id="account-clear-usage" class="secondary danger" type="button" hidden data-i18n-title="account.clearThisAccountSLocalUsageEvents" data-i18n="raw.clearLocalData"></button>
           <div class="modal-actions">
-            <button id="account-cancel" class="secondary" type="button" data-close>取消</button>
-            <button id="account-save" class="primary" type="button">保存</button>
+            <button id="account-cancel" class="secondary" type="button" data-close data-i18n="common.cancel"></button>
+            <button id="account-save" class="primary" type="button" data-i18n="common.save"></button>
           </div>
         </div>
       </div>
@@ -1041,8 +1050,8 @@
       <div class="modal-backdrop"></div>
       <div class="modal-card modal-card-sm" role="dialog" aria-modal="true" aria-labelledby="switch-modal-title">
         <div class="modal-head">
-          <div><h3 id="switch-modal-title">切换账户</h3></div>
-          <button id="switch-close" class="icon-btn" type="button" aria-label="关闭">
+          <div><h3 id="switch-modal-title" data-i18n="switch.switchAccount"></h3></div>
+          <button id="switch-close" class="icon-btn" type="button" data-i18n-aria-label="common.close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
@@ -1068,7 +1077,7 @@
             <label class="toggle">
               <input id="switch-modal-api-input" type="checkbox" role="switch" aria-describedby="switch-modal-api-warning-title switch-modal-api-help" />
               <span class="toggle-track" aria-hidden="true"></span>
-              <span class="toggle-text">保留 API 额度历史记录</span>
+              <span class="toggle-text" data-i18n="switch.keepApiQuotaHistory"></span>
             </label>
             <div class="api-history-warning" role="note" aria-labelledby="switch-modal-api-warning-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18.6A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-2.4L13.7 3.9a2 2 0 0 0-3.4 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -1085,23 +1094,23 @@
           <!-- 结果阶段的备选操作（如 ChatGPT 切换失败后的「强制写入并启动」），由 JS 按需显示 -->
           <button id="switch-alt" class="secondary danger" type="button" hidden></button>
           <div class="modal-actions">
-            <button id="switch-cancel" class="secondary" type="button">取消</button>
-            <button id="switch-ok" class="primary" type="button">确认</button>
+            <button id="switch-cancel" class="secondary" type="button" data-i18n="common.cancel"></button>
+            <button id="switch-ok" class="primary" type="button" data-i18n="common.confirm"></button>
           </div>
         </div>
       </div>
     </div>
 
     <script src="vendor/chart.umd.min.js"></script>
-    <script type="module" src="main.js"></script>
+    <script type="module" src="bootstrap.js"></script>
     <div id="app-update-confirm" class="modal" hidden>
       <div class="modal-backdrop" data-close></div>
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="app-update-confirm-title">
-        <div class="modal-head"><h3 id="app-update-confirm-title">安装应用更新</h3></div>
+        <div class="modal-head"><h3 id="app-update-confirm-title" data-i18n="updater.installApplicationUpdate"></h3></div>
         <div class="modal-body"><p id="app-update-confirm-text"></p></div>
         <div class="modal-foot">
-          <button class="secondary" type="button" data-close>稍后更新</button>
-          <button id="app-update-confirm-ok" class="primary" type="button">下载安装并重启</button>
+          <button class="secondary" type="button" data-close data-i18n="updater.updateLater"></button>
+          <button id="app-update-confirm-ok" class="primary" type="button" data-i18n="updater.downloadInstallAndRestart"></button>
         </div>
       </div>
     </div>

@@ -28,6 +28,8 @@ const RESET_CREDITS: &str = "https://chatgpt.com/backend-api/wham/rate-limit-res
 #[serde(rename_all = "camelCase")]
 pub struct UsageWindow {
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_name: Option<String>,
     pub used_percent: Option<f64>,
     pub limit_window_seconds: Option<i64>,
     pub reset_at: Option<i64>,
@@ -73,14 +75,14 @@ pub struct CodexUsage {
     pub raw: Value,
 }
 
-fn window_label(seconds: Option<i64>) -> String {
+fn window_label(seconds: Option<i64>) -> &'static str {
     match seconds {
-        Some(18000) => "5 小时".to_string(),
-        Some(604800) => "每周".to_string(),
-        Some(2_592_000) => "每月".to_string(),
-        Some(s) if s % 3600 == 0 => format!("{} 小时窗口", s / 3600),
-        Some(s) => format!("{s} 秒窗口"),
-        None => "用量窗口".to_string(),
+        Some(18000) => "quota.fiveHours",
+        Some(604800) => "quota.weekly",
+        Some(2_592_000) => "quota.monthly",
+        Some(s) if s % 3600 == 0 => "quota.hoursWindow",
+        Some(_) => "quota.secondsWindow",
+        None => "quota.window",
     }
 }
 
@@ -110,14 +112,9 @@ fn window_from_obj(v: &Value) -> UsageWindow {
         v,
         &["limit_window_seconds", "limitWindowSeconds", "window_size_seconds"],
     );
-    let mut label = window_label(seconds);
-    if let Some(name) = v.get("name").and_then(|x| x.as_str()) {
-        if !name.is_empty() {
-            label = format!("{label}（{name}）");
-        }
-    }
     UsageWindow {
-        label,
+        label: window_label(seconds).into(),
+        label_name: v.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).map(String::from),
         used_percent: gf(v, &["used_percent", "usedPercent"]),
         limit_window_seconds: seconds,
         reset_at: gi(v, &["reset_at", "resetAt"]),

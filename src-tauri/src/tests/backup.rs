@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn language_round_trips_and_legacy_backups_keep_the_local_preference() {
+    let mut current: Settings = serde_json::from_value(json!({"uiLanguage":"en"})).unwrap();
+    let exported = serde_json::to_value(settings::persisted_form(&current)).unwrap();
+    assert_eq!(exported["uiLanguage"], "en");
+    merge_settings(&mut current, Settings::default(), false);
+    assert_eq!(current.ui_language.as_deref(), Some("en"));
+    let incoming = serde_json::from_value(json!({"uiLanguage":"system"})).unwrap();
+    merge_settings(&mut current, incoming, false);
+    assert_eq!(current.ui_language.as_deref(), Some("system"));
+}
+
+#[test]
 fn account_order_backup_maps_new_and_existing_identities_before_local_only_accounts() {
     let mut local: Settings = serde_json::from_value(json!({
         "accounts":[{"id":"local-only","kind":"opencode","token":"wrk_local"},

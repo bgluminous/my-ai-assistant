@@ -52,66 +52,67 @@ use Level::{Error, Info, Warn};
 
 /// 事件登记表：事件标识 → 默认级别、分类、界面标签。新增事件必须在此登记，
 /// 未登记的事件按 info / 设置与系统 / 原始标识兜底（写入侧在 debug 构建下会断言失败）。
-const EVENTS: &[(&str, Level, Category, &str)] = &[
-    ("account_add", Info, Account, "添加账户"),
-    ("account_update", Info, Account, "编辑账户"),
-    ("account_delete", Info, Account, "删除账户"),
-    ("account_import", Info, Account, "本机导入"),
-    ("account_import_file", Info, Account, "导入账户"),
-    ("account_export", Info, Account, "导出账户"),
-    ("cursor_switch_local", Info, Account, "切换登录"),
-    ("codex_switch_local", Info, Account, "切换登录"),
-    ("claude_switch_local", Info, Account, "切换登录"),
-    ("client_switch_result", Info, Account, "客户端切换结果"),
-    ("claude_desktop_binding_start", Info, Credential, "开始绑定桌面登录"),
-    ("claude_desktop_binding_saved", Info, Credential, "绑定桌面登录"),
-    ("claude_desktop_binding_cancelled", Info, Credential, "恢复桌面登录"),
-    ("codex_force_write", Warn, Account, "强制写入登录"),
-    ("cursor_logout_local", Info, Account, "退出登录"),
-    ("codex_logout_local", Info, Account, "退出登录"),
-    ("claude_logout_local", Info, Account, "退出登录"),
-    ("account_state_changed", Warn, State, "状态变化"),
-    ("account_refresh_failed", Error, State, "刷新失败"),
-    ("codex_renewed", Info, Credential, "自动续期"),
-    ("codex_renew_failed", Error, Credential, "续期失败"),
-    ("claude_renewed", Info, Credential, "自动续期"),
-    ("claude_renew_failed", Error, Credential, "续期失败"),
-    ("codex_sync", Info, Credential, "凭据回写本机"),
-    ("codex_sync_failed", Error, Credential, "凭据回写失败"),
-    ("codex_local_changed", Info, Credential, "本机登录变化"),
-    ("codex_adopt_local", Info, Credential, "采用本机凭据"),
-    ("codex_adopt_failed", Error, Credential, "采用本机凭据失败"),
-    ("codex_auth_migrated", Info, Credential, "凭据存储迁移"),
-    ("usage_snapshot", Info, Usage, "用量快照"),
-    ("codex_usage_sync_config", Info, Settings, "用量同步设置"),
-    ("codex_usage_sync_ok", Info, Usage, "GPT 用量同步"),
-    ("codex_usage_sync_failed", Error, Usage, "GPT 用量同步失败"),
-    ("codex_usage_cache_clear", Info, Usage, "GPT 本机缓存清理"),
-    ("usage_events_export", Info, Usage, "导出原始账单"),
-    ("usage_data_adopt", Info, Usage, "沿用统计数据"),
-    ("usage_data_delete", Info, Usage, "删除统计数据"),
-    ("usage_data_note", Info, Usage, "修改备注"),
-    ("usage_data_edit", Info, Usage, "编辑已删除账户"),
-    ("usage_data_plan", Info, Usage, "修改套餐"),
-    ("usage_data_clear", Info, Usage, "清除本地数据"),
-    ("interval_set", Info, Settings, "定时设置"),
-    ("local_sync_interval_set", Info, Settings, "同步间隔设置"),
-    ("autostart_set", Info, Settings, "开机启动"),
-    ("pricing_update", Info, Settings, "价格表更新"),
-    ("backup_export", Info, Settings, "导出备份"),
-    ("backup_import", Info, Settings, "导入备份"),
-    ("settings_load_failed", Error, Settings, "设置载入失败"),
+const EVENTS: &[(&str, Level, Category)] = &[
+    ("account_add", Info, Account),
+    ("account_opencode_link", Info, Account),
+    ("account_update", Info, Account),
+    ("account_delete", Info, Account),
+    ("account_import", Info, Account),
+    ("account_import_file", Info, Account),
+    ("account_export", Info, Account),
+    ("cursor_switch_local", Info, Account),
+    ("codex_switch_local", Info, Account),
+    ("claude_switch_local", Info, Account),
+    ("client_switch_result", Info, Account),
+    ("claude_desktop_binding_start", Info, Credential),
+    ("claude_desktop_binding_saved", Info, Credential),
+    ("claude_desktop_binding_cancelled", Info, Credential),
+    ("codex_force_write", Warn, Account),
+    ("cursor_logout_local", Info, Account),
+    ("codex_logout_local", Info, Account),
+    ("claude_logout_local", Info, Account),
+    ("account_state_changed", Warn, State),
+    ("account_refresh_failed", Error, State),
+    ("codex_renewed", Info, Credential),
+    ("codex_renew_failed", Error, Credential),
+    ("claude_renewed", Info, Credential),
+    ("claude_renew_failed", Error, Credential),
+    ("codex_sync", Info, Credential),
+    ("codex_sync_failed", Error, Credential),
+    ("codex_local_changed", Info, Credential),
+    ("codex_adopt_local", Info, Credential),
+    ("codex_adopt_failed", Error, Credential),
+    ("codex_auth_migrated", Info, Credential),
+    ("usage_snapshot", Info, Usage),
+    ("codex_usage_sync_config", Info, Settings),
+    ("codex_usage_sync_ok", Info, Usage),
+    ("codex_usage_sync_failed", Error, Usage),
+    ("codex_usage_cache_clear", Info, Usage),
+    ("usage_events_export", Info, Usage),
+    ("usage_data_adopt", Info, Usage),
+    ("usage_data_delete", Info, Usage),
+    ("usage_data_note", Info, Usage),
+    ("usage_data_edit", Info, Usage),
+    ("usage_data_plan", Info, Usage),
+    ("usage_data_clear", Info, Usage),
+    ("interval_set", Info, Settings),
+    ("local_sync_interval_set", Info, Settings),
+    ("autostart_set", Info, Settings),
+    ("pricing_update", Info, Settings),
+    ("backup_export", Info, Settings),
+    ("backup_import", Info, Settings),
+    ("settings_load_failed", Error, Settings),
     // 【过渡期临时代码，到期删除】旧用户目录迁移事件，随 paths.rs 的迁移逻辑一起删除
-    ("data_dir_migrated", Info, Settings, "目录迁移"),
-    ("data_dir_migrate_failed", Error, Settings, "目录迁移失败"),
+    ("data_dir_migrated", Info, Settings),
+    ("data_dir_migrate_failed", Error, Settings),
 ];
 
-fn meta_of(event: &str) -> (Level, Category, &str) {
+fn meta_of(event: &str) -> (Level, Category) {
     EVENTS
         .iter()
         .find(|(id, ..)| *id == event)
-        .map(|(_, level, category, label)| (*level, *category, *label))
-        .unwrap_or((Info, Settings, event))
+        .map(|(_, level, category)| (*level, *category))
+        .unwrap_or((Info, Settings))
 }
 
 /// 落盘的一条记录。level / category 为后来新增的字段，旧文件里的条目没有，读取时按事件类型补齐。
@@ -139,7 +140,7 @@ fn file_path() -> Result<PathBuf, String> {
 
 /// 追加一条审计记录，级别取事件登记的默认值。写入失败静默忽略，绝不阻断业务流程。
 pub fn log(event: &str, message: String, detail: Option<Value>) {
-    let (level, _, _) = meta_of(event);
+    let (level, _) = meta_of(event);
     log_at(level, event, message, detail);
 }
 
@@ -151,7 +152,7 @@ pub fn log_at(level: Level, event: &str, message: String, detail: Option<Value>)
         EVENTS.iter().any(|(id, ..)| *id == event),
         "未登记的审计事件：{event}"
     );
-    let (_, category, _) = meta_of(event);
+    let (_, category) = meta_of(event);
     let entry = AuditEntry {
         ts: Utc::now().timestamp_millis(),
         level: Some(level),
@@ -202,12 +203,13 @@ pub struct AuditRow {
 
 impl From<AuditEntry> for AuditRow {
     fn from(entry: AuditEntry) -> Self {
-        let (level, category, label) = meta_of(&entry.event);
+        let (level, category) = meta_of(&entry.event);
+        let label = crate::ui_language::builtin_text(&format!("audit.event.{}", entry.event));
         AuditRow {
             ts: entry.ts,
             level: entry.level.unwrap_or(level),
             category: entry.category.unwrap_or(category),
-            label: label.to_string(),
+            label: if label.is_empty() { entry.event.clone() } else { label.to_string() },
             event: entry.event,
             message: entry.message,
             detail: entry.detail,

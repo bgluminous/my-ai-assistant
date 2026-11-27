@@ -1,3 +1,4 @@
+import { locale, translate } from "./i18n.js";
 import { invoke, listen } from "./shared.js";
 import { syncError } from "./sync_errors.js";
 
@@ -38,12 +39,12 @@ export function refreshSyncStatus() {
 }
 
 const phases = {
-  waiting: "GPT 等待同步", scanning: "GPT 正在扫描本机", storing: "GPT 正在整理数据",
-  connecting: "GPT 正在连接服务器", uploading: "GPT 正在上传", downloading: "GPT 正在下载",
-  recovering: "GPT 正在重新同步", completed: "GPT 同步完成", failed: "GPT 同步失败",
+  waiting: "syncProgress.gptWaitingToSync", scanning: "syncProgress.gptScanningLocalFiles", storing: "syncProgress.gptPreparingData",
+  connecting: "syncProgress.gptConnectingToServer", uploading: "syncProgress.gptUploading", downloading: "syncProgress.gptDownloading",
+  recovering: "syncProgress.gptResyncing", completed: "syncProgress.gptSyncComplete", failed: "syncProgress.gptSyncFailed",
 };
-const number = (value) => Number(value || 0).toLocaleString("zh-CN");
-const time = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "尚无成功记录";
+const number = (value) => Number(value || 0).toLocaleString(locale());
+const time = (value) => value ? new Date(value).toLocaleString(locale(), { hour12: false }) : translate("syncProgress.noSuccessfulSyncYet");
 
 /** 计数表示本次尝试中已确认或落库的同步记录，不是新增 Token 或去重后的用量。 */
 export function syncProgressView(status, { compact = false, showDisabled = false, now = Date.now() } = {}) {
@@ -53,28 +54,28 @@ export function syncProgressView(status, { compact = false, showDisabled = false
   const completed = status.state === "idle" && p?.phase === "completed";
   const remaining = completed ? Math.max(0, (p.finishedAt || 0) + 5000 - now) : 0;
   const disabled = status.state === "disabled";
-  let title = disabled ? "未启用，仅采集本机数据" : "GPT 同步已就绪";
+  let title = disabled ? translate("syncProgress.disabledCollectingLocallyOnly") : translate("syncProgress.gptSyncReady");
   let counts = "";
   let percent = null;
   if (running) {
-    title = phases[p?.phase] || "GPT 同步中";
+    title = (phases[p?.phase] && translate(phases[p?.phase])) || translate("syncProgress.gptSyncing");
     if (p?.phase === "uploading") {
-      counts = `${number(p.uploadedRecords)} / ${number(p.uploadTotal)} 条`;
+      counts = translate("syncProgress.records", number(p.uploadedRecords), number(p.uploadTotal));
       if (p.uploadTotal > 0) percent = Math.min(100, Math.floor(p.uploadedRecords / p.uploadTotal * 100));
-      else counts = "无待上传记录，正在登记设备";
+      else counts = translate("syncProgress.noPendingUploadsRegisteringDevice");
     } else if (p?.phase === "downloading") {
-      counts = `${number(p.downloadedRecords)} 条 · ${number(p.downloadedPages)} 页`;
+      counts = translate("syncProgress.recordsPages", number(p.downloadedRecords), number(p.downloadedPages));
     }
   } else if (failed || completed) {
-    title = failed ? (status.state === "paused" ? "GPT 同步已暂停" : "GPT 同步失败，等待重试") : phases.completed;
-    if (p) counts = `已上传 ${number(p.uploadedRecords)} 条 · 已下载 ${number(p.downloadedRecords)} 条`;
+    title = failed ? (status.state === "paused" ? translate("syncProgress.gptSyncPaused") : translate("syncProgress.gptSyncFailedWaitingToRetry")) : phases.completed;
+    if (p) counts = translate("syncProgress.uploadedDownloaded", number(p.uploadedRecords), number(p.downloadedRecords));
   }
   return {
     hidden: disabled ? !showDisabled : compact && !running && !failed && !remaining,
     title, counts, percent, running, remaining,
     tone: failed ? "error" : completed ? "success" : running ? "running" : "idle",
-    details: disabled ? "配置服务器和同步密钥后，自动同步本机与其他设备的用量。"
-      : `待上传 ${number(status.pendingRecords)} 条 · 最近成功：${time(status.lastSuccessAt)}`,
+    details: disabled ? translate("syncProgress.configureTheServerAndSyncKeyTo")
+      : translate("syncProgress.pendingUploadsLastSuccess", number(status.pendingRecords), time(status.lastSuccessAt)),
     error: failed && status.error ? syncError(status.error) : "",
   };
 }
@@ -89,10 +90,11 @@ export function mountSyncProgress(node, options = {}) {
     <span class="sync-progress-dot" aria-hidden="true"></span>
     <span class="sync-progress-title"></span><span class="sync-progress-counts"></span>
     <span class="sync-progress-percent"></span></div>
-    <progress class="sync-progress-bar" max="100" aria-label="GPT 上传进度"></progress>
+    <progress class="sync-progress-bar" max="100" data-i18n-aria-label="syncProgress.gptUploadProgress"></progress>
     <p class="sync-progress-details"></p><p class="sync-progress-error" role="status" aria-live="polite"></p>`;
   const find = (name) => node.querySelector(`.sync-progress-${name}`);
   const title = find("title"), counts = find("counts"), percent = find("percent"), bar = find("bar");
+  bar.setAttribute("aria-label", translate("syncProgress.gptUploadProgress"));
   const details = find("details"), error = find("error");
   let timer = null;
   let disposed = false;
@@ -108,7 +110,7 @@ export function mountSyncProgress(node, options = {}) {
     percent.textContent = view.percent == null ? "" : `${view.percent}%`;
     percent.hidden = view.percent == null || options.compact;
     bar.hidden = !view.running;
-    bar.setAttribute("aria-label", view.percent == null ? "GPT 同步进行中" : "GPT 上传进度");
+    bar.setAttribute("aria-label", view.percent == null ? translate("syncProgress.gptSyncInProgress") : translate("syncProgress.gptUploadProgress"));
     if (view.percent == null) bar.removeAttribute("value");
     else bar.setAttribute("value", String(view.percent));
     details.textContent = view.details;
@@ -117,6 +119,8 @@ export function mountSyncProgress(node, options = {}) {
     error.hidden = !view.error;
     if (options.compact && view.remaining > 0) timer = setTimeout(() => render(current), view.remaining);
   }
+  const relabel = () => { if (current) render(current); };
+  globalThis.window?.addEventListener?.("uilanguagechange", relabel);
   subscribers.add(render);
   if (current) render(current);
   else node.hidden = true;
@@ -124,13 +128,14 @@ export function mountSyncProgress(node, options = {}) {
     if (disposed || current) return;
     node.hidden = false;
     node.dataset.state = "error";
-    title.textContent = "暂时无法读取 GPT 同步状态";
+    title.textContent = translate("syncProgress.gptSyncStatusTemporarilyUnavailable");
     bar.hidden = true;
     error.textContent = syncError(failure);
   });
   const dispose = () => {
     disposed = true;
     clearTimeout(timer);
+    globalThis.window?.removeEventListener?.("uilanguagechange", relabel);
     subscribers.delete(render);
     mounted.delete(node);
   };

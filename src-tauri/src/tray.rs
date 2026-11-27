@@ -7,6 +7,22 @@ use tauri::{
 };
 
 use crate::main_window;
+use crate::ui_language::{self, Language};
+
+struct MenuLabels {
+    show: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
+
+pub fn update_language(app: &AppHandle, language: &Language) {
+    if let Some(items) = app.try_state::<MenuLabels>() {
+        let _ = items.show.set_text(language.text("tray.showMain"));
+        let _ = items.quit.set_text(language.text("tray.quit"));
+    }
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(language.text("app.title")));
+    }
+}
 
 /// 单击延迟：等过这段时间仍无第二次点击才弹出面板，避免双击第一下先闪小窗。
 const SINGLE_CLICK_DELAY_MS: u64 = 320;
@@ -122,14 +138,16 @@ pub fn tray_take_add_request() -> bool {
 /// 创建系统托盘：左键单击弹出账户面板，双击打开主窗口；右键菜单提供「显示主窗口 / 退出」。
 /// 窗口关闭按钮只是隐藏到托盘（见 lib.rs），从托盘「退出」才真正结束进程。
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let language = ui_language::initialize(app);
+    let show = MenuItem::with_id(app, "show", language.text("tray.showMain"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", language.text("tray.quit"), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
+    app.manage(MenuLabels { show, quit });
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("AI 助手 · 用量与费用")
+        .tooltip(language.text("app.title"))
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => main_window::show(app),
             "quit" if !crate::operations::paused() => app.exit(0),

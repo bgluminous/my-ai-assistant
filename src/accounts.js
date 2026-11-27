@@ -1,3 +1,4 @@
+import { errorCode, locale, translate } from "./i18n.js";
 import { createCodexAuthEditor } from "./codex_auth_editor.js";
 import { createCodexAuthAdder } from "./codex_auth_add.js";
 import { loadAccountList, trackAccountOrder, orderHandle, initRowOrder } from "./account_order.js";
@@ -7,6 +8,7 @@ import { createModal } from "./modal.js";
 import { addOpenCode, editOpenCode, switchOpenCode } from "./opencode_ui.js";
 import {
   el,
+  fmtInt,
   invoke,
   listen,
   fmtDateMs,
@@ -23,7 +25,7 @@ import {
   relativeFromUnixSeconds,
   accountPlanInfo,
   accountDateInfo,
-  quotaResetInfo,
+  quotaResetInfo, quotaWindowLabel,
   remainInfo,
   centsText,
   usdText,
@@ -44,9 +46,9 @@ const QUOTA_WARN_REMAIN_PERCENT = 50;
 const QUOTA_LOW_REMAIN_PERCENT = 15;
 
 const TOKEN_PLACEHOLDERS = {
-  cursor: "user_xxx::eyJ... 或 WorkosCursorSessionToken",
-  codex: "~/.codex/auth.json 里的 tokens.access_token",
-  claude: "sk-ant-oat01-…（~/.claude/.credentials.json 里的 accessToken）",
+  get cursor() { return translate("account.userXxxEyjOrWorkoscursorsessiontoken"); },
+  get codex() { return translate("accounts.tokensAccessTokenFromCodexAuthJson"); },
+  get claude() { return translate("accounts.skAntOat01AccesstokenFromClaude"); },
 };
 
 let accounts = [];
@@ -105,13 +107,13 @@ const refreshScheduler = createAccountRefreshScheduler({
       syncCodexUsage("interval"),
       ...[...sharedUsageListeners].map(listener => Promise.resolve().then(listener)),
     ]);
-    if (sync.error) setStatus("warn", `GPT 用量同步失败：${syncError(sync.error)}`);
+    if (sync.error) setStatus("warn", () => translate("accounts.gptUsageSyncFailed", syncError(sync.error)));
   },
   onRunningChange: (kinds) => {
     scheduledProviders = new Set(kinds);
     render();
   },
-  onError: (error) => setStatus("warn", `定时刷新失败：${resetError(error)}`),
+  onError: (error) => setStatus("warn", () => translate("accounts.scheduledRefreshFailed", resetError(error))),
 });
 
 function notifyChange() {
@@ -141,7 +143,7 @@ export function onSharedUsageRefresh(fn) {
 function fmtNum(value) {
   const n = Number(value);
   if (value == null || !Number.isFinite(n)) return "—";
-  return Number.isInteger(n) ? n.toLocaleString("zh-CN") : n.toFixed(2);
+  return Number.isInteger(n) ? n.toLocaleString(locale()) : n.toFixed(2);
 }
 
 /* ---------- 状态提示 ---------- */
@@ -167,21 +169,27 @@ function clearModalStatus() {
 function accountIssues(account) {
   const status = account.status || {};
   const issues = new Set();
-  for (const error of [rowErrors.get(account.id), status.refreshError, status.error]) {
+  const denial = {
+    expired: "accounts.theRefreshTokenHasExpired", reused: "trayPanel.theRefreshTokenWasAlreadyRotatedElsewhere",
+    revoked: "trayPanel.theRefreshTokenWasRevoked", invalid: "accounts.theRefreshTokenIsInvalid",
+  }[status.refreshErrorCode];
+  const detail = status.refreshErrorDetail ?? status.refreshError?.match(/（([^（）]*)）$/)?.[1];
+  const refreshError = denial ? translate(denial) + (detail ? " · " + detail : "") : status.refreshError;
+  for (const error of [rowErrors.get(account.id), refreshError, status.error]) {
     if (error) issues.add(resetError(error));
   }
   if (account.kind === "opencode") {
-    if (!account.opencodeAuthorized) issues.add("请在编辑中完成独立授权，查询套餐与用量。");
-    if (status.workspaceUsageAllowed === false) issues.add("工作区总用量需要管理员授权。");
-    for (const [key, label] of [["subscription", "套餐"], ["quota", "额度"], ["balance", "余额"]]) {
+    if (!account.opencodeAuthorized) issues.add(translate("accounts.authorizeThisWorkspaceInTheAccountEditor"));
+    if (status.workspaceUsageAllowed === false) issues.add(translate("accounts.workspaceWideUsageRequiresAdministratorAccess"));
+    for (const [key, label] of [["subscription", translate("accounts.plan")], ["quota", translate("accounts.quota")], ["balance", translate("accounts.balance")]]) {
       const field = status.fields?.[key];
       if (!field || ["ok", "not_subscribed"].includes(field.state)) continue;
-      const reason = field.error ? resetError(field.error) : field.state === "forbidden" ? "无查看权限" : "暂未获取";
-      const cached = Number(field.at) > 0 ? `；显示 ${fmtDateMs(Number(field.at))} 的缓存` : "";
+      const reason = field.error ? resetError(field.error) : field.state === "forbidden" ? translate("accounts.accessDenied") : translate("accounts.unavailable");
+      const cached = Number(field.at) > 0 ? translate("accounts.showingCachedDataFrom", fmtDateMs(Number(field.at))) : "";
       issues.add(`${label}：${reason}${cached}`);
     }
   }
-  if (status.stale) issues.add("部分数据未能刷新，保留已知缓存。");
+  if (status.stale) issues.add(translate("accounts.someDataCouldNotBeRefreshedShowing"));
   return [...issues].join("\n");
 }
 
@@ -195,7 +203,7 @@ function fillStateCell(cell, account) {
   const dot = document.createElement("span");
   dot.className = `dot ${alive === true ? "ok" : alive === false ? "bad" : "unknown"}`;
   const text = document.createElement("span");
-  text.textContent = alive === true ? "有效" : alive === false ? "已失效" : "未检测";
+  text.textContent = alive === true ? translate("accounts.valid") : alive === false ? translate("accounts.expired") : translate("accounts.unchecked");
   wrap.append(dot, text);
   cell.append(wrap);
 
@@ -209,14 +217,14 @@ function fillStateCell(cell, account) {
       const expiry = document.createElement("span");
       expiry.className = "state-expiry";
       expiry.textContent = info.text;
-      expiry.title = `Token 到期：${fmtDateMs(expMs)}（登录凭据有效期，非套餐周期）`;
+      expiry.title = translate("accounts.tokenExpiresCredentialValiditySeparateFromThe", fmtDateMs(expMs));
       line.append(expiry);
     }
   }
   if (account.kind !== "cursor" && String(account.refreshToken || "").trim()) {
     const tag = document.createElement("span");
     tag.className = "tag renewable";
-    tag.textContent = "可续期";
+    tag.textContent = translate("accounts.renewable");
     line.append(tag);
   }
   if (line.childNodes.length) cell.append(line);
@@ -266,19 +274,19 @@ function fillPlanCell(cell, account) {
   const startText = accountDateInfo(account.kind === "codex" ? status.planActiveStart : status.billingCycleStart)?.text;
   const renewHint = account.kind === "codex" || account.kind === "opencode"
     ? status.planWillRenew === true
-      ? "（到期自动续期）"
+      ? translate("accounts.renewsAutomatically")
       : status.planWillRenew === false
-      ? "（到期不续期）"
+      ? translate("accounts.doesNotRenew")
       : ""
-    : "（到期自动续期，额度重置）";
+    : translate("accounts.renewsAndResetsQuota");
   expiry.title =
     account.kind === "codex"
       ? startText
-        ? `订阅有效期：${startText} ~ ${end.text}${renewHint}`
-        : `订阅至 ${end.text}${renewHint}`
+        ? translate("accounts.subscriptionTo", startText, end.text, renewHint)
+        : translate("accounts.subscribedUntil", end.text, renewHint)
       : startText
-      ? `本期计费周期：${startText} ~ ${end.text}${renewHint}`
-      : `本期计费周期截止 ${end.text}${renewHint}`;
+      ? translate("accounts.billingPeriodTo", startText, end.text, renewHint)
+      : translate("accounts.billingPeriodEnds", end.text, renewHint);
   cell.append(expiry);
 }
 
@@ -317,7 +325,7 @@ function quotaBar(label, usedPercent, extra) {
   const pct = document.createElement("span");
   pct.className = "quota-bar-pct";
   pct.textContent = `${Math.round(remaining)}%`;
-  pct.title = `剩余 ${Math.round(remaining)}%`;
+  pct.title = translate("accounts.remaining", Math.round(remaining));
   wrap.append(name, track, pct);
   if (extra?.text) {
     const extraSpan = document.createElement("span");
@@ -361,7 +369,7 @@ function cursorSummaryNodes(status) {
       const detail = plan.used != null || plan.limit != null ? `${fmtNum(plan.used)} / ${fmtNum(plan.limit)}` : "";
       const bar = usedPct != null ? quotaBar("Plan", usedPct, { text: detail }) : null;
       if (bar) bars.push(bar);
-      else if (detail) meta.push(metaItem(`额度 ${detail}`));
+      else if (detail) meta.push(metaItem(translate("accounts.quota2", detail)));
     }
   }
   // Sand 周额度（Cursor 对 Grok Bot 额度的内部代号）：套餐包含时展示
@@ -391,7 +399,7 @@ function fillOnDemandCell(cell, account) {
   if (Number.isFinite(limitCents) && limitCents > 0) {
     const limit = document.createElement("div");
     limit.className = "ondemand-limit";
-    limit.textContent = `上限 ${centsText(limitCents)}`;
+    limit.textContent = translate("accounts.limit", centsText(limitCents));
     cell.append(limit);
   }
 }
@@ -419,12 +427,12 @@ function fillCreditsCell(cell, account) {
   }
   const used = document.createElement("div");
   used.className = "ondemand-used";
-  used.textContent = unlimited ? "无限" : usdText(usd);
+  used.textContent = unlimited ? translate("accounts.unlimited") : usdText(usd);
   cell.append(used);
   if (units != null) {
     const extra = document.createElement("div");
     extra.className = "ondemand-limit";
-    extra.textContent = `${units.toLocaleString("en-US")} 点`;
+    extra.textContent = translate("accounts.credits", units.toLocaleString(locale()));
     cell.append(extra);
   }
 }
@@ -438,7 +446,7 @@ function codexSummaryNodes(status, anchorSec) {
   for (const w of windows.slice(0, 3)) {
     if (!w) continue;
     const reset = quotaResetInfo(w.resetAt, w.resetsInSeconds, anchorSec);
-    const bar = quotaBar(w.label || "额度窗口", w.usedPercent, reset);
+    const bar = quotaBar(quotaWindowLabel(w, translate("accounts.quotaWindow")), w.usedPercent, reset);
     if (bar) bars.push(bar);
   }
   // 「剩余重置 2 次 · 最早 09-30 过期」：次数与最早过期时间用间隔点连成一条不换行的小字，
@@ -493,8 +501,8 @@ function fillTimeCell(cell, account) {
   if (account.kind === "codex" && Number.isFinite(credAt) && credAt > 0) {
     const cred = document.createElement("div");
     cred.className = "cred-refreshed";
-    cred.textContent = `凭据 ${relativeFromMs(credAt)}`;
-    cred.title = `凭据组（access / refresh token）最后换新：${fmtDateMs(credAt)}`;
+    cred.textContent = translate("accounts.credentials", relativeFromMs(credAt));
+    cred.title = translate("accounts.accessAndRefreshTokensLastRenewed", fmtDateMs(credAt));
     cell.append(cred);
   }
 }
@@ -518,7 +526,7 @@ function accountRow(account) {
     // 主显示：手填备注 > 刷新返回的用户名 > 自动备注
     const statusName = String((account.status && account.status.name) || "").trim();
     const primary =
-      (account.noteAuto === false ? account.note : "") || statusName || account.note || "未命名账户";
+      (account.noteAuto === false ? account.note : "") || statusName || account.note || translate("accounts.unnamedAccount");
     note.textContent = primary;
     note.title = primary;
     ident.append(note);
@@ -534,7 +542,7 @@ function accountRow(account) {
     token.textContent = maskToken(account.token);
     token.title = token.textContent;
   } else {
-    note.textContent = account.note || "未命名账户";
+    note.textContent = account.note || translate("accounts.unnamedAccount");
     note.title = account.note || "";
     ident.append(note);
     token.textContent = maskToken(account.token);
@@ -571,27 +579,27 @@ function accountRow(account) {
 
   const actionsCell = document.createElement("td");
   actionsCell.className = "account-actions";
-  const refreshBtn = iconAction("refresh", busy ? "刷新中…" : "刷新");
+  const refreshBtn = iconAction("refresh", busy ? translate("accounts.refreshing") : translate("usage.refresh"));
   refreshBtn.classList.toggle("busy", busy);
   refreshBtn.disabled = busy || providerRefreshing(account.kind) || switching || importing;
   refreshBtn.addEventListener("click", () => { void refreshOne(account.id); });
-  const editBtn = iconAction("edit", "编辑");
+  const editBtn = iconAction("edit", translate("accounts.edit"));
   editBtn.disabled = busy || switching;
   editBtn.addEventListener("click", () => account.kind === "opencode"
     ? editOpenCode(account, async () => { await loadInitial(false); void refreshOne(account.id); }) : openModal(account));
   // 删除使用显式确认弹窗，避免首次点击只变色而看起来没有响应。
-  const deleteBtn = iconAction("delete", "删除");
+  const deleteBtn = iconAction("delete", translate("accounts.delete"));
   deleteBtn.disabled = busy || switching;
   deleteBtn.addEventListener("click", () => { void onDeleteClick(account.id); });
   if (account.kind === "opencode") {
-    const switchBtn = iconAction("switch", "切换 OpenCode 客户端");
+    const switchBtn = iconAction("switch", translate("accounts.switchOpencodeClients"));
     switchBtn.disabled = busy || switching;
     switchBtn.addEventListener("click", () => { void switchOpenCode(account.id); });
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   } else if (account.kind === "cursor") {
     // 仅允许切换已验证有效的账户，避免把失效 token 写进本地 Cursor
     const aliveOk = !!(account.status && account.status.alive === true);
-    const switchBtn = iconAction("switch", aliveOk ? "切换到该账户" : "请先刷新验证账户后再切换");
+    const switchBtn = iconAction("switch", aliveOk ? translate("accounts.switchToThisAccount") : translate("accounts.refreshToVerifyThisAccountBeforeSwitching"));
     switchBtn.disabled = busy || switching || !aliveOk;
     switchBtn.addEventListener("click", () => { void onSwitchAccount(account.id); });
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
@@ -602,11 +610,11 @@ function accountRow(account) {
     const hasRt = !!String(account.refreshToken || "").trim();
     const switchBtn = iconAction(
       "switch",
-      isClaude ? "切换本机 Claude CLI / Desktop 账户" : !aliveOk
-        ? "请先刷新验证账户后再切换"
+      isClaude ? translate("accounts.switchLocalClaudeCliDesktopAccount") : !aliveOk
+        ? translate("accounts.refreshToVerifyThisAccountBeforeSwitching")
         : !hasRt
-        ? "该账户没有 Refresh Token，无法切换本机登录"
-        : "切换本机 GPT / Codex 账户"
+        ? translate("accounts.aRefreshTokenIsRequiredToSwitch")
+        : translate("accounts.switchLocalGptCodexAccount")
     );
     switchBtn.disabled = busy || switching || (!isClaude && (!aliveOk || !hasRt));
     switchBtn.addEventListener("click", () => {
@@ -615,7 +623,7 @@ function accountRow(account) {
     actionsCell.append(switchBtn, refreshBtn, editBtn, deleteBtn);
   }
 
-  const exportButton = iconAction("export", "导出此账户");
+  const exportButton = iconAction("export", translate("dialog.exportAccount"));
   exportButton.classList.add("account-export");
   exportButton.disabled = importing || switching;
   exportButton.addEventListener("click", () => { void onExport(account.id); });
@@ -628,7 +636,7 @@ function accountRow(account) {
 function updateAccountCount() {
   const latest = accounts.reduce((time, account) => Math.max(time, Number(account.lastRefreshAt) || 0), 0);
   el("#accounts-count").textContent = accounts.length
-    ? "共 " + accounts.length + " 个" + (latest ? " · 上次刷新 " + relativeFromMs(latest * 1000) : "") : "";
+    ? translate("accounts.count", fmtInt(accounts.length)) + (latest ? translate("accounts.lastRefresh") + relativeFromMs(latest * 1000) : "") : "";
 }
 
 function updateHeadingActions() {
@@ -744,7 +752,7 @@ async function refreshOne(id) {
     }
     return null;
   } catch (error) {
-    rowErrors.set(id, resetError(error));
+    rowErrors.set(id, errorCode(error));
     return null;
   } finally {
     refreshingIds.delete(id);
@@ -786,7 +794,7 @@ async function refreshAllAccounts() {
   render();
   try {
     const failed = await refreshIds(rows.map(a => a.id));
-    if (failed) setStatus("warn", `刷新完成，${failed} 个账户失败，详见对应行。`);
+    if (failed) setStatus("warn", () => translate("accounts.refreshFinishedAccountsFailedSeeTheCorresponding", failed));
   } finally {
     for (const item of kinds) groupRefreshing.delete(item);
     render();
@@ -830,14 +838,14 @@ async function onDeleteClick(id) {
   if (switching || refreshingIds.has(id)) return;
   const account = accounts.find((item) => item.id === id);
   if (!account) return;
-  const name = String(account.note || (account.status && account.status.name) || "未命名账户").trim();
+  const name = String(account.note || (account.status && account.status.name) || translate("accounts.unnamedAccount")).trim();
   const isCursor = account.kind === "cursor";
   const ok = await switchModal.toConfirm({
-    title: "删除账户",
-    body: `确定删除“${name}”吗？此操作无法撤销。` + (account.kind === "opencode" ? "该工作区的本地用量归档也会删除，超过服务端 30 天保留期的记录无法重新拉取。" : ""),
-    confirmText: "删除",
+    title: translate("audit.accountDelete"),
+    body: translate("accounts.deleteThisActionIsPermanent", name) + (account.kind === "opencode" ? translate("accounts.theLocalUsageArchiveForThisWorkspace") : ""),
+    confirmText: translate("accounts.delete"),
     danger: true,
-    option: isCursor ? { label: "保留统计数据（用量统计页仍可查看，标记为「已删除」）", checked: true } : null,
+    option: isCursor ? { label: translate("accounts.keepUsageStatisticsInTheUsageTab"), checked: true } : null,
   });
   if (!ok) {
     switchModal.close();
@@ -850,23 +858,23 @@ async function onDeleteClick(id) {
     return;
   }
   // 最终同步可能要联网拉取整份历史，期间弹窗保持忙碌态不可关闭
-  switchModal.openBusy("删除账户", `正在同步“${name}”的用量数据以便保留…`);
+  switchModal.openBusy(translate("audit.accountDelete"), translate("accounts.syncingUsageForBeforeDeletion", name));
   let result;
   try {
     result = await invoke("accounts_delete", { id, keepUsage: true });
   } catch (error) {
-    const code = resetError(error);
+    const code = errorCode(error);
     if (!code.startsWith("no_usage_data")) {
       switchModal.close();
-      setStatus("bad", `删除失败：${mapDeleteError(code)}`);
+      setStatus("bad", () => translate("accounts.deletionFailed", mapDeleteError(code)));
       render();
       return;
     }
     const reason = code.slice("no_usage_data".length).replace(/^:/, "");
     const proceed = await switchModal.toConfirm({
-      title: "删除账户",
-      body: `无法获取“${name}”的用量数据${reason ? `（${mapDeleteError(reason)}）` : ""}，本机也没有该账户已保存的统计数据，没有可保留的内容。是否仍然删除该账户？`,
-      confirmText: "仍然删除",
+      title: translate("audit.accountDelete"),
+      body: translate("accounts.usageForCouldNotBeFetchedThere", name, reason ? `（${mapDeleteError(reason)}）` : ""),
+      confirmText: translate("accounts.deleteAnyway"),
       danger: true,
     });
     switchModal.close();
@@ -877,9 +885,9 @@ async function onDeleteClick(id) {
   applyView(result.view);
   setStatus(
     "ok",
-    result.usage === "kept"
-      ? "账户已删除，统计数据已保留（见用量统计页总览）。"
-      : "账户已删除（该账户没有用量记录，无统计数据可保留）。"
+    () => result.usage === "kept"
+      ? translate("accounts.accountDeletedStatisticsAreAvailableInThe")
+      : translate("accounts.accountDeletedItHadNoUsageRecords")
   );
   render();
 }
@@ -888,11 +896,11 @@ async function doDelete(id, keepUsage) {
   try {
     const result = await invoke("accounts_delete", { id, keepUsage });
     applyView(result.view);
-    setStatus("ok", "账户已删除。");
+    setStatus("ok", () => translate("accounts.accountDeleted"));
   } catch (error) {
-    const code = resetError(error);
+    const code = errorCode(error);
     if (code === "opencode_archive_cleanup_failed_account_deleted") setStatus("warn", mapDeleteError(code));
-    else setStatus("bad", `删除失败：${mapDeleteError(code)}`);
+    else setStatus("bad", () => translate("accounts.deletionFailed", mapDeleteError(code)));
   }
   render();
 }
@@ -900,14 +908,14 @@ async function doDelete(id, keepUsage) {
 /** 删除 / 最终同步阶段的错误码 -> 可读文案，未知错误码原样显示。 */
 function mapDeleteError(code) {
   const M = {
-    invalid_session_token: "Token 已失效，无法从 Cursor 拉取用量",
-    empty_token: "账户 Token 为空",
-    not_found: "账户不存在",
-    opencode_archive_cleanup_failed_account_deleted: "账户已删除，但 OpenCode 本地归档清理失败，历史记录仍保留在本机。",
+    invalid_session_token: translate("accounts.theTokenHasExpiredUsageCannotBe"),
+    empty_token: translate("accounts.accountTokenIsEmpty"),
+    not_found: translate("accounts.accountNotFound"),
+    opencode_archive_cleanup_failed_account_deleted: translate("accounts.accountDeletedTheOpencodeArchiveCouldNot"),
   };
   if (M[code]) return M[code];
-  if (code.startsWith("cursor_http_")) return `Cursor 接口返回 HTTP ${code.slice("cursor_http_".length)}`;
-  return code;
+  if (code.startsWith("cursor_http_")) return translate("accounts.cursorReturnedHttp", code.slice("cursor_http_".length));
+  return resetError(code);
 }
 
 /**
@@ -942,23 +950,23 @@ export async function editDeletedAccountDialog({ label, note, ignoreApiModels, a
     removeApiUsage: !ignoreApiModels && !apiRemovalError && !el("#switch-modal-api-input").checked,
   });
   const ok = await switchModal.toConfirm({
-    title: "编辑已删除账户",
-    body: `编辑“${label}”的备注及保留的历史记录。`,
-    confirmText: "保存",
+    title: translate("audit.usageDataEdit"),
+    body: translate("accounts.editTheNoteAndRetainedHistoryFor", label),
+    confirmText: translate("common.save"),
     danger: false,
     onConfirm: save ? () => save(readValue()) : null,
-    input: { label: "备注", value: note, placeholder: "留空恢复自动备注" },
+    input: { label: translate("account.note"), value: note, placeholder: translate("accounts.leaveBlankToUseTheAutomaticNote") },
     apiHistory: {
       checked: !ignoreApiModels,
       disabled: !!ignoreApiModels || !!apiRemovalError,
-      warningTitle: ignoreApiModels ? "警告：API 历史记录已永久移除" : "警告：清理后无法恢复",
+      warningTitle: ignoreApiModels ? translate("accounts.warningApiHistoryWasPermanentlyRemoved") : translate("accounts.warningClearingHistoryIsPermanent"),
       description: ignoreApiModels
         ? apiRemovalApproximate
-          ? "已按模型归属近似移除 API 历史记录，不能重新开启或恢复。"
-          : "API 额度及按量付费历史记录已移除，不能重新开启或恢复。"
-        : apiRemovalError || (apiRemovalApproximate
-          ? "关闭并保存后，永久移除历史明细及统计，不能重新开启。旧账单按模型归属近似清理：移除 Claude、GPT 等第三方模型，保留 Auto、Composer 2/2.5、Cursor Grok 等记录；可能误删自配 API Key 用量，或漏掉自有模型超额付费。"
-          : "关闭并保存后，永久移除套餐内 API 额度和超额按量付费的历史明细及统计。保存后不能重新开启；自有模型临时转扣 API 额度的记录暂无法精确识别。"),
+          ? translate("accounts.apiHistoryWasRemovedBasedOnModel")
+          : translate("accounts.apiQuotaAndPayAsYouGo")
+        : (apiRemovalError && resetError(apiRemovalError)) || (apiRemovalApproximate
+          ? translate("accounts.turningThisOffAndSavingPermanentlyRemoves")
+          : translate("accounts.turningThisOffAndSavingPermanentlyRemovesIncluded")),
     },
   });
   const result = ok ? readValue() : null;
@@ -1058,7 +1066,7 @@ const switchModal = {
       el("#switch-cancel").hidden = false;
       const ok = el("#switch-ok");
       ok.hidden = false;
-      ok.textContent = confirmText || "确认";
+      ok.textContent = confirmText || translate("common.confirm");
       ok.classList.toggle("danger", !!danger);
       this.phase = "confirm";
       this.editable = !!(input || select || apiHistory);
@@ -1234,7 +1242,7 @@ const switchModal = {
     this.altHandler = alt ? alt.onClick : null;
     const btn = el("#switch-ok");
     btn.hidden = false;
-    btn.textContent = "关闭";
+    btn.textContent = translate("common.close");
     btn.classList.remove("danger");
     this.phase = "done";
     this.editable = false;
@@ -1308,7 +1316,7 @@ const switchModal = {
           await this.confirmAction();
           if (!operation.current()) return;
         } catch (error) {
-          if (operation.current()) fillStatus(el("#switch-modal-status"), "bad", `保存失败：${resetError(error)}`);
+          if (operation.current()) fillStatus(el("#switch-modal-status"), "bad", () => translate("accounts.saveFailed", resetError(error)));
           return;
         } finally {
           operation.finish();
@@ -1325,58 +1333,58 @@ const switchModal = {
 
 /** 后端切换流程错误码 -> 用户可读文案，未知错误码原样显示。 */
 function mapSwitchError(err) {
-  const code = resetError(err);
+  const code = errorCode(err);
   // 写登录文件失败的错误码带冒号细节（codex_auth_write_failed:…），按前缀匹配
   if (code.startsWith("codex_auth_write_failed")) {
-    return "写入本机 ChatGPT 登录文件失败，请检查文件权限后重试。";
+    return translate("accounts.couldNotWriteTheLocalChatgptLogin");
   }
   if (code.startsWith("claude_creds_write_failed")) {
-    return "写入本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
+    return translate("accounts.couldNotWriteLocalClaudeCodeCredentials");
   }
   // 退出登录前读不到本机登录文件（权限 / 占用），同样带冒号细节
   if (code.startsWith("codex_auth_read_failed")) {
-    return "读取本机 ChatGPT 登录文件失败，请检查文件权限后重试。";
+    return translate("accounts.couldNotReadTheLocalChatgptLogin");
   }
   if (code.startsWith("claude_creds_read_failed")) {
-    return "读取本机 Claude Code 登录凭据失败，请检查文件权限后重试。";
+    return translate("accounts.couldNotReadLocalClaudeCodeCredentials");
   }
   // ChatGPT 换票被拒：后缀为服务端错误码的归类（expired / reused / revoked / invalid）
   if (code.startsWith("codex_refresh_denied")) {
     const reason = code.split(":")[1] || "invalid";
     const why = {
-      expired: "Refresh Token 已过期",
-      reused: "Refresh Token 已被使用过（已被本机客户端或其它地方轮换）",
-      revoked: "Refresh Token 已被吊销（已登出或撤销授权）",
-      invalid: "Refresh Token 已失效",
-    }[reason] || "Refresh Token 已失效";
-    return `${why}，无法换取新凭据。可编辑账户更新凭据后重试，或直接写入账户里保存的登录副本。`;
+      expired: translate("accounts.theRefreshTokenHasExpired"),
+      reused: translate("accounts.theRefreshTokenWasAlreadyRotatedBy"),
+      revoked: translate("accounts.theRefreshTokenWasRevokedBySign"),
+      invalid: translate("accounts.theRefreshTokenIsInvalid"),
+    }[reason] || translate("accounts.theRefreshTokenIsInvalid");
+    return translate("accounts.editTheAccountToUpdateItsCredentials", why);
   }
   const M = {
-    account_not_verified: "该账户尚未验证有效，请先刷新后再切换。",
-    cursor_running: "Cursor 仍在运行，请关闭后重试。",
-    cursor_exe_not_found: "未找到 Cursor 可执行文件，请在设置中配置路径。",
-    cursor_exe_invalid: "配置的 Cursor 路径无效或文件不存在。",
-    state_db_not_found: "未找到 Cursor 认证库(state.vscdb)，请确认已安装并至少启动过一次 Cursor。",
-    unsupported_platform: "当前系统不支持该操作。",
-    not_cursor_account: "该账户不是 Cursor 账户。",
-    not_codex_account: "该账户不是 ChatGPT 账户。",
-    not_claude_account: "该账户不是 Claude 账户。",
-    empty_token: "账户 Token 为空。",
-    invalid_session_token: "User Token 已失效，请在账户管理更新后重试。",
-    poll_timeout: "未能换取登录凭证，请重试。",
-    session_exchange_failed: "换取登录凭证失败，请检查网络或稍后重试。",
-    codex_running: "ChatGPT 仍在运行，请关闭后重试。",
-    codex_exe_not_found: "未找到 ChatGPT 可执行文件，请在设置中配置路径。",
-    codex_exe_invalid: "配置的 ChatGPT 路径无效或文件不存在。",
-    codex_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
-    codex_id_token_missing: "未能获取登录所需的 id_token，请稍后重试。",
-    codex_auth_missing: "账户里没有保存 auth.json 副本，无法直接写入；请先成功刷新或切换一次。",
-    codex_auth_incomplete: "保存的 auth.json 副本不完整（缺少 id_token），无法直接写入。",
-    claude_running: "Claude Desktop 仍在运行，请关闭后重试。",
-    claude_exe_not_found: "未找到 Claude Desktop，请在设置中配置路径。",
-    claude_exe_invalid: "配置的 Claude Desktop 路径无效或文件不存在。",
-    claude_no_refresh_token: "该账户没有 Refresh Token，无法切换本机登录。",
-    claude_refresh_denied: "Refresh Token 已失效，请编辑账户更新凭据后重试。",
+    account_not_verified: translate("accounts.refreshTheAccountToVerifyItBefore"),
+    cursor_running: translate("accounts.cursorIsStillRunningCloseItAnd"),
+    cursor_exe_not_found: translate("accounts.cursorExecutableNotFoundSetItsPath"),
+    cursor_exe_invalid: translate("accounts.theConfiguredCursorPathIsInvalidOr"),
+    state_db_not_found: translate("accounts.cursorSStateVscdbWasNotFound"),
+    unsupported_platform: translate("accounts.thisOperationIsUnavailableOnThisOperating"),
+    not_cursor_account: translate("accounts.thisIsNotACursorAccount"),
+    not_codex_account: translate("accounts.thisIsNotAChatgptAccount"),
+    not_claude_account: translate("accounts.thisIsNotAClaudeAccount"),
+    empty_token: translate("accounts.theAccountTokenIsEmpty"),
+    invalid_session_token: translate("accounts.theUserTokenHasExpiredUpdateIt"),
+    poll_timeout: translate("accounts.couldNotObtainLoginCredentialsTryAgain"),
+    session_exchange_failed: translate("accounts.couldNotObtainLoginCredentialsCheckThe"),
+    codex_running: translate("accounts.chatgptIsStillRunningCloseItAnd"),
+    codex_exe_not_found: translate("accounts.chatgptExecutableNotFoundSetItsPath"),
+    codex_exe_invalid: translate("accounts.theConfiguredChatgptPathIsInvalidOr"),
+    codex_no_refresh_token: translate("accounts.thisAccountHasNoRefreshTokenFor"),
+    codex_id_token_missing: translate("accounts.couldNotObtainTheIdTokenRequired"),
+    codex_auth_missing: translate("accounts.noSavedAuthJsonIsAvailableRefresh"),
+    codex_auth_incomplete: translate("accounts.theSavedAuthJsonIsMissingIts"),
+    claude_running: translate("accounts.claudeDesktopIsStillRunningCloseIt"),
+    claude_exe_not_found: translate("accounts.claudeDesktopWasNotFoundSetIts"),
+    claude_exe_invalid: translate("accounts.theConfiguredClaudeDesktopPathIsInvalid"),
+    claude_no_refresh_token: translate("accounts.thisAccountHasNoRefreshTokenFor"),
+    claude_refresh_denied: translate("accounts.theRefreshTokenIsInvalidUpdateIt"),
   };
   return M[code] || code;
 }
@@ -1390,37 +1398,37 @@ async function onSwitchAccount(id) {
   switching = true;
   switchingKind = "cursor";
   render();
-  switchModal.openBusy("切换本机 Cursor 登录", "正在检测本地 Cursor…");
+  switchModal.openBusy(translate("accounts.switchLocalCursorLogin"), translate("accounts.detectingLocalCursorInstallation"));
   try {
     const st = await invoke("cursor_client_status");
     if (!st.exeConfigured) {
-      switchModal.finish(false, "未找到 Cursor 可执行文件，请点右上角「设置」配置 Cursor 路径后重试。");
+      switchModal.finish(false, translate("accounts.setTheCursorExecutablePathInSettings"));
       return;
     }
     const running = !!st.running;
     const ok = await switchModal.toConfirm(
       running
         ? {
-            body: "检测到 Cursor 正在运行。切换需要先关闭它，未保存的内容可能会丢失。确定继续？",
-            confirmText: "关闭并切换",
+            body: translate("accounts.cursorIsRunningSwitchingAccountsWillClose"),
+            confirmText: translate("accounts.closeAndSwitch"),
             danger: true,
           }
         : {
-            body: "将把该账户写入本机 Cursor 登录并启动 Cursor。确定继续？",
-            confirmText: "切换",
+            body: translate("accounts.useThisAccountForTheLocalLogin"),
+            confirmText: translate("tray.switch"),
           }
     );
     if (!ok) {
       switchModal.close();
       return;
     }
-    switchModal.toSteps(running ? ["关闭 Cursor", "换取登录凭证并写入", "启动 Cursor"] : ["换取登录凭证并写入", "启动 Cursor"]);
+    switchModal.toSteps(running ? [translate("accounts.closeCursor"), translate("accounts.obtainAndSaveLoginCredentials"), translate("accounts.startCursor")] : [translate("accounts.obtainAndSaveLoginCredentials"), translate("accounts.startCursor")]);
     if (running) {
       switchModal.stepStart();
       const c = await invoke("cursor_client_close");
       if (!c.closed) {
         switchModal.stepFail();
-        switchModal.finish(false, "未能完全关闭 Cursor，请手动关闭后重试。");
+        switchModal.finish(false, translate("accounts.cursorDidNotFullyCloseCloseIt"));
         return;
       }
       switchModal.stepDone();
@@ -1432,10 +1440,10 @@ async function onSwitchAccount(id) {
     const l = await invoke("cursor_client_launch");
     // 登录已写入成功，自动启动失败不算步骤失败，只在结果里提示手动启动
     switchModal.stepDone();
-    switchModal.finish(true, l.launched ? "已切换账户并启动 Cursor。" : "已切换账户，但自动启动失败，请手动启动 Cursor。");
+    switchModal.finish(true, l.launched ? translate("accounts.accountSwitchedAndCursorStarted") : translate("accounts.accountSwitchedStartCursorManually"));
   } catch (error) {
     switchModal.stepFail();
-    switchModal.finish(false, `切换失败：${mapSwitchError(error)}`);
+    switchModal.finish(false, translate("accounts.switchFailed", mapSwitchError(error)));
   } finally {
     switching = false;
     render();
@@ -1445,7 +1453,7 @@ async function onSwitchAccount(id) {
 /** 切换结果里的凭据来源文案：换了新凭据 / 直接写入保存的副本；后端未标注时为空。 */
 function codexSwitchModeText(result) {
   if (!result || typeof result.exchanged !== "boolean") return "";
-  return result.exchanged ? "已换取新凭据（AT / RT 已更新）" : "直接写入保存的凭据副本，未换票";
+  return result.exchanged ? translate("accounts.newCredentialsReceivedAccessAndRefreshTokens") : translate("accounts.usingTheSavedCredentialsWithoutRenewal");
 }
 
 // ChatGPT 切换：检测客户端 ->（必要时确认并关闭）-> 写入 auth.json（副本可用直接写，否则先换票）-> 启动，
@@ -1472,7 +1480,7 @@ const LOGOUT_TARGETS = {
     status: "cursor_client_status",
     close: "cursor_client_close",
     logout: "cursor_logout_local",
-    where: "本机 Cursor 认证库中的登录态",
+    get where() { return translate("accounts.theLoginInTheLocalCursorAuthentication"); },
   },
   codex: {
     client: "ChatGPT",
@@ -1480,7 +1488,7 @@ const LOGOUT_TARGETS = {
     status: "codex_client_status",
     close: "codex_client_close",
     logout: "codex_logout_local",
-    where: "本机 auth.json 中的账号凭据（若配置了 OPENAI_API_KEY 则保留）",
+    get where() { return translate("accounts.accountCredentialsInLocalAuthJsonConfigured"); },
   },
   claude: {
     client: "Claude Desktop",
@@ -1488,7 +1496,7 @@ const LOGOUT_TARGETS = {
     status: "claude_client_status",
     close: "claude_client_close",
     logout: "claude_logout_local",
-    where: "本机 Claude Code 凭据中的账号登录",
+    get where() { return translate("accounts.theAccountLoginInLocalClaudeCode"); },
   },
 };
 
@@ -1504,20 +1512,20 @@ async function onLogoutLocal(kind) {
   switching = true;
   switchingKind = kind;
   render();
-  switchModal.openBusy(`退出本机 ${t.login} 登录`, `正在检测本地 ${t.client}…`);
+  switchModal.openBusy(translate("accounts.signOutOfLocal", t.login), translate("accounts.detectingLocal", t.client));
   try {
     const st = await invoke(t.status);
     const running = !!st.running;
     const ok = await switchModal.toConfirm(
       running
         ? {
-            body: `检测到 ${t.client} 正在运行。退出登录需要先关闭它，未保存的内容可能会丢失。将清除${t.where}，托管的账户不受影响。确定继续？`,
-            confirmText: "关闭并退出登录",
+            body: translate("accounts.isRunningSigningOutWillCloseIt", t.client, t.where),
+            confirmText: translate("accounts.closeAndSignOut"),
             danger: true,
           }
         : {
-            body: `将清除${t.where}，之后需重新登录或从本工具切换账户；托管的账户不受影响。确定继续？`,
-            confirmText: "退出登录",
+            body: translate("accounts.clearYouWillNeedToSignIn", t.where),
+            confirmText: translate("audit.cursorLogoutLocal"),
             danger: true,
           }
     );
@@ -1525,13 +1533,13 @@ async function onLogoutLocal(kind) {
       switchModal.close();
       return;
     }
-    switchModal.toSteps(running ? [`关闭 ${t.client}`, "清除本机登录态"] : ["清除本机登录态"]);
+    switchModal.toSteps(running ? [translate("accounts.close", t.client), translate("accounts.clearLocalLogin")] : [translate("accounts.clearLocalLogin")]);
     if (running) {
       switchModal.stepStart();
       const c = await invoke(t.close);
       if (!c.closed) {
         switchModal.stepFail();
-        switchModal.finish(false, `未能完全关闭 ${t.client}，请手动关闭后重试。`);
+        switchModal.finish(false, translate("accounts.didNotFullyCloseCloseItManually", t.client));
         return;
       }
       switchModal.stepDone();
@@ -1539,11 +1547,11 @@ async function onLogoutLocal(kind) {
     switchModal.stepStart();
     const r = await invoke(t.logout);
     // 本机原本就没登录：步骤照常完成，结果文案由后端给出（「当前未登录，无需退出」）
-    switchModal.stepDone(r && r.wasLoggedIn === false ? "本机原本未登录" : "");
-    switchModal.finish(true, (r && r.message) || `已退出本机 ${t.login} 登录。`);
+    switchModal.stepDone(r && r.wasLoggedIn === false ? translate("accounts.alreadySignedOutLocally") : "");
+    switchModal.finish(true, (r?.message && translate(r.message)) || translate("accounts.signedOutOfLocal", t.login));
   } catch (error) {
     switchModal.stepFail();
-    switchModal.finish(false, `退出登录失败：${mapSwitchError(error)}`);
+    switchModal.finish(false, translate("accounts.signOutFailed", mapSwitchError(error)));
   } finally {
     switching = false;
     render();
@@ -1559,7 +1567,7 @@ async function onImportLocal(kind) {
   const target = ["codex", "claude", "opencode"].includes(kind) ? kind : "cursor";
   const label = kindLabel(target);
   importing = true;
-  setStatus("", `正在读取本机 ${label} 登录…`);
+  setStatus("", () => translate("accounts.readingLocalLogin", label));
   render();
   try {
     const r = await invoke("accounts_import_local", { kind: target });
@@ -1571,20 +1579,20 @@ async function onImportLocal(kind) {
     const invalid = skipped.filter((s) => s && s.reason === "invalid").length;
     if (imported.length) {
       const labels = imported.map((item) => item.label).join("、");
-      const tail = exists > 0 ? `；${exists} 个已存在跳过` : "";
-      setStatus("ok", `已导入 ${imported.length} 个账户：${labels}${tail}`);
+      const tail = exists > 0 ? translate("accounts.alreadyPresent", exists) : "";
+      setStatus("ok", () => translate("accounts.importedAccounts", imported.length, labels, tail));
     } else if (exists > 0) {
-      setStatus("", `本机登录的 ${label} 账号已在列表中。`);
+      setStatus("", () => translate("accounts.theLocalAccountIsAlreadyListed", label));
     } else if (invalid > 0) {
-      setStatus("warn", `${invalid} 个本机凭据无法解析，已跳过。`);
+      setStatus("warn", () => translate("accounts.skippedUnreadableLocalCredentials", invalid));
     } else {
-      setStatus("warn", `未检测到本机已登录的 ${label} 账号。`);
+      setStatus("warn", () => translate("accounts.noLocalLoginWasFound", label));
     }
-    if (target === "opencode" && imported.length) setStatus("ok", "已关联本机工作区，请在账户编辑中完成独立授权。");
+    if (target === "opencode" && imported.length) setStatus("ok", () => translate("accounts.localWorkspaceLinkedAuthorizeItSeparatelyIn"));
     // 新导入的账户尚未验证，后台排队逐个刷新，不阻塞汇总提示
     void refreshIds(imported.map((item) => item.id));
   } catch (error) {
-    setStatus("bad", `导入失败：${resetError(error)}`);
+    setStatus("bad", () => translate("accounts.importFailed", resetError(error)));
   } finally {
     importing = false;
     render();
@@ -1596,7 +1604,7 @@ async function onImportLocal(kind) {
 async function onExport(id) {
   if (importing || switching || (id !== null && !id)) return;
   importing = true;
-  setStatus("", "正在导出账户…");
+  setStatus("", () => translate("accounts.exportingAccounts"));
   render();
   try {
     const r = id === null ? await invoke("accounts_export_all") : await invoke("account_export_one", { id });
@@ -1605,12 +1613,12 @@ async function onExport(id) {
       return;
     }
     const count = Number(r && r.count) || 0;
-    setStatus("ok", `已导出 ${count} 个账户。`);
+    setStatus("ok", () => translate("accounts.exportedAccounts", count));
   } catch (error) {
-    const msg = resetError(error);
-    if (msg === "no_accounts") setStatus("warn", "没有可导出的账户。");
-    else if (msg === "not_found") setStatus("warn", "此账户已被删除。");
-    else setStatus("bad", `导出失败：${msg}`);
+    const msg = errorCode(error);
+    if (msg === "no_accounts") setStatus("warn", () => translate("accounts.noAccountsToExport"));
+    else if (msg === "not_found") setStatus("warn", () => translate("accounts.thisAccountWasDeleted"));
+    else setStatus("bad", () => translate("accounts.exportFailed", resetError(msg)));
   } finally {
     importing = false;
     render();
@@ -1620,7 +1628,7 @@ async function onExport(id) {
 async function onImportFile() {
   if (importing || switching || anyAccountRefreshing()) return;
   importing = true;
-  setStatus("", "正在导入账户…");
+  setStatus("", () => translate("accounts.importingAccounts"));
   render();
   try {
     const r = await invoke("accounts_import_file");
@@ -1634,19 +1642,19 @@ async function onImportFile() {
     const skipped = Array.isArray(r.skipped) ? r.skipped : [];
     const exists = skipped.filter((s) => s && s.reason === "exists").length;
     const invalid = skipped.filter((s) => s && s.reason === "invalid").length;
-    const skippedText = [exists && `${exists} 个已存在`, invalid && `${invalid} 个凭据无效`].filter(Boolean).join("、");
+    const skippedText = [exists && translate("accounts.alreadyPresent2", exists), invalid && translate("accounts.invalidCredentials", invalid)].filter(Boolean).join("、");
     if (imported.length) {
-      setStatus(invalid ? "warn" : "ok", `已导入 ${imported.length} 个账户。${skippedText ? "已跳过" + skippedText + "。" : ""}`);
+      setStatus(invalid ? "warn" : "ok", () => translate("accounts.importedAccounts2", imported.length, skippedText ? translate("accounts.skipped") + skippedText + "。" : ""));
       void refreshIds(imported.map(item => item.id));
     } else if (skippedText) {
-      setStatus(invalid ? "warn" : "", `已跳过${skippedText}。`);
+      setStatus(invalid ? "warn" : "", () => translate("accounts.skipped2", skippedText));
     } else {
-      setStatus("warn", "文件中没有可导入的账户。");
+      setStatus("warn", () => translate("accounts.noAccountsToImportInThisFile"));
     }
   } catch (error) {
-    const msg = resetError(error);
-    if (msg === "invalid_format") setStatus("bad", "不是有效的账户导出文件。");
-    else setStatus("bad", `导入失败：${msg}`);
+    const msg = errorCode(error);
+    if (msg === "invalid_format") setStatus("bad", () => translate("accounts.invalidAccountExportFile"));
+    else setStatus("bad", () => translate("accounts.importFailed", resetError(msg)));
   } finally {
     importing = false;
     render();
@@ -1677,11 +1685,11 @@ function setModalKind(kind) {
   el("#account-desktop-binding-field").hidden = modalKind !== "claude" || editingId == null;
   el("#account-refresh-token").placeholder =
     modalKind === "claude"
-      ? "~/.claude/.credentials.json 里的 refreshToken，填写后 Token 过期可自动续期"
-      : "~/.codex/auth.json 里的 tokens.refresh_token，填写后 Token 过期可自动续期";
+      ? translate("accounts.refreshtokenFromClaudeCredentialsJsonUsedTo")
+      : translate("account.tokensRefreshTokenFromCodexAuthJson");
   // OAuth 授权添加仅用于新增 Claude 账户（编辑场景改凭据走手动粘贴）
   el("#account-oauth-field").hidden = modalKind !== "claude" || editingId != null;
-  el("#account-import-local").textContent = `从本机导入 ${kindLabel(modalKind)}`;
+  el("#account-import-local").textContent = translate("accounts.importLocal", kindLabel(modalKind));
 }
 
 function openModal(account, presetKind) {
@@ -1697,11 +1705,11 @@ function openModal(account, presetKind) {
   editingId = account ? account.id : null;
   const kind = account ? account.kind : presetKind || "cursor";
   const codexEdit = account?.kind === "codex";
-  el("#account-modal-title").textContent = `${account ? "编辑" : "添加"} ${kindLabel(kind)} 账户`;
+  el("#account-modal-title").textContent = translate("accounts.account", account ? translate("accounts.edit") : translate("pricing.add"), kindLabel(kind));
   el("#account-modal").classList.toggle("codex-auth", kind === "codex");
   el("#account-modal-description").textContent = kind === "codex"
-    ? "凭据保存在此账户的加密副本中。切换账户时可应用到本机客户端。"
-    : "Token 仅保存在本地配置文件，用于查询账户状态与用量。";
+    ? translate("accounts.credentialsAreStoredInThisAccountS")
+    : translate("account.tokensAreStoredInYourLocalConfiguration");
   el(codexEdit ? "#account-interval-field" : "#account-api-field").before(el("#account-credential-fields"));
   el("#account-auth-mode").hidden = !codexEdit;
   el("#account-token-label").textContent = kind === "codex" ? "Access Token" : "Token";
@@ -1731,16 +1739,16 @@ async function loadDesktopBinding(id) {
   const session = getAccountModal().session;
   const label = el("#account-desktop-binding-status");
   const button = el("#account-desktop-bind");
-  label.textContent = "正在检测…"; button.disabled = true;
+  label.textContent = translate("accounts.detecting"); button.disabled = true;
   try {
     const status = await invoke("local_clients_status", { kind: "claude", id });
     if (!getAccountModal().isCurrent(session) || editingId !== id) return;
     const binding = status.desktop?.binding;
     label.textContent = status.desktop?.error ? clientError(status.desktop.error)
-      : !status.desktop?.installed ? "未检测到 Claude Desktop"
-      : binding?.state === "bound" ? "已绑定此账户的桌面登录"
-      : binding?.state === "pending" ? "有未完成的绑定，可恢复原登录" : "尚未绑定 Desktop 登录";
-    button.textContent = binding?.state === "bound" ? "重新绑定" : binding?.state === "pending" ? "恢复原登录" : "绑定 Desktop 登录";
+      : !status.desktop?.installed ? translate("accounts.claudeDesktopNotDetected")
+      : binding?.state === "bound" ? translate("accounts.desktopLoginLinkedToThisAccount")
+      : binding?.state === "pending" ? translate("accounts.unfinishedLinkTheOriginalLoginCanBe") : translate("accounts.desktopLoginNotLinked");
+    button.textContent = binding?.state === "bound" ? translate("accounts.linkAgain") : binding?.state === "pending" ? translate("accounts.restoreOriginalLogin") : translate("account.linkDesktopLogin");
     button.disabled = !status.desktop?.installed || !!status.desktop?.error;
     button.onclick = async () => {
       if (button.disabled || getAccountModal().busy || editingId !== id) return;
@@ -1771,9 +1779,9 @@ async function onClearLocalUsage() {
   if (!account || account.kind !== "cursor") return;
   const label = cursorIdentity(account).primary;
   const ok = await confirmDialog({
-    title: "清除本地数据",
-    body: `确定清除“${label}”在本机保存的用量事件库与统计缓存吗？账户与 Token 会保留，下次刷新用量时会重新从 Cursor 全量拉取；Cursor 侧已不可查询的历史事件将无法恢复。`,
-    confirmText: "清除",
+    title: translate("raw.clearLocalData"),
+    body: translate("accounts.clearUsageEventsAndCachedStatisticsFor", label),
+    confirmText: translate("accounts.clear"),
     danger: true,
   });
   // 确认期间弹窗可能已被关掉（Esc / 切换到别的账户），不再落地
@@ -1784,11 +1792,11 @@ async function onClearLocalUsage() {
   try {
     const result = await clearCursorLocalData(id);
     if (!operation.current()) return;
-    setModalStatus("ok", `已清除本地用量数据（${result.events} 条事件），下次刷新用量时重新全量拉取。`);
+    setModalStatus("ok", translate("accounts.clearedLocalUsageEventsTheNextRefresh", result.events));
   } catch (error) {
     if (!operation.current()) return;
-    const code = resetError(error);
-    setModalStatus("bad", code === "no_usage_data" ? "本机没有该账户的用量数据。" : `清除失败：${code}`);
+    const code = errorCode(error);
+    setModalStatus("bad", code === "no_usage_data" ? translate("accounts.noLocalUsageDataForThisAccount") : translate("accounts.clearFailed", resetError(code)));
   } finally {
     operation.finish();
   }
@@ -1798,7 +1806,7 @@ async function onSave() {
   if (getAccountModal().busy || authEditor?.busy || authAdder?.busy) return;
   const token = el("#account-token").value.trim();
   if (!token && !authEditor?.full && !authAdder?.full) {
-    setModalStatus("bad", modalKind === "claude" ? "请填写 Token，或使用上方 OAuth 授权添加。" : "请填写 Token。");
+    setModalStatus("bad", modalKind === "claude" ? translate("accounts.enterATokenOrUseOauthAbove") : translate("accounts.enterAToken"));
     return;
   }
   const note = el("#account-note").value.trim();
@@ -1819,7 +1827,7 @@ async function onSave() {
   ]);
   if (!operation) return;
   authAdder?.clear();
-  setModalStatus("", "保存中…");
+  setModalStatus("", translate("accounts.saving"));
   try {
     const addedCredentials = authAdder?.credentials();
     let update = { id, note, token, refreshToken, ignoreApiModels, refreshIntervalMinutes, autoRefreshToken, updateCredentials };
@@ -1847,16 +1855,16 @@ async function onSave() {
     const added = existingIds ? accounts.find((account) => !existingIds.has(account.id)) : null;
     render();
     if (operation.current()) closeModal();
-    setStatus("ok", isEdit ? "账户已更新。" : "账户已添加。");
+    setStatus("ok", () => isEdit ? translate("accounts.accountUpdated") : translate("accounts.accountAdded"));
     // 手动新增与本机/文件导入保持一致：保存后后台拉取一次完整状态，失败留在对应账户行提示。
     if (added) void refreshOne(added.id);
   } catch (error) {
     if (!operation.current()) return;
     if (authEditor?.showError(error)) { clearModalStatus(); return; }
     if (authAdder?.showError(error)) { clearModalStatus(); return; }
-    const msg = resetError(error);
-    if (msg === "duplicate_account") setModalStatus("bad", "该账号已存在，请勿重复添加。");
-    else setModalStatus("bad", `保存失败：${msg}`);
+    const msg = errorCode(error);
+    if (msg === "duplicate_account") setModalStatus("bad", translate("accounts.thisAccountAlreadyExists"));
+    else setModalStatus("bad", translate("accounts.saveFailed", resetError(msg)));
   } finally {
     operation.finish();
   }
@@ -1870,19 +1878,19 @@ async function onOauthOpen() {
   const session = getAccountModal().session;
   const btn = el("#account-oauth-open");
   btn.disabled = true;
-  setModalStatus("", "正在打开浏览器授权页…");
+  setModalStatus("", translate("accounts.openingTheAuthorizationPage"));
   try {
     const r = await invoke("claude_oauth_begin");
     if (!getAccountModal().isCurrent(session)) return;
     if (r && r.opened) {
-      setModalStatus("", "已打开浏览器。登录并授权后，把页面展示的授权码粘贴到输入框，点「完成授权」。");
+      setModalStatus("", translate("accounts.signInAndAuthorizeInTheBrowser"));
     } else {
       // 唤起失败（如无默认浏览器）：把授权地址复制到剪贴板兜底
       try { await navigator.clipboard.writeText(r.url); } catch { /* ignore */ }
-      setModalStatus("warn", "未能自动打开浏览器，授权地址已复制到剪贴板，请手动粘贴到浏览器打开。");
+      setModalStatus("warn", translate("accounts.theAuthorizationUrlWasCopiedPasteIt"));
     }
   } catch (error) {
-    if (getAccountModal().isCurrent(session)) setModalStatus("bad", `发起授权失败：${resetError(error)}`);
+    if (getAccountModal().isCurrent(session)) setModalStatus("bad", translate("accounts.couldNotStartAuthorization", resetError(error)));
   } finally {
     btn.disabled = false;
   }
@@ -1890,14 +1898,14 @@ async function onOauthOpen() {
 
 /** OAuth 完成阶段的错误码 -> 用户可读文案。 */
 function mapOauthError(err) {
-  const code = resetError(err);
-  if (code === "oauth_not_started") return "请先点「浏览器授权」发起授权。";
-  if (code === "oauth_code_empty") return "请粘贴浏览器返回的授权码。";
-  if (code === "duplicate_account") return "该账号已存在，请勿重复添加。";
+  const code = errorCode(err);
+  if (code === "oauth_not_started") return translate("accounts.selectAuthorizeInBrowserFirst");
+  if (code === "oauth_code_empty") return translate("accounts.pasteTheCodeFromYourBrowser");
+  if (code === "duplicate_account") return translate("accounts.thisAccountAlreadyExists");
   if (code.startsWith("oauth_exchange_denied")) {
-    return "授权码无效或已过期，请重新点「浏览器授权」再试。";
+    return translate("accounts.invalidOrExpiredCodeStartBrowserAuthorization");
   }
-  return code;
+  return resetError(code);
 }
 
 // 用授权码换取凭据并直接落库；成功后关弹窗并后台刷新新账户。
@@ -1905,22 +1913,22 @@ async function onOauthFinish() {
   if (getAccountModal().busy) return;
   const code = el("#account-oauth-code").value.trim();
   if (!code) {
-    setModalStatus("bad", "请粘贴浏览器返回的授权码。");
+    setModalStatus("bad", translate("accounts.pasteTheCodeFromYourBrowser"));
     return;
   }
   const btn = el("#account-oauth-finish");
   const operation = getAccountModal().beginSave([btn, el("#account-save"), el("#account-import-local")]);
   if (!operation) return;
-  setModalStatus("", "正在换取登录凭证…");
+  setModalStatus("", translate("accounts.obtainingLoginCredentials"));
   try {
     const r = await invoke("claude_oauth_finish", { code });
     applyView(r.view);
     render();
     if (operation.current()) closeModal();
-    setStatus("ok", `账户已添加：${r.label}`);
+    setStatus("ok", () => translate("accounts.accountAdded2", r.label));
     void refreshOne(r.id);
   } catch (error) {
-    if (operation.current()) setModalStatus("bad", `授权失败：${mapOauthError(error)}`);
+    if (operation.current()) setModalStatus("bad", translate("accounts.authorizationFailed", mapOauthError(error)));
   } finally {
     operation.finish();
   }
@@ -1930,14 +1938,14 @@ async function onOauthFinish() {
 
 /** 账户数据加载错误码 -> 用户可读文案，未知错误原样显示。 */
 function mapLoadError(err) {
-  const msg = resetError(err);
+  const msg = errorCode(err);
   if (msg.includes("settings_parse_failed")) {
-    return "设置文件损坏，原文件已备份为 settings.json.bad，未被覆盖；请检查后重启应用。";
+    return translate("accounts.theSettingsFileIsDamagedTheOriginal");
   }
   if (msg.includes("settings_read_failed")) {
-    return "设置文件暂时无法读取（可能被安全软件短暂占用），请稍后重试或重启应用。";
+    return translate("accounts.settingsAreTemporarilyUnreadableTryAgainLater");
   }
-  return msg;
+  return resetError(msg);
 }
 
 async function loadInitial(allowRetry = true) {
@@ -1948,19 +1956,20 @@ async function loadInitial(allowRetry = true) {
   } catch (error) {
     // 文件被短暂占用属于瞬态故障，自动重试一次再报错
     if (allowRetry) {
-      setStatus("", "账户数据暂时不可读，正在重试…");
+      setStatus("", () => translate("accounts.accountDataIsTemporarilyUnavailableRetrying"));
       setTimeout(() => { void loadInitial(false); }, 1500);
       return;
     }
-    setStatus("bad", `加载账户失败：${mapLoadError(error)}`);
+    setStatus("bad", () => translate("accounts.couldNotLoadAccounts", mapLoadError(error)));
   }
 }
 
 export function initAccounts() {
+  window.addEventListener("uilanguagechange", render);
   rowOrder = initRowOrder(el("#accounts-body"), {
     ids: displayOrderIds, render,
     save: accountOrder.move,
-    onError: () => setStatus("bad", "账户顺序未保存，请重试。"),
+    onError: () => setStatus("bad", () => translate("accounts.accountOrderCouldNotBeSavedTry")),
   });
   const pickerRoot = el("#account-type-modal");
   const picker = createModal(pickerRoot, { mode: () => "view" });
@@ -1969,7 +1978,7 @@ export function initAccounts() {
   const openPicker = (mode = "add") => {
     if (switching || importing || !pickerRoot.hidden) return;
     pickerMode = mode;
-    el("#account-type-title").textContent = mode === "logout" ? "退出本机登录" : "选择账户类型";
+    el("#account-type-title").textContent = mode === "logout" ? translate("accounts.signOutLocally") : translate("account.chooseAnAccountType");
     for (const button of types) {
       button.hidden = mode === "logout" && !LOGOUT_TARGETS[button.dataset.kind];
       button.disabled = mode === "logout" && providerRefreshing(button.dataset.kind);

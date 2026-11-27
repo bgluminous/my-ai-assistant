@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import { invoke } from "./shared.js";
 
 // 静默启动时托盘可能先打开，两端都将旧卡片顺序交给后端做一次性迁移。
@@ -41,7 +42,7 @@ export function orderHandle(label) {
   const handle = document.createElement("button");
   handle.type = "button";
   handle.className = "account-order-handle";
-  handle.title = "拖动或使用上下方向键调整「" + label + "」的位置";
+  handle.title = translate("accountOrder.moveHint", label);
   handle.setAttribute("aria-label", handle.title);
   handle.innerHTML = '<svg viewBox="0 0 16 20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="4" r="1.4"/><circle cx="11" cy="4" r="1.4"/><circle cx="5" cy="10" r="1.4"/><circle cx="11" cy="10" r="1.4"/><circle cx="5" cy="16" r="1.4"/><circle cx="11" cy="16" r="1.4"/></svg>';
   return handle;
@@ -62,7 +63,7 @@ export function initRowOrder(list, { ids, save, render, onError, scrollBox }) {
     saving = true;
     try {
       await save(id, before);
-      announce.textContent = "账户已移至第 " + (ids().indexOf(id) + 1) + " 位";
+      announce.textContent = translate("accountOrder.moved", ids().indexOf(id) + 1);
     } catch (error) {
       onError(error);
     } finally {

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>账户面板</title>
+    <title data-i18n="tray.title"></title>
     <script>
       // 与主窗口共享 localStorage 的主题偏好，样式解析前恢复避免闪烁。
       (function () {
@@ -346,51 +346,51 @@
   <body>
     <div class="tray-panel">
       <div class="tray-head">
-        <span class="tray-title">账户</span>
+        <span class="tray-title" data-i18n="tray.accounts"></span>
         <div class="tray-tools">
-          <button id="tray-add" class="icon-action" type="button" title="添加账户" aria-label="添加账户" hidden>
+          <button id="tray-add" class="icon-action" type="button" hidden data-i18n-title="accounts.add" data-i18n-aria-label="accounts.add">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           </button>
-          <button id="tray-refresh" class="icon-action" type="button" title="全部刷新" aria-label="全部刷新">
+          <button id="tray-refresh" class="icon-action" type="button" data-i18n-title="tray.refreshAll" data-i18n-aria-label="tray.refreshAll">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           </button>
-          <button id="tray-open" class="icon-action" type="button" title="打开主窗口" aria-label="打开主窗口">
+          <button id="tray-open" class="icon-action" type="button" data-i18n-title="tray.openMainWindow" data-i18n-aria-label="tray.openMainWindow">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           </button>
         </div>
       </div>
       <button id="tray-update-notice" class="secondary" type="button" hidden></button>
       <div class="tray-tabs">
-        <button type="button" class="tray-tab active" data-tab="overview">总览</button>
-        <button type="button" class="tray-tab" data-tab="accounts">账户</button>
+        <button type="button" class="tray-tab active" data-tab="overview" data-i18n="tray.overview"></button>
+        <button type="button" class="tray-tab" data-tab="accounts" data-i18n="tray.accounts"></button>
       </div>
       <div id="tray-list" class="tray-list"></div>
       <div id="tray-overview" class="tray-overview" hidden>
         <!-- 头部常驻：统计日标签 + 数据时间（更新于 HH:MM）+ 按天前后滑动的日期导航；下方 body 由脚本整体重建 -->
         <div class="tray-ov-head">
           <div class="tray-ov-head-left">
-            <span id="tray-ov-label" class="tray-ov-label">今日已用</span>
+            <span id="tray-ov-label" class="tray-ov-label" data-i18n="tray.usedToday"></span>
             <span id="tray-ov-updated" class="tray-ov-updated" hidden></span>
           </div>
-          <div class="tray-day" role="group" aria-label="统计日">
-            <button id="tray-day-prev" class="icon-action" type="button" title="前一天" aria-label="前一天">
+          <div class="tray-day" role="group" data-i18n-aria-label="tray.usageDate">
+            <button id="tray-day-prev" class="icon-action" type="button" data-i18n-title="tray.previousDay" data-i18n-aria-label="tray.previousDay">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
             </button>
-            <span id="tray-day-label" class="tray-day-label">今天</span>
-            <button id="tray-day-next" class="icon-action" type="button" title="后一天" aria-label="后一天" disabled>
+            <span id="tray-day-label" class="tray-day-label" data-i18n="usage.today"></span>
+            <button id="tray-day-next" class="icon-action" type="button" disabled data-i18n-title="tray.nextDay" data-i18n-aria-label="tray.nextDay">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
             </button>
           </div>
         </div>
         <div id="tray-ov-body">
-          <div class="tray-empty">正在统计今日用量…</div>
+          <div class="tray-empty" data-i18n="tray.calculatingTodaySUsage"></div>
         </div>
       </div>
       <div id="tray-sync-progress" hidden></div>
       <p id="tray-status" class="tray-status" hidden></p>
       <!-- 总览进行中提示：与主窗口统计页同款的悬浮胶囊，位于 tab 栏下方居中，由 syncOverviewLoading 显隐 -->
       <div id="tray-ov-loading" class="loading-float" role="status" hidden>
-        <span class="spinner" aria-hidden="true"></span><span id="tray-ov-loading-text">统计中…</span>
+        <span class="spinner" aria-hidden="true"></span><span id="tray-ov-loading-text" data-i18n="usage.calculating"></span>
       </div>
     </div>
     <!-- 切换账户弹窗：确认 / 分步进度 / 结果三个阶段复用同一张卡片 -->
@@ -402,12 +402,12 @@
         <div id="tray-modal-steps" hidden></div>
         <p id="tray-modal-result" hidden></p>
         <div class="tray-modal-foot">
-          <button id="tray-modal-cancel" class="secondary" type="button">取消</button>
-          <button id="tray-modal-ok" class="primary" type="button">切换</button>
+          <button id="tray-modal-cancel" class="secondary" type="button" data-i18n="common.cancel"></button>
+          <button id="tray-modal-ok" class="primary" type="button" data-i18n="tray.switch"></button>
         </div>
       </div>
     </div>
     <script src="vendor/chart.umd.min.js"></script>
-    <script type="module" src="tray_panel.js"></script>
+    <script type="module" src="bootstrap.js"></script>
   </body>
 </html>

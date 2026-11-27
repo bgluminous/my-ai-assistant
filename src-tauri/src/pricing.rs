@@ -573,7 +573,7 @@ fn diff_overrides(
             continue;
         }
         if crate::model_match::is_deepseek_flash_alias(&key) {
-            return Err("DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。".into());
+            return Err("pricing_shared_flash_rate".into());
         }
         for val in [m.input, m.output, m.cache_read, m.cache_write] {
             if !val.is_finite() || val < 0.0 {

@@ -1,3 +1,4 @@
+import { legacyText, locale, translate } from "./i18n.js";
 // 账户数据的纯格式化助手：套餐名 / 月费、Token 打码、相对时间、到期倒计时、
 // 超额与 Credits 文案。无状态、不触碰 DOM，主窗口账户页、用量页、快照与托盘面板共用；
 // 托盘面板因此无需引入整个账户管理模块。
@@ -99,7 +100,7 @@ export function accountPlanInfo(account) {
   const status = account?.status || {};
   if (account?.kind === "opencode") {
     const key = planKey(status.plan);
-    const labels = { go: "Go", "go-plus": "Go Plus", "go-teams": "Go Teams", payg: "Console 按量" };
+    const labels = { go: "Go", "go-plus": "Go Plus", "go-teams": "Go Teams", payg: translate("accountFormat.consolePayAsYouGo") };
     const count = Number(status.memberCount);
     const monthlyUsd = key === "go" ? 10 : key === "go-plus" ? 40
       : key === "go-teams" && Number.isInteger(count) && count > 0 ? 20 * count : key === "payg" ? 0 : null;
@@ -140,7 +141,7 @@ export function cursorPlanChoices() {
   return Object.keys(MEMBERSHIP_LABELS).map((value) => {
     const price = planMonthlyUsd(value);
     const name = MEMBERSHIP_LABELS[value];
-    return { value, label: price != null ? `${name} · $${price}/月` : name };
+    return { value, label: price != null ? translate("accountFormat.month", name, price) : name };
   });
 }
 
@@ -155,12 +156,12 @@ export function membershipLabel(value) {
  * email = 刷新返回的邮箱，与主显示相同（备注为空时自动落到邮箱）则为空串，避免同一身份显示两遍。
  * 用量页筛选 chip 与托盘账户行共用，主显示旁 / 下方以小字补充邮箱。
  */
-export function cursorIdentity(account) {
+export function cursorIdentity(account, fallback = translate("accounts.unnamedAccount")) {
   const note = String((account && account.note) || "").trim();
   const status = (account && account.status) || null;
   const name = String((status && status.name) || "").trim();
   const email = String((status && status.email) || "").trim();
-  const primary = (account && account.noteAuto === false ? note : "") || name || email || note || "未命名账户";
+  const primary = (account && account.noteAuto === false ? note : "") || name || email || note || fallback;
   return { primary, email: email && email !== primary ? email : "" };
 }
 
@@ -174,12 +175,12 @@ export function maskToken(token) {
 
 export function relativeFromMs(ms) {
   const diff = Date.now() - ms;
-  if (diff < 60_000) return "刚刚";
+  if (diff < 60_000) return translate("time.justNow");
   const minutes = Math.floor(diff / 60_000);
-  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 60) return translate("time.minutesAgo", minutes);
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return new Date(ms).toLocaleDateString("zh-CN");
+  if (hours < 24) return translate("time.hoursAgo", hours);
+  return new Date(ms).toLocaleDateString(locale());
 }
 
 /** 账户上次刷新时间的相对文案（如 5 分钟前）。 */
@@ -211,22 +212,43 @@ export function accountDateInfo(value) {
   } else {
     return null;
   }
-  const date = new Date(raw);
-  const ms = date.getTime();
-  if (!Number.isFinite(ms)) return null;
-  let day;
-  if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    // ISO 纯日期按 UTC 解析，直接显示其年月日，避免在负时区退到前一天。
-    if (date.toISOString().slice(0, 10) !== raw) return null;
-    day = raw.replaceAll("-", "/");
+  const dateOnly = typeof raw === "string" && !raw.includes(":");
+  const calendarDate = dateOnly && /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})$/.exec(raw);
+  let date;
+  if (calendarDate) {
+    const [, year, , month, day] = calendarDate;
+    // 将 ISO 日期和旧式斜杠日期按同一个本地日历日解析，保留输入的日期精度。
+    date = new Date(`${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T00:00:00`);
+    if (date.getDate() !== Number(day)) return null;
   } else {
-    day = date.toLocaleDateString("zh-CN", accountDateFormat);
+    date = new Date(raw);
   }
-  const time = typeof raw === "string" && !raw.includes(":") ? "" : date.toLocaleTimeString("zh-CN", accountTimeFormat);
-  return { ms, day, time, text: time ? `${day} ${time}` : day };
+  if (!Number.isFinite(date.getTime())) return null;
+  const day = date.toLocaleDateString(locale(), accountDateFormat);
+  const time = dateOnly ? "" : date.toLocaleTimeString(locale(), accountTimeFormat);
+  const shortDate = date.toLocaleDateString(locale(), { month: "2-digit", day: "2-digit" });
+  const shortDay = locale() === "zh-CN" ? shortDate.replace("/", "-") : shortDate;
+  return { ms: date.getTime(), day, shortDay, time, text: time ? `${day} ${time}` : day };
 }
 
 /** 返回额度条的短文案与完整提示。相对秒数属于刷新时的快照，必须有对应的刷新时间。 */
+export function quotaWindowLabel(window, fallback) {
+  if (!window.label) return fallback;
+  const known = ["quota.fiveHours", "quota.weekly", "quota.monthly", "quota.weeklyOpus",
+    "quota.weeklySonnet", "quota.weeklyOAuth", "quota.window"];
+  // Older caches stored a display label, sometimes suffixed with the provider's name.
+  const old = /^(.+?)（(.+)）$/.exec(window.label);
+  const key = old?.[1] || window.label;
+  const name = window.labelName || old?.[2];
+  const duration = /^(\d+) (小时|秒)窗口$/.exec(key);
+  let label;
+  if (key === "quota.hoursWindow") label = translate(key, window.limitWindowSeconds / 3600);
+  else if (key === "quota.secondsWindow") label = translate(key, window.limitWindowSeconds);
+  else if (duration) label = translate(duration[2] === "小时" ? "quota.hoursWindow" : "quota.secondsWindow", duration[1]);
+  else label = known.includes(key) ? translate(key) : legacyText(key, known);
+  return name ? translate("quota.namedWindow", label, name) : label;
+}
+
 export function quotaResetInfo(resetAt, resetsInSeconds, lastRefreshAt) {
   // 兼容旧额度窗口里的数字字符串，同时保留 Sand 返回的 ISO 日期或时刻。
   let reset = accountDateInfo(finiteNumber(resetAt) ?? resetAt);
@@ -241,15 +263,15 @@ export function quotaResetInfo(resetAt, resetsInSeconds, lastRefreshAt) {
   const now = Date.now();
   const remaining = reset.ms - now;
   // 只有日期时，当天的重置时刻未知，等本地日历翻到下一天再标记已重置。
-  const passed = reset.time ? remaining <= 0 : reset.day < new Date(now).toLocaleDateString("zh-CN", accountDateFormat);
-  const short = reset.time && remaining < 86_400_000 ? reset.time : reset.day.slice(-5).replace("/", "-");
-  return { text: passed ? "已重置" : `重置 ${short}`, title: `${reset.text} 重置` };
+  const passed = reset.time ? remaining <= 0 : reset.ms < new Date(now).setHours(0, 0, 0, 0);
+  const short = reset.time && remaining < 86_400_000 ? reset.time : reset.shortDay;
+  return { text: passed ? translate("quota.reset") : translate("quota.resetsAt", short), title: translate("quota.resetTooltip", reset.text) };
 }
 
 /** 到期剩余时长的紧凑文本（Nd / Nh / <1h）；已过期返回 expired=true。 */
 export function remainInfo(endMs) {
   const remainMs = endMs - Date.now();
-  if (remainMs <= 0) return { text: "已到期", expired: true };
+  if (remainMs <= 0) return { text: translate("accountFormat.expired"), expired: true };
   const days = Math.floor(remainMs / 86_400_000);
   const hours = Math.floor(remainMs / 3_600_000);
   return { text: days >= 1 ? `${days}d` : hours >= 1 ? `${hours}h` : "<1h", expired: false };
@@ -259,7 +281,7 @@ export function remainInfo(endMs) {
 export function usdText(usd) {
   const n = Number(usd);
   if (!Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${n.toLocaleString(locale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 /** 美分 -> 美元文本（千分位 + 两位小数），无效值返回 —。 */
@@ -304,8 +326,8 @@ export function onDemandBrief(status) {
   if (!onDemand || !onDemand.enabled) return null;
   const limitCents = Number(onDemand.limit);
   return {
-    text: `超额 ${centsText(onDemand.used)}`,
-    title: Number.isFinite(limitCents) && limitCents > 0 ? `上限 ${centsText(limitCents)}` : "",
+    text: translate("accountFormat.overage", centsText(onDemand.used)),
+    title: Number.isFinite(limitCents) && limitCents > 0 ? translate("accounts.limit", centsText(limitCents)) : "",
   };
 }
 
@@ -318,15 +340,15 @@ export function creditsBrief(status) {
     const amount = status.balanceUsd;
     if (amount == null || !Number.isFinite(Number(amount))) return null;
     const stale = !!status.error || status.fields?.balance?.state !== "ok";
-    return { text: "余额 " + usdText(Number(amount)) + (stale ? "（缓存）" : ""), title: "工作区共享余额" };
+    return { text: translate("accountFormat.balance") + usdText(Number(amount)) + (stale ? translate("accountFormat.cached") : ""), title: translate("accountFormat.sharedWorkspaceBalance") };
   }
   const credits = status && status.alive !== false ? status.credits : null;
   if (credits == null) return null;
   const { unlimited, units, usd } = parseCreditsUsd(credits);
   if (!unlimited && usd == null) return null;
   return {
-    text: unlimited ? "余额 无限" : `余额 ${usdText(usd)}`,
-    title: units != null ? `${units.toLocaleString("en-US")} 点` : "",
+    text: unlimited ? translate("accountFormat.unlimitedBalance") : translate("accountFormat.balance2", usdText(usd)),
+    title: units != null ? translate("accounts.credits", units.toLocaleString(locale())) : "",
   };
 }
 
@@ -343,7 +365,7 @@ export function resetCreditsBrief(status) {
   if (!status || status.alive === false) return null;
   const n = Number(status.resetCreditsAvailable);
   if (status.resetCreditsAvailable == null || !Number.isFinite(n)) return null;
-  const titleLines = ["ChatGPT 额度重置：消耗一次可立即重置 5 小时与每周额度窗口"];
+  const titleLines = [translate("accountFormat.useAChatgptQuotaResetToImmediately")];
   let expiresText = "";
   let expired = false;
   const expiresMs = n > 0 && status.resetCreditsExpiresAt ? Date.parse(status.resetCreditsExpiresAt) : NaN;
@@ -351,30 +373,30 @@ export function resetCreditsBrief(status) {
     const d = new Date(expiresMs);
     const mmdd = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     expired = expiresMs <= Date.now();
-    expiresText = expired ? `最早 ${mmdd} 已过期` : `最早 ${mmdd} 过期`;
+    expiresText = expired ? translate("accountFormat.firstExpired", mmdd) : translate("accountFormat.firstExpires", mmdd);
     const full = resetCreditDateText(status.resetCreditsExpiresAt);
-    titleLines.push(expired ? `最早一次已于 ${full} 过期，请刷新查看最新次数` : `最早一次将于 ${full} 过期`);
+    titleLines.push(expired ? translate("accountFormat.theEarliestResetExpiredRefreshForThe", full) : translate("accountFormat.theEarliestResetExpires", full));
   }
   const details = Array.isArray(status.resetCreditsDetails) ? status.resetCreditsDetails : null;
   if (details) {
-    titleLines.push(`重置次数明细（共 ${details.length} 条，当前剩余 ${n} 次）`);
-    if (!details.length) titleLines.push("暂无重置次数记录");
+    titleLines.push(translate("accountFormat.resetHistoryEntriesRemaining", details.length, n));
+    if (!details.length) titleLines.push(translate("accountFormat.noResetHistory"));
     details.forEach((credit, index) => {
       const rawStatus = typeof credit?.status === "string" ? credit.status.trim() : "";
-      const labels = { available: "可用", used: "已使用", consumed: "已使用", expired: "已过期", revoked: "已撤销" };
-      const state = Object.hasOwn(labels, rawStatus.toLowerCase()) ? labels[rawStatus.toLowerCase()] : rawStatus || "状态未知";
+      const labels = { available: translate("accountFormat.available"), used: translate("accountFormat.used"), consumed: translate("accountFormat.used"), expired: translate("accountFormat.expired2"), revoked: translate("accountFormat.revoked") };
+      const state = Object.hasOwn(labels, rawStatus.toLowerCase()) ? labels[rawStatus.toLowerCase()] : rawStatus || translate("accountFormat.unknownStatus");
       const parts = [`${index + 1}. ${state}`];
-      if (credit?.grantedAt) parts.push(`获得：${resetCreditDateText(credit.grantedAt)}`);
-      parts.push(`过期：${resetCreditDateText(credit?.expiresAt)}`);
-      if (credit?.usedAt) parts.push(`使用：${resetCreditDateText(credit.usedAt)}`);
+      if (credit?.grantedAt) parts.push(translate("accountFormat.received", resetCreditDateText(credit.grantedAt)));
+      parts.push(translate("accountFormat.expires", resetCreditDateText(credit?.expiresAt)));
+      if (credit?.usedAt) parts.push(translate("accountFormat.used2", resetCreditDateText(credit.usedAt)));
       titleLines.push(parts.join(" · "));
     });
   } else {
-    titleLines.push("完整明细尚未获取，请刷新账户后查看");
+    titleLines.push(translate("accountFormat.refreshTheAccountToLoadTheFull"));
   }
   return {
     count: n,
-    text: `剩余重置 ${n} 次`,
+    text: translate("accountFormat.resetsLeft", n),
     expiresText,
     expired,
     title: titleLines.join("\n"),
@@ -384,6 +406,6 @@ export function resetCreditsBrief(status) {
 function resetCreditDateText(value) {
   const ms = value ? Date.parse(value) : NaN;
   return Number.isFinite(ms)
-    ? new Date(ms).toLocaleString("zh-CN", { hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
-    : "未提供";
+    ? new Date(ms).toLocaleString(locale(), { hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : translate("accountFormat.unavailable");
 }

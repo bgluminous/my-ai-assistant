@@ -231,7 +231,7 @@ pub fn switch_result(clients: Vec<serde_json::Value>, exchanged: Option<bool>) -
     let switched = !clients.is_empty() && clients.iter().all(|c| c["status"] == "success");
     let any_success = clients.iter().any(|c| c["status"] == "success");
     serde_json::json!({"state":"complete", "switched":switched, "clients":clients, "exchanged":exchanged,
-        "message":if switched {"已切换所有检测到的客户端。"} else if any_success {"部分客户端未完成切换。"} else {"客户端切换失败。"}})
+        "message":if switched {"clients.allSwitched"} else if any_success {"clients.partiallySwitched"} else {"clients.noneSwitched"}})
 }
 
 /// Remember the GUI process family before graceful exit, so an orphaned app-server

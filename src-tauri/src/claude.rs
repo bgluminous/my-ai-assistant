@@ -43,11 +43,11 @@ pub struct ClaudeUsage {
 
 fn window_label(key: &str) -> String {
     match key {
-        "five_hour" => "5 小时".into(),
-        "seven_day" => "每周".into(),
-        "seven_day_opus" => "每周 Opus".into(),
-        "seven_day_sonnet" => "每周 Sonnet".into(),
-        "seven_day_oauth_apps" => "每周 OAuth 应用".into(),
+        "five_hour" => "quota.fiveHours".into(),
+        "seven_day" => "quota.weekly".into(),
+        "seven_day_opus" => "quota.weeklyOpus".into(),
+        "seven_day_sonnet" => "quota.weeklySonnet".into(),
+        "seven_day_oauth_apps" => "quota.weeklyOAuth".into(),
         other => other.replace('_', " "),
     }
 }
@@ -72,6 +72,7 @@ fn parse_window(key: &str, v: &Value) -> Option<UsageWindow> {
     };
     Some(UsageWindow {
         label: window_label(key),
+        label_name: None,
         used_percent: Some(used),
         limit_window_seconds: seconds,
         reset_at,

@@ -12,6 +12,37 @@ drag the app out of the DMG into a writable Applications folder to enable in-app
 Installed copies can update from **About**, which also shows release notes. Automatic checks can be
 turned off in **Settings**. For the portable Windows build, download the next version from Releases.
 
+## Interface language
+
+In **Settings → General → Interface language**, choose **Follow system**, **简体中文** or
+**English**. Fresh installs and upgrades use the first supported system language, falling back
+to English. The main window and tray switch immediately. A full backup includes this preference.
+
+PNG snapshots, CSV column names and readable dates use the selected language. CSV column order,
+millisecond timestamps and numeric values are stable across languages. Scripts that read headers
+by name should use the matching language. Audit details and release notes retain their original
+text.
+
+### Edit or add a language
+
+Choose **Open language folder** in **Settings → General**. The `templates` folder contains
+the bundled JSON files by app version. Copy a template into the top-level `locales` folder.
+For a wording change, keep the original filename and locale. For another language, use a
+language tag as the filename and matching `locale`, then set `name` to the name shown in Settings.
+For example, save this file as `fr.json` and restart the app to select **Français**.
+
+```json
+{
+  "locale": "fr",
+  "name": "Français",
+  "messages": { "tray.quit": "Quitter", "time.minutesAgo": "il y a {0} min" }
+}
+```
+
+Keep the message keys and numbered placeholders. You can supply just the entries you want to
+change. Missing entries use the bundled translation for that language, or English for a new
+language. Reference copies are grouped by app version.
+
 ## Account Management
 
 Open **Accounts** and select **+** to add a provider. Each row shows the plan, remaining quota, and

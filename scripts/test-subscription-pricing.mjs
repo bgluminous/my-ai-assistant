@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 import { parseHTML } from "linkedom";
 
 const sources = Object.fromEntries(await Promise.all(
@@ -84,7 +85,8 @@ async function fixture(initialAccounts = [], { charts = false } = {}) {
       getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) },
   });
   const sharedModule = new vm.SourceTextModule(sources.shared, { context });
-  await sharedModule.link(() => { throw new Error("Unexpected shared import"); });
+  const language = await i18nFixture(context);
+  await sharedModule.link(() => language);
   await sharedModule.evaluate();
   for (const name of ["topSlices", "colorFor", "compactTokens", "fmtShare"]) shared[name] = sharedModule.namespace[name];
   const seams = `
@@ -112,9 +114,9 @@ async function fixture(initialAccounts = [], { charts = false } = {}) {
       imports.set(path, namesSet);
     }
   }
-  const modules = new Map();
+  const modules = new Map([["./i18n.js", language]]);
   for (const [path, names] of imports) {
-    if (["./usage_data.js", "./account_format.js"].includes(path)) continue;
+    if (["./i18n.js", "./usage_data.js", "./account_format.js"].includes(path)) continue;
     modules.set(path, new vm.SyntheticModule([...names], function () {
       for (const name of names) this.setExport(name,
         path === "./shared.js" ? shared[name] || hooks.noop

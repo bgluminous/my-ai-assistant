@@ -367,7 +367,7 @@ fn event_api_usage(event: &EventTuple, legacy: bool) -> Option<bool> {
 
 fn require_api_usage(model: &str, billing: Option<&cursor::UsageBilling>) -> Result<bool, String> {
     billing.and_then(|b| b.api_usage(model)).ok_or_else(|| {
-        "账单缺少可识别的计费信息，未清理数据。请刷新用量后重试。".to_string()
+        "errors.billingUnknown".to_string()
     })
 }
 
@@ -375,9 +375,9 @@ fn validate_api_filter(archive: &UsageArchive) -> Result<(), String> {
     for event in &archive.events {
         if event_api_usage(event, legacy_api_filter(archive)).is_none() {
             return Err(if archive.deleted.is_some() {
-                "历史记录包含无法识别的模型或计费类别，无法清理，原数据保持不变。".into()
+                "errors.billingCategoryUnknown".into()
             } else {
-                "账单缺少可识别的计费信息，未清理数据。请刷新用量后重试。".into()
+                "errors.billingUnknown".into()
             });
         }
     }
@@ -408,12 +408,12 @@ fn hydrate_billing(archive: &mut UsageArchive, rows: &[cursor::UsageEvent]) -> R
         if let Some(matches) = matches {
             let first = matches.first().and_then(|b| b.api_usage(&event.0));
             if matches.iter().any(|b| b.api_usage(&event.0) != first) {
-                return Err("历史账单存在无法唯一匹配的计费归属，未清理数据。".into());
+                return Err("errors.billingAmbiguous".into());
             }
             event.7 = matches.pop();
         }
         if event.7.is_none() {
-            return Err("部分历史账单无法从 Cursor 补齐计费信息，未清理数据。可先导出账单，再清除本地数据并重新同步。".into());
+            return Err("errors.billingIncomplete".into());
         }
         require_api_usage(&event.0, event.7.as_ref())?;
     }
@@ -455,12 +455,12 @@ pub(crate) async fn prepare_api_events_removal(
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("读取本地用量数据失败：{e}")),
+        Err(e) => return Err(format!("errors.archiveRead:{e}")),
     };
     let mut archive: UsageArchive = serde_json::from_str(&text)
-        .map_err(|e| format!("解析本地用量数据失败：{e}"))?;
+        .map_err(|e| format!("errors.archiveParse:{e}"))?;
     if archive.version < MIN_EVENT_ARCHIVE_VERSION {
-        return Err("本地用量数据格式过旧，请先刷新用量再开启此开关。".into());
+        return Err("errors.archiveTooOld".into());
     }
     archive.account_id = account_id.to_string();
     prepare_api_filter(&mut archive, &http::normalize_cursor_token(token), true).await?;
@@ -573,7 +573,7 @@ fn deleted_record(archive: &UsageArchive) -> Option<DeletedUsageRecord> {
     let stamps = || recorded_events(archive, meta.ignore_api_models).filter_map(|e| e.6);
     let api_removal_error = archive.events.iter()
         .any(|event| event_api_usage(event, true).is_none())
-        .then(|| "历史记录包含无法识别的模型或计费类别，暂时无法移除 API 历史记录。".to_string());
+        .then(|| "errors.apiRemovalUnavailable".to_string());
     Some(DeletedUsageRecord {
         account_id: archive.account_id.clone(),
         identity: archive.identity.clone(),
@@ -1128,7 +1128,7 @@ pub fn export_deleted() -> Result<Vec<Value>, String> {
         .map(|mut a| {
             if a.deleted.as_ref().is_some_and(|meta| meta.ignore_api_models) {
                 // 无凭据可补齐的旧库不能静默删除事件，也不能作为已过滤数据导出。
-                prune_api_events(&mut a).map_err(|e| format!("已删除账户的统计数据需要补齐计费信息；重新添加该账户并刷新后再导出：{e}"))?;
+                prune_api_events(&mut a).map_err(|e| format!("errors.archiveExportBilling:{e}"))?;
             }
             serde_json::to_value(a).map_err(|e| e.to_string())
         })
@@ -1215,11 +1215,12 @@ fn pick_save_path(
     ext: &str,
     file_name: &str,
 ) -> Option<PathBuf> {
+    let language = crate::ui_language::current();
     let mut builder = app
         .dialog()
         .file()
-        .set_title(title)
-        .add_filter(filter_name, &[ext])
+        .set_title(language.text(title))
+        .add_filter(language.text(filter_name), &[ext])
         .set_file_name(file_name);
     if let Some(win) = app.get_webview_window("main") {
         builder = builder.set_parent(&win);
@@ -1230,7 +1231,7 @@ fn pick_save_path(
 }
 
 fn pick_png_path(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
-    pick_save_path(app, "保存用量快照", "PNG 图片", "png", file_name)
+    pick_save_path(app, "dialog.saveSnapshot", "dialog.pngFile", "png", file_name)
 }
 
 /// 路径缺少期望扩展名时补上（用户在对话框里删掉了后缀的情形）。
@@ -1260,7 +1261,7 @@ pub async fn usage_events_export(
     }
     let app_for_dialog = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        pick_save_path(&app_for_dialog, "导出原始账单", "CSV 文件", "csv", &file_name)
+        pick_save_path(&app_for_dialog, "dialog.exportEvents", "dialog.csvFile", "csv", &file_name)
     })
     .await
     .map_err(|e| e.to_string())?;

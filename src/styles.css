@@ -792,7 +792,7 @@ tbody tr:hover { background: var(--surface-2); }
 .accounts-table .col-state { width: 100px; }
 .accounts-table .col-plan { width: 128px; }
 .accounts-table .col-ondemand { width: 118px; }
-.accounts-table .col-time { width: 90px; }
+.accounts-table .col-time { width: 112px; }
 .accounts-table .col-actions { width: 152px; }
 .accounts-table tbody td { padding-top: 8px; padding-bottom: 8px; }
 /* 超额（Cursor）/ Credits（Codex）列：主行为金额或余额，次行小字为上限或点数 */

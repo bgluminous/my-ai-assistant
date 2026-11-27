@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
+import { i18nFixture } from "./i18n-fixture.mjs";
 import { parseHTML } from "linkedom";
 
 const orderSource = await readFile(new URL("../src/account_order.js", import.meta.url), "utf8");
@@ -61,7 +62,7 @@ async function fixture(source, { stored, invoke = async () => {}, mocks = {}, ev
     clearTimeout: id => { timers.delete(id); deadlines.delete(id); } });
   const calls = [];
   window.__TAURI__ = { event: events, core: { invoke: async (cmd, args) => { calls.push({ cmd, args }); return invoke(cmd, args); } } };
-  const modules = new Map();
+  const modules = new Map([["./i18n.js", await i18nFixture(context)]]);
   for (const name of ["shared", "modal", "codex_auth_editor", "codex_auth_add", "account_format", "account_order", "account_refresh", "client_dialog", "linked_client_ui", "opencode_ui", ...realModules]) {
     modules.set(`./${name}.js`, new vm.SourceTextModule(
       await readFile(new URL(`../src/${name}.js`, import.meta.url), "utf8"), { context }));

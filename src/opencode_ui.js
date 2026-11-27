@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 import { el, invoke, resetError, copyText } from "./shared.js";
 import { dialog } from "./client_dialog.js";
 import { switchLocalClients } from "./linked_client_ui.js";
@@ -7,7 +8,7 @@ let dialogSequence = 0;
 async function authorize({ title, begin, poll, cancel, onComplete }) {
   const view = dialog(title);
   let attempt = null, timer, stopped = false, cancelConfirmed = false;
-  view.setStatus("", "正在准备授权…");
+  view.setStatus("", translate("opencodeUi.preparingAuthorization"));
   view.busy(true);
   view.onCancel(async () => {
     if (cancelConfirmed) return;
@@ -21,7 +22,7 @@ async function authorize({ title, begin, poll, cancel, onComplete }) {
   async function complete(result) {
     stopped = true; cancelConfirmed = true;
     view.busy(true);
-    view.setStatus("ok", "已完成。");
+    view.setStatus("ok", translate("opencodeUi.done"));
     view.busy(false); view.close();
     if (onComplete) await onComplete(result);
   }
@@ -48,15 +49,15 @@ async function authorize({ title, begin, poll, cancel, onComplete }) {
     }
     if (attempt.state === "complete") { await complete(attempt); return; }
     const message = document.createElement("p");
-    message.textContent = attempt.instructions || ("在浏览器中完成授权，验证码：" + (attempt.code || ""));
+    message.textContent = attempt.instructions || (translate("opencodeUi.completeAuthorizationInYourBrowserVerificationCode") + (attempt.code || ""));
     const url = document.createElement("input");
     url.type = "text";
-    url.readOnly = true; url.value = attempt.url || ""; url.setAttribute("aria-label", "授权地址");
+    url.readOnly = true; url.value = attempt.url || ""; url.setAttribute("aria-label", translate("linkedClientUi.authorizationUrl"));
     const copy = document.createElement("button");
-    copy.type = "button"; copy.className = "secondary"; copy.textContent = "复制授权地址";
-    copy.onclick = () => { void copyText(url.value).then(() => { view.setStatus("ok", "授权地址已复制。"); }).catch(error => { view.setStatus("bad", resetError(error)); }); };
+    copy.type = "button"; copy.className = "secondary"; copy.textContent = translate("linkedClientUi.copyAuthorizationUrl");
+    copy.onclick = () => { void copyText(url.value).then(() => { view.setStatus("ok", translate("opencodeUi.authorizationUrlCopied")); }).catch(error => { view.setStatus("bad", resetError(error)); }); };
     view.content.append(message, url, copy);
-    view.setStatus("", attempt.opened ? "等待浏览器授权完成…" : "请复制授权地址到浏览器打开。");
+    view.setStatus("", attempt.opened ? translate("opencodeUi.waitingForBrowserAuthorization") : translate("opencodeUi.copyTheAuthorizationUrlIntoABrowser"));
     view.busy(false);
     timer = setTimeout(tick, Math.max(1000, Number(attempt.interval || 3) * 1000));
   } catch (error) {
@@ -67,34 +68,34 @@ async function authorize({ title, begin, poll, cancel, onComplete }) {
 /** 添加先选择来源；本机只列出身份，选定工作区后才执行导入。 */
 export function addOpenCode(onComplete) {
   dialogSequence++;
-  const view = dialog("添加 OpenCode 账户");
+  const view = dialog(translate("opencodeUi.addOpencodeAccount"));
   const noteLabel = document.createElement("label");
   const note = document.createElement("input");
   note.type = "text";
   note.id = "opencode-add-note-" + dialogSequence;
-  noteLabel.htmlFor = note.id; noteLabel.textContent = "备注";
-  note.placeholder = "备注（选填，留空使用邮箱）";
+  noteLabel.htmlFor = note.id; noteLabel.textContent = translate("account.note");
+  note.placeholder = translate("opencodeUi.noteOptionalDefaultsToEmail");
   note.spellcheck = false;
   const methods = document.createElement("div");
   methods.className = "opencode-add-methods";
   const local = document.createElement("button");
-  local.type = "button"; local.className = "secondary"; local.textContent = "从本机导入";
+  local.type = "button"; local.className = "secondary"; local.textContent = translate("opencodeUi.importLocalAccount");
   const oauth = document.createElement("button");
-  oauth.type = "button"; oauth.className = "secondary"; oauth.textContent = "新增 OAuth 授权";
+  oauth.type = "button"; oauth.className = "secondary"; oauth.textContent = translate("opencodeUi.newOauthAuthorization");
   methods.append(local, oauth);
   const localFields = document.createElement("div");
   localFields.className = "opencode-local-fields"; localFields.hidden = true;
   const workspaceLabel = document.createElement("label");
   const workspaces = document.createElement("select");
   workspaces.id = "opencode-local-workspace-" + dialogSequence;
-  workspaceLabel.htmlFor = workspaces.id; workspaceLabel.textContent = "本机账户";
+  workspaceLabel.htmlFor = workspaces.id; workspaceLabel.textContent = translate("opencodeUi.localAccount");
   const help = document.createElement("p");
   help.className = "muted small";
-  help.textContent = "导入后可在编辑中完成独立授权，查询套餐与用量。";
+  help.textContent = translate("opencodeUi.afterImportingAuthorizeInTheAccountEditor");
   localFields.append(workspaceLabel, workspaces, help);
   view.content.append(noteLabel, note, methods, localFields);
   const save = document.createElement("button");
-  save.type = "button"; save.className = "primary"; save.textContent = "导入账户"; save.hidden = true;
+  save.type = "button"; save.className = "primary"; save.textContent = translate("dialog.importAccounts"); save.hidden = true;
   view.foot.append(save);
   let loading = false;
   function busy(value) {
@@ -103,7 +104,7 @@ export function addOpenCode(onComplete) {
   }
   local.onclick = async () => {
     if (loading) return;
-    busy(true); view.setStatus("", "正在读取本机账户…");
+    busy(true); view.setStatus("", translate("opencodeUi.readingLocalAccounts"));
     try {
       const identities = await invoke("opencode_local_accounts");
       workspaces.replaceChildren();
@@ -114,7 +115,7 @@ export function addOpenCode(onComplete) {
         workspaces.append(option);
       }
       localFields.hidden = !identities.length; save.hidden = !identities.length;
-      view.setStatus("", identities.length ? "" : "未检测到本机已登录的 OpenCode V2 账户。");
+      view.setStatus("", identities.length ? "" : translate("opencodeUi.noLocalOpencodeV2LoginFound"));
     } catch (error) {
       view.setStatus("bad", resetError(error));
     } finally { busy(false); }
@@ -122,7 +123,7 @@ export function addOpenCode(onComplete) {
   save.onclick = async () => {
     if (save.disabled || view.closed) return;
     if (loading || !workspaces.value) return;
-    busy(true); view.setStatus("", "正在导入…");
+    busy(true); view.setStatus("", translate("opencodeUi.importing"));
     try {
       const result = await invoke("accounts_import_local", { kind: "opencode", workspaceId: workspaces.value, note: note.value.trim() });
       view.close();
@@ -143,7 +144,7 @@ export function addOpenCode(onComplete) {
 
 export function authorizeOpenCode(workspaceId, onComplete, note = null) {
   return authorize({
-    title: "授权 OpenCode 工作区",
+    title: translate("opencodeUi.authorizeOpencodeWorkspace"),
     begin: () => invoke("opencode_oauth_start", { workspaceId: workspaceId || null, note }),
     poll: id => invoke("opencode_oauth_poll", { id }),
     cancel: id => invoke("opencode_oauth_cancel", { id }),
@@ -157,26 +158,26 @@ export function switchOpenCode(id, onComplete) {
 
 export function editOpenCode(account, onComplete) {
   dialogSequence++;
-  const view = dialog("编辑 OpenCode 账户");
+  const view = dialog(translate("opencodeUi.editOpencodeAccount"));
   const fields = document.createElement("div");
   fields.className = "opencode-edit-fields";
   const label = document.createElement("label");
-  label.textContent = "备注";
+  label.textContent = translate("account.note");
   const note = document.createElement("input");
   note.type = "text";
   note.id = "opencode-note-" + dialogSequence; label.htmlFor = note.id;
   note.value = account.noteAuto ? "" : account.note || "";
-  note.placeholder = "备注（选填，留空使用邮箱）";
+  note.placeholder = translate("opencodeUi.noteOptionalDefaultsToEmail");
   note.spellcheck = false;
   const intervalLabel = document.createElement("label");
-  intervalLabel.textContent = "同步间隔";
+  intervalLabel.textContent = translate("settings.syncInterval");
   const interval = el("#account-refresh-interval").cloneNode(true);
   interval.id = "opencode-refresh-interval-" + dialogSequence;
   intervalLabel.htmlFor = interval.id;
   interval.value = account.refreshIntervalMinutes == null ? "" : String(account.refreshIntervalMinutes);
   const intervalHint = document.createElement("p");
   intervalHint.className = "muted small";
-  intervalHint.textContent = "独立间隔覆盖全局，刷新此账户的状态与工作区用量。";
+  intervalHint.textContent = translate("opencodeUi.overrideTheGlobalRefreshIntervalForThis");
   const intervalField = document.createElement("div");
   intervalField.className = "account-interval-field";
   intervalField.append(intervalLabel, interval, intervalHint);
@@ -188,13 +189,13 @@ export function editOpenCode(account, onComplete) {
   autoRefresh.checked = account.autoRefreshToken !== false;
   fields.append(label, note, intervalField, renewal);
   const workspace = document.createElement("p");
-  workspace.className = "muted small opencode-edit-workspace"; workspace.textContent = "工作区：" + account.token;
+  workspace.className = "muted small opencode-edit-workspace"; workspace.textContent = translate("opencodeUi.workspace") + account.token;
   const auth = document.createElement("button");
-  auth.type = "button"; auth.className = "secondary"; auth.textContent = account.opencodeAuthorized ? "重新授权" : "独立授权";
+  auth.type = "button"; auth.className = "secondary"; auth.textContent = account.opencodeAuthorized ? translate("opencodeUi.authorizeAgain") : translate("opencodeUi.separateAuthorization");
   auth.onclick = () => { void authorizeOpenCode(account.token, onComplete); };
   view.content.append(fields, workspace, auth);
   const save = document.createElement("button");
-  save.type = "button"; save.className = "primary"; save.textContent = "保存";
+  save.type = "button"; save.className = "primary"; save.textContent = translate("common.save");
   save.onclick = async () => {
     if (save.disabled || view.closed) return;
     view.busy(true); save.disabled = true; auth.disabled = true;

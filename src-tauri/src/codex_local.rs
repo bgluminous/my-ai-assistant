@@ -595,7 +595,7 @@ pub(crate) async fn switch_credentials(app: AppHandle, id: String, require_deskt
         );
         return Ok(SwitchResult {
             switched: true,
-            message: "已写入保存的凭据副本（未换票）。".into(),
+            message: "accounts.savedCredentialsWritten".into(),
             exchanged: Some(false),
         });
     }
@@ -658,7 +658,7 @@ pub(crate) async fn switch_credentials(app: AppHandle, id: String, require_deskt
 
     Ok(SwitchResult {
         switched: true,
-        message: "已换取新凭据并写入本地登录。".into(),
+        message: "accounts.renewedCredentialsWritten".into(),
         exchanged: Some(true),
     })
 }
@@ -824,10 +824,10 @@ pub async fn codex_logout_local() -> Result<LogoutResult, String> {
     }
     let _lease = crate::linked_clients::lease("codex")?;
     let Some(existing) = crate::codex_auth_store::read()? else {
-        return Ok(LogoutResult { was_logged_in:false, message:"本机 Codex 当前未登录。".into() });
+        return Ok(LogoutResult { was_logged_in:false, message:"native.codexIsAlreadySignedOutLocally".into() });
     };
     if !has_chatgpt_login(&existing) {
-        return Ok(LogoutResult { was_logged_in:false, message:"本机 Codex 当前未登录。".into() });
+        return Ok(LogoutResult { was_logged_in:false, message:"native.codexIsAlreadySignedOutLocally".into() });
     }
     let kept_api_key = match logged_out_auth_value(&existing) {
         Some(value) => { crate::codex_auth_store::write(&value)?; true },
@@ -841,9 +841,7 @@ pub async fn codex_logout_local() -> Result<LogoutResult, String> {
     );
     Ok(LogoutResult {
         was_logged_in: true,
-        message: format!(
-            "已退出本机 ChatGPT 登录{suffix}，下次启动 ChatGPT 需重新登录或从本工具切换账户。"
-        ),
+        message: if kept_api_key { "native.signedOutOfChatgptLocallyOpenaiApi" } else { "native.signedOutOfChatgptLocallySignIn" }.into(),
     })
 }
 
@@ -894,7 +892,7 @@ pub(crate) async fn force_credentials(id: String, require_desktop_closed: bool) 
     );
     Ok(SwitchResult {
         switched: true,
-        message: "已写入本地登录（未换新凭据）。".into(),
+        message: "accounts.localLoginNotRenewed".into(),
         exchanged: Some(false),
     })
 }

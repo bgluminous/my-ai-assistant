@@ -85,7 +85,7 @@ pub(crate) async fn codex_auth_pick_file(
     main_only(&window)?;
     let _operation = crate::operations::begin()?;
     tokio::task::spawn_blocking(move || -> Result<Option<AuthFile>, String> {
-        let Some(path) = super::pick_json_path(&app, "选择 auth.json", None, false) else {
+        let Some(path) = super::pick_json_path(&app, "dialog.selectAuthFile", None, false) else {
             return Ok(None);
         };
         let text = std::fs::read_to_string(&path).map_err(|_| "codex_auth_file_read".to_string())?;

@@ -226,7 +226,7 @@ pub async fn backup_export(
     );
     let app_for_dialog = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        accounts::pick_json_path(&app_for_dialog, "导出全部数据", Some(&file_name), true)
+        accounts::pick_json_path(&app_for_dialog, "dialog.exportBackup", Some(&file_name), true)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -290,7 +290,7 @@ pub async fn backup_import_inspect(app: AppHandle) -> Result<BackupInspectResult
     settings::ensure_loaded()?;
     let app_for_dialog = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        accounts::pick_json_path(&app_for_dialog, "导入全部数据", None, false)
+        accounts::pick_json_path(&app_for_dialog, "dialog.importBackup", None, false)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -409,6 +409,9 @@ fn merge_settings(s: &mut Settings, incoming: Settings, has_sync_config: bool) -
     s.pricing = incoming.pricing;
     s.pricing_remote = incoming.pricing_remote;
     s.app_update = incoming.app_update;
+    if let Some(language) = incoming.ui_language {
+        s.ui_language = Some(language);
+    }
     s.cursor_client = incoming.cursor_client;
     s.codex_client = incoming.codex_client;
     s.claude_client = incoming.claude_client;
@@ -488,6 +491,7 @@ pub async fn backup_import_apply(
             }
         })?;
     accounts::broadcast_changed(&app);
+    crate::ui_language::publish(&app);
     crate::app_update::settings_changed(&app);
     if has_sync_config { crate::codex_sync::configuration_changed(&app); }
     // 先恢复备份里的已删除统计数据（同身份在用账户已跳过），再让新增账户接管本机同身份的保留记录

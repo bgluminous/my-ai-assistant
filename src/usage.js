@@ -1,3 +1,4 @@
+import { locale, translate } from "./i18n.js";
 import {
   el,
   invoke,
@@ -213,17 +214,18 @@ function clearStatus() {
 }
 
 const PERIODS = ["day", "week", "month", "all", "custom"];
-const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+const calendarDate = (date) => date.toLocaleDateString(locale(), { year: "numeric", month: "short", day: "numeric" });
+const weekdayDate = (date) => date.toLocaleDateString(locale(), { year: "numeric", month: "short", day: "numeric", weekday: "short" });
 
 // 两个本地扫描来源（本地 Codex / Claude Code 会话日志）的全部差异点：总览行、图例、
 // 类型标签、单来源视图的表单元素与缓存 / 拉取入口，其余逻辑按此配置驱动一份实现。
 const LOCAL_SOURCES = {
   local: {
     tag: "codex",
-    label: "ChatGPT 用量分析",
-    title: "ChatGPT 用量分析",
+    get label() { return translate("usage.chatgptUsageAnalysis"); },
+    get title() { return translate("usage.chatgptUsageAnalysis"); },
     mergedName: "ChatGPT",
-    emptyText: "该范围内尚无 GPT 用量记录。",
+    get emptyText() { return translate("usage.noGptUsageRecordsInThisRange"); },
     form: "#usage-local-form",
     homeInput: "#usage-codex-home",
     scanBtn: "#usage-codex-scan",
@@ -233,10 +235,10 @@ const LOCAL_SOURCES = {
   },
   "local-claude": {
     tag: "claude",
-    label: "本地 Claude 分析",
-    title: "本地 Claude 用量分析",
-    mergedName: "本地 Claude",
-    emptyText: "未在本地 Claude Code 会话日志中找到用量。",
+    get label() { return translate("usage.localClaudeAnalysis"); },
+    get title() { return translate("usage.localClaudeUsageAnalysis"); },
+    get mergedName() { return translate("trayPanel.localClaude"); },
+    get emptyText() { return translate("usage.noUsageFoundInLocalClaudeCode"); },
     form: "#usage-claude-form",
     homeInput: "#usage-claude-home",
     scanBtn: "#usage-claude-scan",
@@ -293,22 +295,29 @@ function selectedCodexDevice() {
 }
 
 let codexDeviceListSeq = 0;
+let lastDevices = null;
+function renderDeviceChoices() {
+  if (!lastDevices) return;
+  const select = el("#usage-codex-device");
+  const previous = select.value;
+  select.replaceChildren(new Option(translate("usage.allDevices"), ""), ...lastDevices.map((d) => new Option(`${d.local ? translate("usage.thisDevice") : ""}${d.name}`, d.deviceId)));
+  if (lastDevices.some((d) => d.deviceId === previous)) select.value = previous;
+  el("#usage-codex-clear").disabled = !select.value;
+}
+
 async function refreshCodexDevices() {
   const seq = ++codexDeviceListSeq;
   el("#usage-codex-device-error").hidden = true;
   try {
     const [devices, config] = await Promise.all([invoke("codex_usage_devices"), invoke("codex_usage_sync_get")]);
     if (seq !== codexDeviceListSeq) return;
-    const select = el("#usage-codex-device");
-    const previous = select.value;
-    select.replaceChildren(new Option("全部设备", ""), ...devices.map((d) => new Option(`${d.local ? "本机 · " : ""}${d.name}`, d.deviceId)));
-    if (devices.some((d) => d.deviceId === previous)) select.value = previous;
-    el("#usage-codex-clear").disabled = !select.value;
+    lastDevices = devices;
+    renderDeviceChoices();
     el("#usage-codex-home").value = config.sourceHome;
   } catch (error) {
     if (seq === codexDeviceListSeq) {
       const node = el("#usage-codex-device-error");
-      node.textContent = `读取设备失败：${syncError(error)}`;
+      node.textContent = translate("usage.couldNotReadDevices", syncError(error));
       node.hidden = false;
     }
   }
@@ -391,38 +400,38 @@ function rangeBounds() {
   return { start: r.startDate.getTime(), end };
 }
 function fmtMd(d) {
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return d.toLocaleDateString(locale(), { month: "short", day: "numeric" });
 }
 /** 当前区间的可读名称（工具栏导航与结果区说明共用）。 */
 function rangeText() {
   const r = currentRange();
-  if (!r) return "全部";
+  if (!r) return translate("usage.allTime");
   const todayMs = dayStartMs(0);
   if (period === "day") {
     const ms = r.startDate.getTime();
-    if (ms === todayMs) return "今天";
-    if (ms === dayStartMs(-1)) return "昨天";
-    return `${localYmd(r.startDate)}（周${WEEKDAYS[r.startDate.getDay()]}）`;
+    if (ms === todayMs) return translate("usage.today");
+    if (ms === dayStartMs(-1)) return translate("trayPanel.yesterday2");
+    return weekdayDate(r.startDate);
   }
   if (period === "week") {
-    const prefix = weekStart(new Date(todayMs)).getTime() === r.startDate.getTime() ? "本周 " : "";
-    return `${prefix}${fmtMd(r.startDate)} ～ ${fmtMd(r.endDate)}`;
+    const prefix = weekStart(new Date(todayMs)).getTime() === r.startDate.getTime() ? translate("usage.thisWeek") : "";
+    return `${prefix}${fmtMd(r.startDate)} – ${fmtMd(r.endDate)}`;
   }
   if (period === "month") {
     const now = new Date(todayMs);
     const current = now.getFullYear() === r.startDate.getFullYear() && now.getMonth() === r.startDate.getMonth();
-    return `${current ? "本月 " : ""}${r.startDate.getFullYear()} 年 ${r.startDate.getMonth() + 1} 月`;
+    return (current ? translate("usage.thisMonth") : "") + r.startDate.toLocaleDateString(locale(), { year: "numeric", month: "long" });
   }
   const same = r.startDate.getTime() === r.endDate.getTime();
   return same
-    ? `${localYmd(r.startDate)}（周${WEEKDAYS[r.startDate.getDay()]}）`
-    : `${localYmd(r.startDate)} ～ ${localYmd(r.endDate)}（${rangeDays()} 天）`;
+    ? weekdayDate(r.startDate)
+    : translate("usage.days", calendarDate(r.startDate), calendarDate(r.endDate), rangeDays());
 }
 /** 按小时柱图的说明尾巴（结果区 meta 文案）。 */
 function hourlyTail() {
   const days = rangeDays();
-  const scope = days === 1 ? `该日（${focusYmd()}）` : "区间内两天";
-  return `柱图为${scope} 0–24 时分布${rangeIncludesToday() ? "（当前小时高亮）" : ""}`;
+  const scope = days === 1 ? translate("usage.theSelectedDay", focusYmd()) : translate("usage.bothDaysInThisRange");
+  return translate("usage.hourlyDistributionFor00002400", scope, rangeIncludesToday() ? translate("usage.currentHourHighlighted") : "");
 }
 
 /**
@@ -434,7 +443,7 @@ function usageIdentity(account) {
   const status = account.status || {};
   const email = String(status.email || "").trim();
   const primary = String(account.note || "").trim() || email
-    || String(status.workspaceName || status.name || "").trim() || "未命名账户";
+    || String(status.workspaceName || status.name || "").trim() || translate("accounts.unnamedAccount");
   return { primary, email: email && email !== primary ? email : "" };
 }
 
@@ -476,8 +485,8 @@ function markUpdated(at) {
   renderedFor = selectionKey();
   renderedAt = Number.isFinite(at) && at > 0 ? at : Date.now();
   const stale = Date.now() - renderedAt >= effectiveTtlMs();
-  const time = new Date(renderedAt).toLocaleTimeString("zh-CN", { hour12: false });
-  el("#usage-updated").textContent = `数据更新于 ${time}${stale ? "（缓存）" : ""}`;
+  const time = new Date(renderedAt).toLocaleTimeString(locale(), { hour12: false });
+  el("#usage-updated").textContent = translate("usage.dataUpdated2", time, stale ? translate("accountFormat.cached") : "");
 }
 
 /** 结果缓存有效期：开启定时刷新后与刷新间隔保持一致。 */
@@ -513,7 +522,7 @@ function syncUsageInterval(minutes) {
 /* ---------- 结果区渲染（卡片 / 图表 / 明细表） ---------- */
 
 function tokenCostCell(tokens, usd, priced) {
-  const count = fmtTokens(tokens);
+  const count = escapeHtml(fmtTokens(tokens));
   const full = fmtInt(tokens);
   if (!priced || !(tokens > 0)) return `<td class="num" title="${full}">${count}</td>`;
   return `<td class="num" title="${full}">${count}<span class="cell-cost">${fmtUsd(usd)}</span></td>`;
@@ -522,18 +531,18 @@ function tokenCostCell(tokens, usd, priced) {
 function renderBreakdown(agg) {
   const box = el("#usage-breakdown");
   const items = [
-    ["输入", agg.totalInputUsd],
-    ["缓存读", agg.totalCacheReadUsd],
-    ["缓存写", agg.totalCacheWriteUsd],
-    ["输出", agg.totalOutputUsd],
+    [translate("usage.input"), agg.totalInputUsd],
+    [translate("usage.cacheRead"), agg.totalCacheReadUsd],
+    [translate("usage.cacheWrite"), agg.totalCacheWriteUsd],
+    [translate("usage.output"), agg.totalOutputUsd],
   ];
   box.hidden = false;
   box.innerHTML =
-    `<span class="cost-breakdown-label">等价费用构成</span>` +
+    `<span class="cost-breakdown-label">${escapeHtml(translate("snapshot.equivalentCostBreakdown"))}</span>` +
     items
       .map(
         ([label, usd]) =>
-          `<span class="cost-chip"><span class="cost-chip-label">${label}</span> ${fmtUsd(usd || 0)}</span>`
+          `<span class="cost-chip"><span class="cost-chip-label">${escapeHtml(label)}</span> ${fmtUsd(usd || 0)}</span>`
       )
       .join("");
 }
@@ -552,7 +561,7 @@ function renderAggregate(agg, { metaText, plan, dailySources }) {
   const sources =
     dailySources != null
       ? dailySources
-      : [{ label: "用量", totalTokens: agg.totalTokens, daily: agg.daily || [], hourly: agg.hourly || [] }];
+      : [{ label: translate("usage.usage"), totalTokens: agg.totalTokens, daily: agg.daily || [], hourly: agg.hourly || [] }];
   lastAggRender = { agg, opts: { metaText, plan, dailySources: sources } };
   el("#usage-skeleton").hidden = true;
   el("#usage-results").hidden = false;
@@ -563,13 +572,13 @@ function renderAggregate(agg, { metaText, plan, dailySources }) {
     const ratio = plan.monthlyUsd > 0 ? plan.equivalentUsd / plan.monthlyUsd : null;
     el("#sum-plan").textContent = plan.monthlyUsd != null
       ? `$${plan.monthlyUsd} · ${ratio != null ? `${ratio.toFixed(1)}×` : "—"}` : "—";
-    el("#sum-plan").title = ratio != null ? `所选范围等价 API 费用为套餐月费的 ${ratio.toFixed(2)} 倍` : "";
+    el("#sum-plan").title = ratio != null ? translate("usage.equivalentApiCostInThisRangeIs", ratio.toFixed(2)) : "";
   } else {
     planCard.hidden = true;
   }
   el("#sum-tokens").textContent = fmtTokens(agg.totalTokens);
   el("#sum-tokens").title = fmtInt(agg.totalTokens);
-  el("#sum-unpriced").textContent = `${agg.unpricedModels} 个 / ${fmtTokens(agg.unpricedTokens)} tok`;
+  el("#sum-unpriced").textContent = translate("usage.tokens", agg.unpricedModels, fmtTokens(agg.unpricedTokens));
   el("#usage-meta").textContent = metaText || "";
 
   const body = el("#usage-body");
@@ -577,8 +586,8 @@ function renderAggregate(agg, { metaText, plan, dailySources }) {
   for (const m of agg.models) {
     const tr = document.createElement("tr");
     const priceTag = m.priced
-      ? `<span class="tag">${m.pricedAs}</span>`
-      : `<span class="tag unpriced">未定价</span>`;
+      ? `<span class="tag">${escapeHtml(m.pricedAs)}</span>`
+      : `<span class="tag unpriced">${escapeHtml(translate("rawEvents.unpriced"))}</span>`;
     tr.innerHTML = `
       <td>${escapeHtml(m.model)} ${priceTag}</td>
       ${tokenCostCell(m.inputTokens, m.inputUsd, m.priced)}
@@ -633,7 +642,7 @@ function dailyAxisLabels(sources) {
 function titleDate(ymd) {
   const p = String(ymd).split("-");
   if (p.length !== 3) return ymd;
-  return `${p[0]}年${Number(p[1])}月${Number(p[2])}日`;
+  return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])).toLocaleDateString(locale(), { year: "numeric", month: "short", day: "numeric" });
 }
 
 function updateDailyHover(chart, hit) {
@@ -705,7 +714,7 @@ function collectDailySources() {
       const r = src.result;
       if (!r || !r.agg) continue;
       sources.push({
-        label: src.kind === "cursor" ? accountLabel(src.account) : `${deletedLabel(src.record)}（已删除）`,
+        label: src.kind === "cursor" ? accountLabel(src.account) : translate("trayPanel.deleted", deletedLabel(src.record)),
         totalTokens: r.agg.totalTokens,
         daily: r.agg.daily || [],
         hourly: r.agg.hourly || [],
@@ -732,7 +741,7 @@ function renderDailyChart(sources) {
   // 其余区间按日渲染（同样从左到右由旧到新）；两种模式共用同一图表实例，切换时原地更新。
   const hourlyMode = isHourlyMode();
   const dayLabel = rangeText();
-  el("#chart-daily-title").textContent = hourlyMode ? `按小时 Token（${dayLabel}）` : "按日 Token";
+  el("#chart-daily-title").textContent = hourlyMode ? translate("usage.hourlyTokens", dayLabel) : translate("usage.dailyTokens");
   // 小时模式的槽位：{ ymd, hour }，跨两天时标签带日期前缀
   let slots = null;
   let labels;
@@ -849,7 +858,7 @@ function renderDailyChart(sources) {
                   ? ctx.chart.$dailyMeta[ctx.datasetIndex][ctx.dataIndex]
                   : null;
               if (!row) return "";
-              return [`等价 ${fmtUsd(row.equivalentUsd || 0)}`];
+              return [translate("trayPanel.equivalent", fmtUsd(row.equivalentUsd || 0))];
             },
             footer(items) {
               if (!items.length) return "";
@@ -860,7 +869,7 @@ function renderDailyChart(sources) {
                 const v = ds.data[idx];
                 if (typeof v === "number") sum += v;
               }
-              return `${chart.$hourly ? "该小时合计" : "当日合计"} ${fmtTokens(sum)}`;
+              return `${chart.$hourly ? translate("usage.hourlyTotal") : translate("usage.dailyTotal")} ${fmtTokens(sum)}`;
             },
           },
         },
@@ -934,12 +943,12 @@ function renderCharts(agg, dailySources) {
   try {
     renderChartsInner(agg, dailySources);
   } catch (error) {
-    console.error("图表渲染失败，重置实例后重试：", error);
+    console.error(translate("usage.chartFailedToRenderResettingAndRetrying"), error);
     destroyUsageCharts();
     try {
       renderChartsInner(agg, dailySources);
     } catch (retryError) {
-      console.error("图表重建仍失败，本轮跳过图表：", retryError);
+      console.error(translate("usage.chartRebuildFailedSkippingChart"), retryError);
       destroyUsageCharts();
     }
   }
@@ -1089,7 +1098,7 @@ function renderChartsInner(agg, dailySources) {
     { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
   );
   const doughnutData = [sums.input, sums.cacheRead, sums.cacheWrite, sums.output];
-  const doughnutLabels = ["输入", "缓存读", "缓存写", "输出"];
+  const doughnutLabels = [translate("usage.input"), translate("usage.cacheRead"), translate("usage.cacheWrite"), translate("usage.output")];
   const doughnutColors = [colorFor(0), colorFor(2), colorFor(4), colorFor(1)];
   if (doughnutChart) {
     doughnutChart.data.datasets[0].data = doughnutData;
@@ -1163,15 +1172,15 @@ function rebuildChips() {
   }
   syncSelection();
 
-  const chips = [{ value: "all", label: "全部总览", sub: "", kind: null }];
+  const chips = [{ value: "all", label: translate("usage.allSources"), sub: "", kind: null }];
   // 账户 chip：名字为主显示，邮箱作为小字排在下一行（与主显示相同时不重复）
   for (const a of cursorAccounts) {
     const { primary, email } = usageIdentity(a);
     chips.push({ value: a.id, label: primary, sub: email, kind: a.kind });
   }
-  for (const key of LOCAL_KEYS) chips.push({ value: key, label: key === "local" ? "用量分析" : "本地用量分析", sub: "", kind: LOCAL_SOURCES[key].tag });
+  for (const key of LOCAL_KEYS) chips.push({ value: key, label: key === "local" ? translate("usage.usageAnalysis") : translate("usage.localUsageAnalysis"), sub: "", kind: LOCAL_SOURCES[key].tag });
   // 已删除账户保留的统计数据：有记录时在末尾给一个「已删除」chip，作为一个整体项参与选择
-  if (deletedRecords.length) chips.push({ value: DELETED_SELECTION, label: "已删除", sub: "", kind: "cursor" });
+  if (deletedRecords.length) chips.push({ value: DELETED_SELECTION, label: translate("usage.deleted"), sub: "", kind: "cursor" });
 
   el("#usage-sources").replaceChildren(
     ...chips.map((c) => {
@@ -1281,7 +1290,7 @@ async function refreshDeletedRecords() {
     if (seq !== deletedListSeq) return false;
     deletedRecords = Array.isArray(list) ? list : [];
   } catch (error) {
-    console.error("读取已删除账户统计数据列表失败：", error);
+    console.error(translate("trayPanel.couldNotReadRetainedStatisticsForDeleted"), error);
   }
   if (seq !== deletedListSeq) return false;
   deletedDirty = false;
@@ -1299,22 +1308,22 @@ async function refreshDeletedRecords() {
  */
 async function onDeleteUsageData(record) {
   const ok = await confirmDialog({
-    title: "删除统计数据",
-    body: `确定删除已删除账户“${deletedLabel(record)}”保留的统计数据吗？此操作无法撤销。`,
-    confirmText: "删除",
+    title: translate("audit.usageDataDelete"),
+    body: translate("usage.permanentlyDeleteRetainedUsageStatisticsFor", deletedLabel(record)),
+    confirmText: translate("accounts.delete"),
     danger: true,
   });
   if (!ok) return;
   try {
     await removeDeletedUsage(record.accountId);
   } catch (error) {
-    setStatus("bad", `删除统计数据失败：${resetError(error)}`);
+    setStatus("bad", () => translate("usage.couldNotDeleteStatistics", resetError(error)));
     return;
   }
   deletedRecords = deletedRecords.filter((r) => r.accountId !== record.accountId);
   overviewResults.delete(record.accountId);
   // 独立 key：随后重载视图时的 clearStatus 只清页面级提示，不吞掉这条结果
-  toast("ok", `已删除“${deletedLabel(record)}”保留的统计数据。`, { key: "usage-deleted" });
+  toast("ok", () => translate("usage.deletedRetainedStatisticsFor", deletedLabel(record)), { key: "usage-deleted" });
   // 最后一条记录删掉后「已删除」chip 消失，rebuildChips 会清掉该选中项并切换视图
   const before = selectionKey();
   rebuildChips();
@@ -1351,8 +1360,8 @@ async function onEditDeletedAccount(record) {
   deletedRecords = deletedRecords.map((r) => (r.accountId === updated.accountId ? updated : r));
   if (value.removeApiUsage) overviewResults.delete(record.accountId);
   const message = value.removeApiUsage
-    ? `“${deletedLabel(updated)}”已${updated.apiRemovalApproximate ? "近似清理" : "移除"} ${result.removedEvents} 条 API 历史记录，不能重新开启。`
-    : `已保存“${deletedLabel(updated)}”。`;
+    ? translate("usage.forApiHistoryEventsThisIsPermanent", deletedLabel(updated), updated.apiRemovalApproximate ? translate("usage.removedApproximately") : translate("usage.removed"), result.removedEvents)
+    : translate("usage.saved", deletedLabel(updated));
   toast("ok", message, { key: "usage-deleted" });
   if (!isMergedView() || !activeSources().includeDeleted) return;
   if (value.removeApiUsage) {
@@ -1372,25 +1381,25 @@ async function onEditDeletedAccount(record) {
  */
 async function onEditDeletedPlan(record) {
   const current = String(record.membershipType || "").trim().toLowerCase();
-  const options = [{ value: "", label: "未知（不参与月费对比）" }, ...cursorPlanChoices()];
+  const options = [{ value: "", label: translate("usage.unknownExcludedFromFeeComparisons") }, ...cursorPlanChoices()];
   // 接口曾返回过未登记的套餐值：保留为可选项，避免打开弹窗就把它换成「未知」
   if (current && !options.some((o) => o.value === current)) {
-    options.splice(1, 0, { value: current, label: `${membershipLabel(current)}（当前）` });
+    options.splice(1, 0, { value: current, label: translate("usage.current", membershipLabel(current)) });
   }
   let updated;
   const value = await selectDialog({
-    title: "修改套餐",
-    body: `为已删除账户“${deletedLabel(record)}”指定套餐档位。只影响统计页的套餐列、合计月费与倍数对比，不改动用量数据。`,
-    confirmText: "保存",
-    select: { label: "套餐", value: current, options },
+    title: translate("audit.usageDataPlan"),
+    body: translate("usage.chooseAPlanTierForDeletedAccount", deletedLabel(record)),
+    confirmText: translate("common.save"),
+    select: { label: translate("accounts.plan"), value: current, options },
     save: async value => {
       if (value !== current) updated = await setDeletedUsageMembership(record.accountId, value);
     },
   });
   if (value == null || value === current) return;
   deletedRecords = deletedRecords.map((r) => (r.accountId === updated.accountId ? updated : r));
-  const shown = updated.membershipType ? membershipLabel(updated.membershipType) : "未知";
-  toast("ok", `套餐已保存：“${deletedLabel(updated)}”现为 ${shown}。`, { key: "usage-deleted" });
+  const shown = updated.membershipType ? membershipLabel(updated.membershipType) : translate("proxy.unknown");
+  toast("ok", () => translate("usage.planSavedNowUses", deletedLabel(updated), shown), { key: "usage-deleted" });
   if (!isMergedView() || !activeSources().includeDeleted) return;
   renderOverviewTable();
   renderOverviewMerged();
@@ -1402,7 +1411,7 @@ async function onEditDeletedPlan(record) {
  */
 function openRawBill({ accountId, label, deleted, kind = "cursor" }) {
   const { start, end } = rangeBounds();
-  void openRawEvents({ accountId, label, kind, deleted, start, end, rangeText: rangeText() });
+  void openRawEvents({ accountId, label, kind, deleted, start, end, rangeText });
 }
 
 /**
@@ -1531,14 +1540,14 @@ function renderOverviewTable() {
     if (deleted) {
       const deletedTag = document.createElement("span");
       deletedTag.className = "tag deleted";
-      deletedTag.textContent = "已删除";
+      deletedTag.textContent = translate("usage.deleted");
       ident.append(deletedTag);
     }
     nameTd.append(ident);
     if (agg?.source === "opencode" && agg.coverageGaps?.length) {
       const note = document.createElement("div");
       note.className = "muted small";
-      note.textContent = "历史覆盖不完整";
+      note.textContent = translate("usage.incompleteHistory");
       nameTd.append(note);
     }
 
@@ -1572,7 +1581,7 @@ function renderOverviewTable() {
       timeTd.className = "usage-data-at";
       timeTd.dataset.at = String(at);
       timeTd.textContent = relativeFromUnixSeconds(at / 1000);
-      timeTd.title = new Date(at).toLocaleString("zh-CN", { hour12: false });
+      timeTd.title = new Date(at).toLocaleString(locale(), { hour12: false });
     } else {
       timeTd.textContent = "—";
     }
@@ -1608,16 +1617,16 @@ function renderOverviewTable() {
       let stateBad = false;
       const statePending = !!result && result.state === "pending";
       if (statePending) {
-        stateText = agg ? "更新中…" : "统计中…";
+        stateText = agg ? translate("trayPanel.updating") : translate("usage.calculating");
       } else if (result && result.state === "error") {
-        stateText = agg ? `更新失败：${result.error}` : result.error;
+        stateText = agg ? translate("usage.updateFailed", result.error) : result.error;
         stateBad = true;
       } else if (result && result.state === "ok") {
-        stateText = "完成";
+        stateText = translate("settings.done");
       }
       // 月费统一按美元 / 月展示；各时间范围均用所选范围的等价费用除以完整月费。
       const { monthlyUsd: price } = accountPlanInfo(a);
-      const planText = price != null ? `$${price}/月` : "—";
+      const planText = price != null ? translate("usage.month2", price) : "—";
       let ratioText = "—";
       if (agg && price > 0) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
       if (price != null) {
@@ -1640,8 +1649,8 @@ function renderOverviewTable() {
         actions: [
           {
             icon: "bill",
-            label: "原始账单",
-            title: "原始账单：查看该账户在当前时间范围内的逐笔用量事件",
+            label: translate("raw.usageEvents"),
+            title: translate("usage.usageEventsForThisAccountInThe"),
             onClick: () => openRawBill({ accountId: a.id, kind: a.kind, label: accountLabel(a), deleted: false }),
           },
         ],
@@ -1654,7 +1663,7 @@ function renderOverviewTable() {
       const stateBad = !!result && result.state === "error";
       const membership = record.membershipType || null;
       const price = planMonthlyUsd(membership);
-      const planText = price != null ? `$${price}/月` : "—";
+      const planText = price != null ? translate("usage.month2", price) : "—";
       let ratioText = "—";
       if (agg && price > 0) ratioText = `${(agg.totalEquivalentUsd / price).toFixed(1)}×`;
       if (price != null) {
@@ -1666,7 +1675,7 @@ function renderOverviewTable() {
         label: deletedLabel(record),
         deleted: true,
         // 读取失败时只显示短文案，完整错误放悬停提示，避免撑开 / 裁掉旁边的按钮
-        stateText: stateBad ? "读取失败" : `数据截至 ${fmtDeletedAt(record.deletedAt)}`,
+        stateText: stateBad ? translate("usage.readFailed") : translate("usage.dataAsOf", fmtDeletedAt(record.deletedAt)),
         stateTitle: stateBad ? result.error : "",
         stateBad,
         statePending: false,
@@ -1677,26 +1686,26 @@ function renderOverviewTable() {
         actions: [
           {
             icon: "bill",
-            label: "原始账单",
-            title: "原始账单：查看该账户保留数据在当前时间范围内的逐笔用量事件",
+            label: translate("raw.usageEvents"),
+            title: translate("usage.retainedUsageEventsForThisAccountIn"),
             onClick: () => openRawBill({ accountId: record.accountId, label: deletedLabel(record), deleted: true }),
           },
           {
             icon: "edit",
-            label: "编辑账户",
-            title: "编辑账户：修改备注，或永久移除该已删除账户的 API 历史记录",
+            label: translate("audit.accountUpdate"),
+            title: translate("usage.editTheNoteOrPermanentlyRemoveApi"),
             onClick: () => void onEditDeletedAccount(record),
           },
           {
             icon: "plan",
-            label: "修改套餐",
-            title: "修改套餐：为该已删除账户指定套餐档位（删除时会话已失效未记下套餐的可在此补填），用于套餐列与月费倍数对比",
+            label: translate("audit.usageDataPlan"),
+            title: translate("usage.chooseAPlanTierForMonthlyFee"),
             onClick: () => void onEditDeletedPlan(record),
           },
           {
             icon: "delete",
-            label: "删除统计数据",
-            title: "删除统计数据：彻底删除该已删除账户保留的统计数据",
+            label: translate("audit.usageDataDelete"),
+            title: translate("usage.permanentlyDeleteRetainedStatisticsForThisDeleted"),
             onClick: () => void onDeleteUsageData(record),
           },
         ],
@@ -1714,12 +1723,12 @@ function renderOverviewTable() {
       let localBad = false;
       const localPending = !!local && local.state === "pending";
       if (localPending) {
-        localState = localAgg ? "更新中…" : "统计中…";
+        localState = localAgg ? translate("trayPanel.updating") : translate("usage.calculating");
       } else if (local && local.state === "error") {
-        localState = localAgg ? `更新失败：${local.error}` : local.error;
+        localState = localAgg ? translate("usage.updateFailed", local.error) : local.error;
         localBad = true;
       } else if (local && local.state === "ok") {
-        localState = `${local.scan.sessions} 个会话`;
+        localState = translate("usage.sessions", local.scan.sessions);
       }
       sourceRow({
         kind: LOCAL_SOURCES[src.kind].tag,
@@ -1729,7 +1738,7 @@ function renderOverviewTable() {
         statePending: localPending,
         at: local ? local.at : null,
         agg: localAgg,
-        planText: price != null ? `$${price}/月` : "—",
+        planText: price != null ? translate("usage.month2", price) : "—",
         ratioText: localAgg && price > 0
           ? `${(localAgg.totalEquivalentUsd / price).toFixed(1)}×` : "—",
       });
@@ -1740,11 +1749,11 @@ function renderOverviewTable() {
     const tr = document.createElement("tr");
     tr.className = "total-row";
     const label = document.createElement("td");
-    label.textContent = "合计";
+    label.textContent = translate("snapshot.total");
     const spacer = document.createElement("td");
     const timeSpacer = document.createElement("td");
     const planTd = document.createElement("td");
-    planTd.textContent = totals.planKnown ? `$${totals.planUsd}/月` : "—";
+    planTd.textContent = totals.planKnown ? translate("usage.month2", totals.planUsd) : "—";
     // 未知套餐仅不计入分母，其用量仍包含在全部等价费用中。
     const totalRatio =
       totals.planUsd > 0 ? `${(totals.equivalent / totals.planUsd).toFixed(1)}×` : "—";
@@ -1815,18 +1824,18 @@ function renderOverviewMerged() {
   const merged = mergeAggregates(aggs);
   const sources = [];
   if (cursorCount && deletedCount) {
-    sources.push(`${cursorCount + deletedCount} 个在线账户（含 ${deletedCount} 个已删除）`);
+    sources.push(translate("usage.activeAccountsPlusDeleted", cursorCount + deletedCount, deletedCount));
   } else if (cursorCount) {
-    sources.push(`${cursorCount} 个在线账户`);
+    sources.push(translate("usage.activeAccounts", cursorCount));
   } else if (deletedCount) {
-    sources.push(`${deletedCount} 个已删除 Cursor 账户`);
+    sources.push(translate("usage.deletedCursorAccounts", deletedCount));
   }
   sources.push(...localNames);
-  const tail = `${isHourlyMode() ? `${hourlyTail()}；` : ""}倍数 = 所选范围等价费用 ÷ 已知账户套餐月费之和`;
-  const title = selection === "all" ? "全部总览" : isDeletedSelection() ? "已删除账户" : "所选来源";
+  const tail = translate("usage.ratioEquivalentCostInRangeTotalKnown", isHourlyMode() ? `${hourlyTail()}；` : "");
+  const title = selection === "all" ? translate("usage.allSources") : isDeletedSelection() ? translate("usage.deletedAccounts") : translate("usage.selectedSources");
   renderAggregate(merged, {
     plan: { monthlyUsd: planUsd, equivalentUsd: merged.totalEquivalentUsd },
-    metaText: `${title} · ${rangeText()} · ${sources.join(" + ")} 合并 · 等价费用按官方 API 价折算；${tail}。`,
+    metaText: translate("usage.combinedEquivalentCostsAtOfficialApiRates", title, rangeText(), sources.join(" + "), tail),
     dailySources: collectDailySources(),
   });
   // 合并视图的数据时间取最早的来源时间（保守口径）
@@ -2004,55 +2013,55 @@ async function loadOverview(force, seq) {
 
   if (merged) {
     const warns = [];
-    if (failed) warns.push(`${failed} 个在线账户统计失败`);
-    if (deletedFailed) warns.push(`${deletedFailed} 个已删除账户的保留数据读取失败`);
-    for (const key of localFailed) warns.push(`${LOCAL_SOURCES[key].mergedName} 扫描失败`);
-    if (warns.length) setStatus("warn", `${warns.join("；")}，明细见上表；失败来源如有上次数据则继续显示。`);
-    else if (merged.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
+    if (failed) warns.push(translate("usage.activeAccountsWithErrors", failed));
+    if (deletedFailed) warns.push(translate("usage.deletedAccountsWithUnreadableUsage", deletedFailed));
+    for (const key of localFailed) warns.push(translate("usage.scanFailed", LOCAL_SOURCES[key].mergedName));
+    if (warns.length) setStatus("warn", () => translate("usage.seeTheTableAboveCachedDataIs", warns.join("；")));
+    else if (merged.models.length === 0) setStatus("warn", () => translate("usage.noUsageRecordsInThisDateRange"));
     else if (selection === "all" && !cursorAccounts.length && !deletedShown) {
-      setStatus("", "尚未添加在线用量账户，总览目前仅含 ChatGPT / 本地 Claude 用量。");
+      setStatus("", () => translate("usage.noOnlineUsageAccountsAddedTheOverview"));
     } else clearStatus();
     return;
   }
   // 什么都没合并出来：区分「没有来源」「全部失败」与「所选范围内确实没有用量」
   const sourceCount = cursorAccounts.length + localKeys.length + (includeDeleted ? deletedRecords.length : 0);
-  if (!sourceCount) setStatus("", isDeletedSelection() ? "没有已删除账户保留的统计数据。" : "没有可统计的来源。");
+  if (!sourceCount) setStatus("", () => isDeletedSelection() ? translate("usage.noRetainedStatisticsForDeletedAccounts") : translate("usage.noSourcesToAnalyze"));
   else if (failed + deletedFailed + localFailed.length >= sourceCount) {
-    setStatus("bad", "全部来源统计失败，请检查 Token 与本地会话目录。");
-  } else setStatus("warn", "该时间范围内没有用量记录。");
+    setStatus("bad", () => translate("usage.allSourcesFailedCheckTokensAndLocal"));
+  } else setStatus("warn", () => translate("usage.noUsageRecordsInThisDateRange"));
 }
 
 function renderCursorAccount(account, agg, at) {
   account = getAccounts().find((a) => a.id === account.id) || account;
   if (account.kind === "opencode") {
-    const first = agg.coverageStart ? new Date(agg.coverageStart).toLocaleString("zh-CN") : "尚未完成首次同步";
-    const coverage = agg.coverageGaps?.length ? "；所选范围存在历史缺口" : "";
+    const first = agg.coverageStart ? new Date(agg.coverageStart).toLocaleString(locale()) : translate("usage.initialSyncIncomplete");
+    const coverage = agg.coverageGaps?.length ? translate("usage.historyHasGapsInThisRange") : "";
     const check = agg.reconciliation;
-    const reconciliation = check?.state === "matched" ? `；${check.date} UTC 的官方模型 Token 总量核对一致`
-      : check?.state === "different" ? `；${check.date} UTC 与官方汇总存在差异（汇总可能延迟）`
-      : check?.state === "unavailable" ? "；官方汇总核对暂不可用" : "";
+    const reconciliation = check?.state === "matched" ? translate("usage.officialModelTokenTotalsMatchForUtc", check.date)
+      : check?.state === "different" ? translate("usage.totalsDifferFromTheOfficialSummaryFor", check.date)
+      : check?.state === "unavailable" ? translate("usage.officialSummaryComparisonTemporarilyUnavailable") : "";
     renderAggregate(agg, {
       plan: { monthlyUsd: accountPlanInfo(account).monthlyUsd, equivalentUsd: agg.totalEquivalentUsd },
-      metaText: accountLabel(account) + " · " + rangeText() + " · 工作区总用量（含所有成员与服务账户）；归档始于 " + first
-        + coverage + reconciliation + "。首次补齐近 30 天；等价费用按官方 API 价折算。",
+      metaText: accountLabel(account) + " · " + rangeText() + translate("usage.workspaceUsageIncludesAllMembersAndService") + first
+        + coverage + reconciliation + translate("usage.theFirstSyncCoversThePast30"),
       dailySources: [{ label: accountLabel(account), totalTokens: agg.totalTokens, daily: agg.daily || [], hourly: agg.hourly || [] }],
     });
     markUpdated(at);
-    if (agg.coverageGaps?.length) setStatus("warn", "所选范围的历史覆盖不完整，仅展示已归档记录。");
-    else if (agg.models.length === 0) setStatus("warn", "该时间范围内没有已归档的官方模型调用。");
+    if (agg.coverageGaps?.length) setStatus("warn", () => translate("usage.historyIsIncompleteForThisRangeShowing"));
+    else if (agg.models.length === 0) setStatus("warn", () => translate("usage.noArchivedOfficialModelCallsInThis"));
     return;
   }
   const price = accountPlanInfo(account).monthlyUsd;
-  const tail = `${isHourlyMode() ? `${hourlyTail()}；` : ""}倍数 = 所选范围等价费用 ÷ 套餐月费`;
+  const tail = translate("usage.ratioEquivalentCostInRangeMonthlyFee", isHourlyMode() ? `${hourlyTail()}；` : "");
   renderAggregate(agg, {
     plan: { monthlyUsd: price, equivalentUsd: agg.totalEquivalentUsd },
-    metaText: `${accountLabel(account)} · ${rangeText()} · 共 ${agg.models.length} 个模型 · 等价费用按官方 API 价折算；${tail}。`,
+    metaText: translate("usage.modelsEquivalentCostsAtOfficialApiRates", accountLabel(account), rangeText(), agg.models.length, tail),
     dailySources: [
       { label: accountLabel(account), totalTokens: agg.totalTokens, daily: agg.daily || [], hourly: agg.hourly || [] },
     ],
   });
   markUpdated(at);
-  if (agg.models.length === 0) setStatus("warn", "该时间范围内没有用量记录。");
+  if (agg.models.length === 0) setStatus("warn", () => translate("usage.noUsageRecordsInThisDateRange"));
 }
 
 async function loadCursorAccount(account, force, seq) {
@@ -2068,19 +2077,19 @@ async function loadCursorAccount(account, force, seq) {
     if (seq !== loadSeq) return;
     const fallback = (error && error.usageCache) || cached;
     if (fallback && fallback.agg) renderCursorAccount(account, fallback.agg, fallback.at);
-    setStatus("bad", fallback ? `更新失败（仍显示上次数据）：${resetError(error)}` : `统计失败：${resetError(error)}`);
+    setStatus("bad", () => fallback ? translate("usage.updateFailedShowingCachedData", resetError(error)) : translate("usage.calculationFailed", resetError(error)));
   }
 }
 
 /** 单个本地来源（本地 Codex / Claude 分析）视图的结果区。 */
 function renderLocalScan(key, scan, at) {
   const src = LOCAL_SOURCES[key];
-  const rootsText = scan.roots.length ? scan.roots.join("、") : "未找到会话目录";
+  const rootsText = scan.roots.length ? scan.roots.join("、") : translate("usage.sessionFolderNotFound");
   renderAggregate(scan.aggregate, {
     plan: { monthlyUsd: localPlanMonthlyUsd(key), equivalentUsd: scan.aggregate.totalEquivalentUsd },
     metaText: key === "local"
-      ? `${src.title} · ${rangeText()} · ${el("#usage-codex-device").selectedOptions[0]?.textContent || "全部设备"} · ${scan.sessions} 个有用量会话 · 按当前价格表折算`
-      : `${src.title} · ${rangeText()} · 扫描 ${scan.filesScanned} 个文件 / ${scan.sessions} 个会话 · 目录：${rootsText}`,
+      ? translate("usage.sessionsWithUsageCostsAtCurrentRates", src.title, rangeText(), el("#usage-codex-device").selectedOptions[0]?.textContent || translate("usage.allDevices"), scan.sessions)
+      : translate("usage.scannedFilesSessionsFolder", src.title, rangeText(), scan.filesScanned, scan.sessions, rootsText),
     dailySources: [
       {
         label: src.label,
@@ -2092,7 +2101,7 @@ function renderLocalScan(key, scan, at) {
   });
   markUpdated(at);
   if (scan.aggregate.models.length === 0) {
-    setStatus("warn", key === "local" ? src.emptyText : `${src.emptyText}目录：${rootsText}`);
+    setStatus("warn", () => key === "local" ? src.emptyText : translate("usage.folder", src.emptyText, rootsText));
   }
 }
 
@@ -2113,7 +2122,7 @@ async function loadLocalScan(key, force, seq) {
     if (String(error).includes("sync_cancelled")) return;
     const fallback = (error && error.usageCache) || cached;
     if (fallback && fallback.scan) renderLocalScan(key, fallback.scan, fallback.at);
-    setStatus("bad", fallback ? `扫描失败（仍显示上次数据）：${resetError(error)}` : `扫描失败：${resetError(error)}`);
+    setStatus("bad", () => fallback ? translate("usage.scanFailedShowingCachedData", resetError(error)) : translate("settings.scanFailed", resetError(error)));
   } finally {
     btn.disabled = false;
   }
@@ -2149,8 +2158,8 @@ async function loadCurrent(force) {
   } catch (error) {
     // 统计编排本身异常（各来源的拉取失败已在内部消化）——必须可见，
     // 否则表现为状态列永远停在「统计中…」的无声冻结
-    console.error("统计流程异常：", error);
-    if (seq === loadSeq) setStatus("bad", `统计流程异常：${resetError(error)}，请点「刷新」重试。`);
+    console.error(translate("usage.usageCalculationError"), error);
+    if (seq === loadSeq) setStatus("bad", () => translate("usage.calculationFailedSelectRefreshToRetry", resetError(error)));
   } finally {
     if (seq === loadSeq) {
       loading = false;
@@ -2180,7 +2189,7 @@ function loadView(force) {
   const done = loadCurrent(!!force);
   const nothingShown = el("#usage-results").hidden;
   el("#usage-skeleton").hidden = !nothingShown;
-  el("#usage-loading-text").textContent = nothingShown ? "统计中…" : "更新中…";
+  el("#usage-loading-text").textContent = nothingShown ? translate("usage.calculating") : translate("trayPanel.updating");
   return done;
 }
 
@@ -2252,7 +2261,7 @@ function reloadCodexView() {
           const previous = overviewResults.get("local") || {};
           overviewResults.set("local", { ...previous, state: "error", error: resetError(error) });
           renderOverviewTable();
-        } else setStatus("warn", `读取 GPT 用量失败（保留已显示数据）：${resetError(error)}`);
+        } else setStatus("warn", () => translate("usage.couldNotReadGptUsageKeepingThe", resetError(error)));
       }
     } while (handled !== codexReloadRequested);
   }).finally(() => { codexReloadTask = null; });
@@ -2519,13 +2528,13 @@ function applyCustomRange() {
   const startText = el("#usage-range-start").value;
   const endText = el("#usage-range-end").value;
   if (!startText || !endText) {
-    setStatus("warn", "请选择开始与结束日期。");
+    setStatus("warn", () => translate("usage.selectAStartDateAndAnEnd"));
     return;
   }
   let start = dayStart(parseYmd(startText));
   let end = dayStart(parseYmd(endText));
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) {
-    setStatus("warn", "日期无效。");
+    setStatus("warn", () => translate("usage.invalidDate"));
     return;
   }
   if (start.getTime() > end.getTime()) [start, end] = [end, start];
@@ -2539,6 +2548,18 @@ function applyCustomRange() {
 }
 
 export function initUsage() {
+  window.addEventListener("uilanguagechange", () => {
+    rebuildChips();
+    renderDeviceChoices();
+    el("#usage-range-label").textContent = rangeText();
+    if (isMergedView() && renderedFor === selectionKey()) {
+      renderOverviewTable();
+      renderOverviewMerged();
+    } else if (lastAggRender && !el("#usage-results").hidden) {
+      rerenderFromCache();
+      if (isDeletedSelection()) renderAggregate(lastAggRender.agg, lastAggRender.opts);
+    }
+  });
   void refreshCodexDevices();
   el("#usage-codex-device").addEventListener("change", () => {
     el("#usage-codex-clear").disabled = !el("#usage-codex-device").value;
@@ -2549,13 +2570,13 @@ export function initUsage() {
     const deviceId = el("#usage-codex-device").value;
     if (!deviceId) return;
     const ok = await confirmDialog({
-      title: "清理当前 MAA 的设备用量缓存",
-      body: "将清理此设备在当前 MAA 中已同步的全部用量历史，不受页面日期范围限制。未上传记录、中心服务器、其他机器及 Codex 原日志保留。后续刷新或同步可以恢复这些历史。",
-      confirmText: "清理缓存", danger: true,
+      title: translate("usage.clearThisDeviceSUsageCacheIn"),
+      body: translate("usage.clearAllHistorySyncedForThisDevice"),
+      confirmText: translate("usage.clearCache"), danger: true,
     });
     if (!ok) return;
     try { await invoke("codex_usage_cache_clear", { deviceId }); }
-    catch (error) { setStatus("bad", syncError(error)); }
+    catch (error) { setStatus("bad", () => syncError(error)); }
   });
   window.addEventListener(CODEX_USAGE_CHANGED_EVENT, (event) => {
     if (["local", "sync"].includes(event.detail?.reason)) {
@@ -2596,13 +2617,13 @@ export function initUsage() {
     const account = currentAccount();
     if (!account || snapshotBtn.disabled) return;
     snapshotBtn.disabled = true;
-    toast("", "正在生成用量快照…", { key: "snapshot" });
+    toast("", () => translate("usage.generatingUsageSnapshot"), { key: "snapshot" });
     try {
       const result = await generateCursorSnapshot(account);
       if (result && result.cancelled) dismissToast("snapshot");
-      else toast("ok", `快照已保存：${result.path}`, { key: "snapshot" });
+      else toast("ok", () => translate("usage.snapshotSaved", result.path), { key: "snapshot" });
     } catch (error) {
-      toast("bad", `生成快照失败：${resetError(error)}`, { key: "snapshot" });
+      toast("bad", () => translate("usage.couldNotGenerateSnapshot", resetError(error)), { key: "snapshot" });
     } finally {
       snapshotBtn.disabled = false;
     }

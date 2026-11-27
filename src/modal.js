@@ -1,3 +1,4 @@
+import { translate } from "./i18n.js";
 // 所有主窗口弹窗共用关闭策略与层级；编辑窗需在 2 秒内再次按 Esc 或再次点击遮罩。
 const stack = [];
 const inertBefore = new Map();
@@ -99,7 +100,7 @@ export function createModal(root, {
   function blocked() {
     if (!saving && !isBusy()) return false;
     reset();
-    showHint("正在保存，请稍候。");
+    showHint(translate("modal.savingPleaseWait"));
     return true;
   }
   function requestClose() {
@@ -116,7 +117,7 @@ export function createModal(root, {
     }
     reset();
     armed = { source, at: Date.now() };
-    showHint(source === "escape" ? "再次按 Esc 关闭" : "再次点击关闭");
+    showHint(source === "escape" ? translate("modal.pressEscAgainToClose") : translate("modal.clickAgainToClose"));
   }
   function isBackdrop(event) {
     if (!native) return event.target === root.querySelector(".modal-backdrop");

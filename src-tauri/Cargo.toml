@@ -1,6 +1,6 @@
 [package]
 name = "my-ai-assistant"
-version = "1.14.3"
+version = "1.15.0"
 description = "Personal AI assistant: Cursor / ChatGPT usage and cost tracker"
 authors = ["BGLuminous"]
 license = "GPL-3.0-only"
@@ -14,6 +14,7 @@ crate-type = ["lib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+sys-locale = "0.3.2"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

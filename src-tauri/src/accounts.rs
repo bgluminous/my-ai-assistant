@@ -1313,14 +1313,14 @@ impl RefreshDenial {
         }
     }
 
-    /// 界面与审计用的说明。
     pub(crate) fn label(self) -> &'static str {
-        match self {
-            RefreshDenial::Expired => "Refresh Token 已过期",
-            RefreshDenial::Reused => "Refresh Token 已被使用过（已被别处轮换）",
-            RefreshDenial::Revoked => "Refresh Token 已被吊销",
-            RefreshDenial::Other => "Refresh Token 已失效",
-        }
+        let key = match self {
+            Self::Expired => "accounts.theRefreshTokenHasExpired",
+            Self::Reused => "trayPanel.theRefreshTokenWasAlreadyRotatedElsewhere",
+            Self::Revoked => "trayPanel.theRefreshTokenWasRevoked",
+            Self::Other => "accounts.theRefreshTokenIsInvalid",
+        };
+        crate::ui_language::builtin_text(key)
     }
 }
 
@@ -1580,6 +1580,7 @@ fn denied_status(reason: RefreshDenial, detail: &str) -> Value {
         "alive": false,
         "refreshError": format!("{}（{detail}）", reason.label()),
         "refreshErrorCode": reason.code(),
+        "refreshErrorDetail": detail,
     })
 }
 
@@ -2148,7 +2149,7 @@ pub(crate) fn pick_json_path(
     let mut builder = app
         .dialog()
         .file()
-        .set_title(title)
+        .set_title(crate::ui_language::current().text(title))
         .add_filter("JSON", &["json"]);
     if let Some(name) = file_name {
         builder = builder.set_file_name(name);
@@ -2245,9 +2246,9 @@ async fn export_to_file(app: AppHandle, id: Option<String>) -> Result<ExportResu
     let _operation = crate::operations::begin()?;
     settings::ensure_loaded()?;
     let (title, filename) = if id.is_some() {
-        ("导出此账户", "account.json")
+        ("dialog.exportAccount", "account.json")
     } else {
-        ("导出全部账户", "accounts.json")
+        ("dialog.exportAccounts", "accounts.json")
     };
     let dialog_app = app.clone();
     let path = tokio::task::spawn_blocking(move || {
@@ -2421,7 +2422,7 @@ pub async fn accounts_import_file(app: AppHandle) -> Result<ImportFileResult, St
     settings::ensure_loaded()?;
     let dialog_app = app.clone();
     let picked =
-        tokio::task::spawn_blocking(move || pick_json_path(&dialog_app, "导入账户", None, false))
+        tokio::task::spawn_blocking(move || pick_json_path(&dialog_app, "dialog.importAccounts", None, false))
             .await
             .map_err(|e| e.to_string())?;
     let Some(path) = picked else {

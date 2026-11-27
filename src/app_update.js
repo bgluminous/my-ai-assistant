@@ -1,6 +1,7 @@
+import { translate } from "./i18n.js";
 import { createModal, closeAllModals } from "./modal.js";
 import { el, invoke, listen, fmtDateMs, toast, copyText } from "./shared.js";
-import { updatePresentation } from "./update_status.js";
+import { updatePresentation, updateErrorText } from "./update_status.js";
 import { renderReleaseNotes } from "./release_notes.js";
 import { initUpdateHistory, updateHistoryState } from "./update_history.js";
 
@@ -52,17 +53,17 @@ function setUpdateStatus(text, kind = "") {
 }
 function renderChangelogs(view) {
   el("#app-update-new-notes").hidden = !view.latestVersion;
-  el("#app-update-notes-title").textContent = `新版本 ${view.latestVersion || ""} · 更新日志`;
-  renderReleaseNotes(el("#app-update-notes"), view.changelog?.trim() || "该版本未提供更新日志。");
-  el("#app-update-current-notes-title").textContent = `当前版本 ${view.currentVersion} · 更新日志`;
+  el("#app-update-notes-title").textContent = translate("appUpdate.versionReleaseNotes", view.latestVersion || "");
+  renderReleaseNotes(el("#app-update-notes"), view.changelog?.trim() || translate("appUpdate.noReleaseNotesWereProvidedForThis"));
+  el("#app-update-current-notes-title").textContent = translate("appUpdate.currentVersionReleaseNotes", view.currentVersion);
   const error = view.currentChangelogError;
-  const errorMessage = error?.code === "not_published" ? "当前版本暂无已发布的更新日志。" :
-    error ? `当前版本更新日志获取失败。${error.message || "请稍后重试。"}` : "";
+  const errorMessage = error?.code === "not_published" ? translate("appUpdate.noReleaseNotesHaveBeenPublishedFor") :
+    error ? translate("appUpdate.couldNotLoadCurrentReleaseNotes", updateErrorText(error) || translate("appUpdate.tryAgainLater")) : "";
   const hasNotes = view.currentChangelog != null;
   renderReleaseNotes(el("#app-update-current-notes"), hasNotes ?
-    (view.currentChangelog.trim() || "该版本未提供更新日志。") :
-    errorMessage || (view.phase === "checking" ? "正在获取当前版本的更新日志…" : "检查更新后显示当前版本的更新日志。"));
-  el("#app-update-current-notes-status").textContent = hasNotes && error ? `${errorMessage}已保留上次读取的内容。` : "";
+    (view.currentChangelog.trim() || translate("appUpdate.noReleaseNotesWereProvidedForThis")) :
+    errorMessage || (view.phase === "checking" ? translate("appUpdate.loadingCurrentReleaseNotes") : translate("updater.checkForUpdatesToViewTheCurrent")));
+  el("#app-update-current-notes-status").textContent = hasNotes && error ? translate("appUpdate.showingTheLastAvailableNotes", errorMessage) : "";
   el("#app-update-current-notes-status").hidden = !hasNotes || !error;
 }
 function render(view, forcePanel = false) {
@@ -86,23 +87,23 @@ function render(view, forcePanel = false) {
   renderProgress(view, ui);
   setUpdateStatus(ui.text, ui.failed ? "bad" : view.phase === "upToDate" ? "ok" :
     ui.busy ? "busy" : view.latestVersion ? "available" : "");
-  el("#app-update-meta").textContent = `当前版本 ${view.currentVersion}${view.checkedAtMs ? ` · 最近检查 ${fmtDateMs(view.checkedAtMs)}` : ""}`;
+  el("#app-update-meta").textContent = translate("appUpdate.currentVersion", view.currentVersion, view.checkedAtMs ? translate("appUpdate.lastChecked", fmtDateMs(view.checkedAtMs)) : "");
   renderChangelogs(view);
   el("#app-update-notes").inert = ui.paused;
   el("#app-update-current-notes").inert = ui.paused;
   updateHistoryState(view, ui.paused);
-  el("#app-update-manual").textContent = view.manualReason || "";
+  el("#app-update-manual").textContent = view.manualReason ? translate(view.manualReason) : "";
   el("#app-update-manual").hidden = !view.manualReason;
   el("#app-update-required").hidden = !view.forceUpdate;
   const canInstall = !!view.latestVersion && !!view.canInstall;
   const checkButton = el("#app-update-check");
   checkButton.disabled = ui.busy;
-  checkButton.textContent = ui.failed ? "重试" : view.phase === "checking" ? "检查中…" : "检查更新";
+  checkButton.textContent = ui.failed ? translate("appUpdate.retry") : view.phase === "checking" ? translate("appUpdate.checking") : translate("updater.checkForUpdates");
   checkButton.classList.toggle("primary", !canInstall);
   checkButton.classList.toggle("secondary", canInstall);
   el("#app-update-install").hidden = !canInstall;
   el("#app-update-install").disabled = ui.busy;
-  el("#app-update-install").textContent = `更新到 ${view.latestVersion || "新版本"}`;
+  el("#app-update-install").textContent = translate("appUpdate.updateTo", view.latestVersion || translate("appUpdate.newVersion"));
   el("#app-update-cancel").hidden = !ui.cancelable;
   el("#app-update-releases").disabled = ui.paused;
   el("#app-update-releases").title = view.releasesUrl;
@@ -111,7 +112,7 @@ function render(view, forcePanel = false) {
   el("#app-update-auto").disabled = ui.paused;
   const chip = el("#app-update-chip");
   chip.hidden = !ui.failed && !view.latestVersion && !ui.paused;
-  chip.textContent = ui.failed ? "更新失败" : ui.paused ? "正在准备更新" : `新版本 ${view.latestVersion}`;
+  chip.textContent = ui.failed ? translate("appUpdate.updateFailed") : ui.paused ? translate("appUpdate.preparingUpdate") : translate("appUpdate.version", view.latestVersion);
   chip.classList.toggle("has-update", !!view.latestVersion);
   chip.title = ui.text;
   // 不调用 show()/setFocus()：静默启动仍保持主窗口隐藏。
@@ -129,7 +130,7 @@ function render(view, forcePanel = false) {
 }
 function report(error) {
   panelKey = null;
-  const message = error?.message || "操作失败，请重试或前往 GitHub Releases。";
+  const message = updateErrorText(error) || translate("appUpdate.actionFailedTryAgainOrOpenGithub");
   setUpdateStatus(message, "bad");
 }
 async function check() {
@@ -138,7 +139,7 @@ async function check() {
 function requestInstall() {
   if (!state?.canInstall || !state.latestVersion) return;
   confirmingVersion = state.latestVersion;
-  el("#app-update-confirm-text").textContent = `下载并安装 ${confirmingVersion}，完成后将重启应用。请先保存尚未提交的编辑。`;
+  el("#app-update-confirm-text").textContent = translate("appUpdate.downloadAndInstallTheAppWillRestart", confirmingVersion);
   getInstallModal().open();
   el("#app-update-confirm-ok").focus();
 }
@@ -161,6 +162,7 @@ function openChangelogLink(event) {
 }
 
 export async function initAppUpdate() {
+  window.addEventListener("uilanguagechange", () => { if (state) render(state, true); });
   initUpdateHistory();
   for (const selector of ["#app-update-notes", "#app-update-current-notes", "#app-update-history-notes"]) {
     el(selector).addEventListener("click", openChangelogLink);
@@ -175,7 +177,7 @@ export async function initAppUpdate() {
   el("#app-update-releases").addEventListener("click", () => { void invoke("app_update_open_releases").catch(report); });
   el("#app-update-copy-link").addEventListener("click", () => {
     void copyText(state?.releasesUrl || "https://github.com/bgluminous/my-ai-assistant/releases")
-      .then(() => toast("ok", "已复制 GitHub Releases 地址。", { key: "app-update" })).catch(report);
+      .then(() => toast("ok", () => translate("appUpdate.githubReleasesUrlCopied"), { key: "app-update" })).catch(report);
   });
   el("#app-update-auto").addEventListener("change", async (event) => {
     // 复选框已被用户改动，即使快照相同也需恢复服务器确认的值。

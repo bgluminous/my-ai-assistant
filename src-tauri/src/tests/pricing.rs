@@ -384,7 +384,7 @@ fn deepseek_flash_aliases_cannot_be_saved_as_separate_prices() {
         "deepseek-v5-flash-fast", "deepseek-flash-latest",
     ] {
         let err = diff_overrides(&base, &[entry(model, &price(9.0, 9.0))]).unwrap_err();
-        assert_eq!(err, "DeepSeek Flash 各版本共用价格，请修改「deepseek-flash」条目。");
+        assert_eq!(err, "pricing_shared_flash_rate");
     }
     let overrides = diff_overrides(&base, &[entry("deepseek-flash", &price(9.0, 9.0))]).unwrap();
     assert_eq!(overrides.len(), 1);
